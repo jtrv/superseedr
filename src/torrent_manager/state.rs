@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use tracing::{event, Level};
+
 use crate::command::TorrentCommand;
 use crate::networking::BlockInfo;
 use crate::torrent_manager::ManagerEvent;
@@ -24,6 +26,7 @@ const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
+const TARGET_BYTES_IN_FLIGHT: u64 = 320 * 1024; 
 
 pub type PeerAddr = (String, u16);
 
@@ -662,7 +665,6 @@ impl TorrentState {
                     }
 
                     // UPDATED: Adaptive Pipelining
-                    const TARGET_BYTES_IN_FLIGHT: u64 = 320 * 1024; 
 
                     let current_bytes_in_flight: u64 = peer.pending_requests.iter()
                         .map(|block| block.length as u64)
@@ -687,6 +689,7 @@ impl TorrentState {
                             peer.pending_requests.insert(block);
                             let global_idx = self.block_manager.flatten_address(block);
                             self.block_manager.mark_pending(global_idx);
+
 
                            effects.push(Effect::SendToPeer {
                                 peer_id: peer_id.clone(),
@@ -985,7 +988,6 @@ impl TorrentState {
                 }
 
                 self.block_manager.commit_v1_piece(piece_index);
-                println!("Piece {} committed. BlockManager state: {:?}", piece_index, self.block_manager.block_bitfield);
 
                 let mut effects = Vec::new();
                 
@@ -1239,7 +1241,7 @@ impl TorrentState {
                     .filter(|(i, _)| self.block_manager.is_piece_complete(*i as u32))
                     .count();
 
-                if completed_pieces.len() == total_pieces {
+                if completed_count == total_pieces {
                     // Only transition to Done if we are truly complete based on the Model logic (5/5)
                     self.torrent_status = TorrentStatus::Done;
 
@@ -1467,8 +1469,30 @@ impl TorrentState {
                 self.last_known_peers.clear();
                 self.timed_out_peers.clear();
 
-                // UPDATED: Reset BlockManager
                 self.block_manager = BlockManager::new();
+                let is_torrent_present = self.torrent.is_some();
+
+                if let Some(ref t) = self.torrent {
+                     let piece_len = t.info.piece_length as u32;
+                     let total_len: u64 = if !t.info.files.is_empty() {
+                        t.info.files.iter().map(|f| f.length as u64).sum()
+                     } else {
+                        t.info.length as u64
+                     };
+                     self.block_manager.set_geometry(
+                         piece_len, 
+                         total_len, 
+                         t.info.pieces.chunks(20)
+                            .map(|chunk| {
+                                let mut h = [0; 20];
+                                h.copy_from_slice(chunk);
+                                h
+                            })
+                            .collect(),
+                         HashMap::new(), 
+                         self.torrent_validation_status
+                     );
+                }
 
                 self.number_of_successfully_connected_peers = 0;
 
@@ -1971,6 +1995,71 @@ mod tests {
         let all_blocks_set = state.block_manager.block_bitfield.iter().all(|&b| b);
         assert!(all_blocks_set, "BlockManager bitfield is not fully set (internal geometry bug likely).");
     }
+
+#[test]
+fn test_assign_work_respects_existing_blocks() {
+    // GIVEN: A torrent with one piece made up of 3 blocks.
+    let piece_len = 3 * BLOCK_SIZE; // 3 blocks total
+    let total_len = piece_len as u64;
+    let piece_count = 1;
+
+    let mut state = create_empty_state();
+    // Set up BlockManager geometry for 1 piece (3 blocks total: 0, 1, 2)
+    state.block_manager.set_geometry(piece_len, total_len, vec![[0;20]; piece_count], HashMap::new(), false);
+    state.torrent = Some(create_dummy_torrent(piece_count));
+    state.torrent_status = TorrentStatus::Standard;
+
+    // Manually mark the middle block (global index 1) as already received.
+    // Block 0: Missing, Block 1: DONE, Block 2: Missing
+    state.block_manager.block_bitfield[1] = true; 
+
+    add_peer(&mut state, "peer_A");
+    let peer = state.peers.get_mut("peer_A").unwrap();
+    peer.peer_choking = ChokeStatus::Unchoke;
+    // Peer has Piece 0
+    peer.bitfield[0] = true; 
+
+    state.block_manager.update_rarity(state.peers.values().map(|p| &p.bitfield));
+
+    // WHEN: We assign work
+    let effects = state.update(Action::AssignWork {
+        peer_id: "peer_A".to_string(),
+    });
+
+    // THEN: Expect requests for Block 0 and Block 2, but NOT Block 1.
+    // Block 0: piece 0, offset 0, len 16384
+    // Block 1: piece 0, offset 16384, len 16384 (SKIPPED)
+    // Block 2: piece 0, offset 32768, len 16384
+
+    let requested_offsets: Vec<i64> = effects.iter().filter_map(|e| {
+        if let Effect::SendToPeer { cmd, .. } = e {
+            if let TorrentCommand::RequestDownload(0, offset, 16384) = **cmd {
+                Some(offset)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }).collect();
+
+    let expected_offsets = vec![0, 32768]; // Global blocks 0 and 2
+
+    // Check that exactly the missing blocks were requested
+    assert_eq!(requested_offsets.len(), 2, "Should request exactly 2 blocks (0 and 2). Requested: {:?}", requested_offsets);
+    assert!(requested_offsets.contains(&0i64), "Should request the first block (offset 0)");
+    assert!(requested_offsets.contains(&32768i64), "Should request the third block (offset 32768)");
+    assert!(!requested_offsets.contains(&16384i64), "Should NOT request the second block (offset 16384) which is already complete");
+    
+    // Check that the correct blocks are marked as pending
+    let pending_global_indices: Vec<u32> = state.peers["peer_A"].pending_requests.iter()
+        .map(|addr| state.block_manager.flatten_address(*addr))
+        .collect();
+    
+    assert!(pending_global_indices.contains(&0), "Global block 0 should be pending");
+    assert!(!pending_global_indices.contains(&1), "Global block 1 should NOT be pending");
+    assert!(pending_global_indices.contains(&2), "Global block 2 should be pending");
+}
 }
 
 // -----------------------------------------------------------------------------

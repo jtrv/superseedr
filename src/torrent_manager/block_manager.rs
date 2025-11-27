@@ -147,15 +147,15 @@ impl BlockManager {
         // Equivalent to ceil(len / 16384) but using pure integers
         (piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE
     }
+
     pub fn get_block_range(&self, piece_idx: u32) -> (u32, u32) {
         let piece_len = self.calculate_piece_size(piece_idx);
-        // USE SAFE MATH
         let blocks_in_piece = self.blocks_in_piece(piece_len);
-        
         let piece_start_offset = piece_idx as u64 * self.piece_length as u64;
         let start_blk = (piece_start_offset / BLOCK_SIZE as u64) as u32;
-        
-        (start_blk, start_blk + blocks_in_piece)
+        let actual_start_blk = std::cmp::min(start_blk, self.total_blocks);
+        let end_blk = std::cmp::min(actual_start_blk + blocks_in_piece, self.total_blocks);
+        (actual_start_blk, end_blk)
     }
 
     fn calculate_piece_size(&self, piece_idx: u32) -> u32 {
@@ -339,5 +339,161 @@ impl BlockManager {
     // Helper to map global offset to a file's merkle root
     fn get_root_for_offset(&self, _offset: u64) -> Option<[u8; 32]> {
         None 
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLK_SIZE: u32 = BLOCK_SIZE; // 16384
+
+    // Helper to create a basic BlockManager
+    fn setup_manager(piece_len: u32, total_len: u64) -> BlockManager {
+        let piece_count = (total_len as f64 / piece_len as f64).ceil() as usize;
+        let v1_hashes = vec![[0; 20]; piece_count];
+        let mut manager = BlockManager::new();
+        manager.set_geometry(piece_len, total_len, v1_hashes, HashMap::new(), false);
+        manager
+    }
+
+    #[test]
+    fn test_geometry_and_total_blocks() {
+        // Case 1: Perfect alignment
+        let piece_len = 2 * BLK_SIZE; // 32768
+        let total_len = piece_len as u64 * 3; // 3 pieces total
+        let manager = setup_manager(piece_len, total_len);
+        
+        // Piece 0: 2 blocks (0-1), Piece 1: 2 blocks (2-3), Piece 2: 2 blocks (4-5)
+        // Total blocks: 6
+        assert_eq!(manager.piece_length, piece_len);
+        assert_eq!(manager.total_length, total_len);
+        assert_eq!(manager.total_pieces(), 3);
+        assert_eq!(manager.total_blocks, 6); // 3 * (32768 / 16384)
+
+        // Case 2: Uneven total length
+        let total_len = 100_000u64; // Requires 7 blocks (6 * 16384 + 1)
+        let manager = setup_manager(piece_len, total_len);
+        assert_eq!(manager.total_blocks, 7); 
+    }
+
+    #[test]
+    fn test_calculate_piece_size_full_and_last() {
+        let piece_len = 4 * BLK_SIZE; // 65536
+        let total_len = (piece_len as u64 * 2) + (BLK_SIZE as u64 / 2); // Two full pieces + small remainder
+        let manager = setup_manager(piece_len, total_len);
+
+        // Piece 0 (full)
+        assert_eq!(manager.calculate_piece_size(0), piece_len);
+
+        // Piece 1 (full)
+        assert_eq!(manager.calculate_piece_size(1), piece_len);
+
+        // Piece 2 (partial) - Expected size BLK_SIZE/2 (8192)
+        assert_eq!(manager.calculate_piece_size(2), BLK_SIZE / 2);
+        
+        // Piece 3 (non-existent)
+        assert_eq!(manager.calculate_piece_size(3), 0); 
+    }
+
+    #[test]
+    fn test_block_range_calculation() {
+        let piece_len = 3 * BLK_SIZE; // 49152 (3 blocks)
+        let total_len = piece_len as u64 * 2 + (BLK_SIZE as u64 / 2); // 2 full pieces + partial last
+        let manager = setup_manager(piece_len, total_len);
+
+        // Piece 0: 3 blocks (0, 1, 2)
+        assert_eq!(manager.get_block_range(0), (0, 3)); 
+
+        // Piece 1: 3 blocks (3, 4, 5)
+        assert_eq!(manager.get_block_range(1), (3, 6));
+
+        // Piece 2 (partial): 1 block (6)
+        assert_eq!(manager.get_block_range(2), (6, 7)); 
+
+        // Non-existent piece: 0 blocks
+        assert_eq!(manager.get_block_range(3), (7, 7)); 
+    }
+
+
+    #[test]
+    fn test_inflate_and_flatten_address() {
+        let piece_len = 4 * BLK_SIZE; // 65536
+        let total_len = piece_len as u64 * 2;
+        let manager = setup_manager(piece_len, total_len);
+
+        // 1. First block of the first piece (Piece 0, Block 0)
+        let global_idx_0 = 0;
+        let addr_0 = manager.inflate_address(global_idx_0);
+        assert_eq!(addr_0.piece_index, 0);
+        assert_eq!(addr_0.byte_offset, 0);
+        assert_eq!(addr_0.global_offset, 0);
+        assert_eq!(addr_0.length, BLK_SIZE);
+        assert_eq!(manager.flatten_address(addr_0), global_idx_0);
+
+        // 2. Last block of the first piece (Piece 0, Block 3)
+        let global_idx_3 = 3;
+        let addr_3 = manager.inflate_address(global_idx_3);
+        assert_eq!(addr_3.piece_index, 0);
+        assert_eq!(addr_3.byte_offset, 3 * BLK_SIZE);
+        assert_eq!(addr_3.global_offset, 3 * BLK_SIZE as u64);
+        assert_eq!(addr_3.length, BLK_SIZE);
+        assert_eq!(manager.flatten_address(addr_3), global_idx_3);
+        
+        // 3. First block of the second piece (Piece 1, Block 0)
+        let global_idx_4 = 4;
+        let addr_4 = manager.inflate_address(global_idx_4);
+        assert_eq!(addr_4.piece_index, 1);
+        assert_eq!(addr_4.byte_offset, 0);
+        assert_eq!(addr_4.global_offset, 4 * BLK_SIZE as u64);
+        assert_eq!(addr_4.length, BLK_SIZE);
+        assert_eq!(manager.flatten_address(addr_4), global_idx_4);
+    }
+
+    #[test]
+    fn test_inflate_address_final_partial_block() {
+        let piece_len = 4 * BLK_SIZE; // 65536
+        // Total length is 1 full piece + 1/2 of a block for piece 1
+        let total_len = piece_len as u64 + (BLK_SIZE as u64 / 2); 
+        let manager = setup_manager(piece_len, total_len);
+        
+        // Piece 0 blocks (0, 1, 2, 3)
+        // Piece 1 blocks (4) -> only 8192 bytes
+        let global_idx_4 = 4;
+        let addr_4 = manager.inflate_address(global_idx_4);
+        
+        assert_eq!(manager.total_blocks, 5); // 4 full blocks + 1 partial block
+        assert_eq!(addr_4.piece_index, 1);
+        assert_eq!(addr_4.byte_offset, 0);
+        assert_eq!(addr_4.global_offset, 4 * BLK_SIZE as u64);
+        assert_eq!(addr_4.length, BLK_SIZE / 2); // Half block (8192)
+        assert_eq!(manager.flatten_address(addr_4), global_idx_4);
+    }
+    
+    #[test]
+    fn test_inflate_address_from_overlay_security_guard() {
+        let piece_len = 2 * BLK_SIZE; // 32768
+        let total_len = piece_len as u64;
+        let manager = setup_manager(piece_len, total_len);
+
+        // VALID: Block 0 of Piece 0, full size
+        let valid_addr = manager.inflate_address_from_overlay(0, 0, BLK_SIZE);
+        assert!(valid_addr.is_some());
+        
+        // VALID: Last block of Piece 0, starting at BLK_SIZE, size BLK_SIZE
+        let valid_addr_2 = manager.inflate_address_from_overlay(0, BLK_SIZE, BLK_SIZE);
+        assert!(valid_addr_2.is_some());
+
+        // INVALID: Starts at the last byte of the piece, but asks for BLK_SIZE
+        let invalid_addr_1 = manager.inflate_address_from_overlay(0, piece_len - 1, BLK_SIZE);
+        assert!(invalid_addr_1.is_none());
+
+        // INVALID: Starts at BLK_SIZE, asks for BLK_SIZE + 1 (Oversize)
+        let invalid_addr_2 = manager.inflate_address_from_overlay(0, BLK_SIZE, BLK_SIZE + 1);
+        assert!(invalid_addr_2.is_none());
+        
+        // INVALID: Starts one byte past the piece length
+        let invalid_addr_3 = manager.inflate_address_from_overlay(0, piece_len, BLK_SIZE);
+        assert!(invalid_addr_3.is_none());
     }
 }
