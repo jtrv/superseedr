@@ -9,6 +9,8 @@ use crate::tracker::TrackerResponse;
 
 use crate::networking::BlockInfo;
 
+use crate::torrent_manager::block_manager::BlockAddress;
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum TorrentCommand {
     SuccessfullyConnected(String),
@@ -35,7 +37,7 @@ pub enum TorrentCommand {
     Upload(u32, u32, Vec<u8>),
 
     CancelUpload(String, u32, u32, u32),
-    Cancel(u32),
+    Cancel(u32, u32, u32),
 
     Disconnect(String),
 
@@ -46,6 +48,12 @@ pub enum TorrentCommand {
 
     AnnounceResponse(String, TrackerResponse),
     AnnounceFailed(String, String),
+
+    BlockVerified {
+        peer_id: String,
+        block_addr: BlockAddress,
+        result: Result<Vec<u8>, ()>,
+    },
 
     PieceVerified {
         piece_index: u32,

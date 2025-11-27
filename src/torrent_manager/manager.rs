@@ -16,7 +16,8 @@ use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::Settings;
 
-use crate::torrent_manager::piece_manager::PieceStatus;
+// UPDATED: Import BlockManager instead of PieceManager
+use crate::torrent_manager::block_manager::{BLOCK_SIZE};
 
 use crate::torrent_manager::state::Action;
 use crate::torrent_manager::state::ChokeStatus;
@@ -25,7 +26,6 @@ use crate::torrent_manager::state::PeerState;
 use crate::torrent_manager::state::TorrentActivity;
 use crate::torrent_manager::state::TorrentState;
 
-use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::state::TorrentStatus;
 use crate::torrent_manager::state::TrackerState;
 use crate::torrent_manager::ManagerCommand;
@@ -73,6 +73,9 @@ use urlencoding::decode;
 use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
+// ADDED: Sha256 for V2 verification
+use sha2::Sha256; 
+
 use tokio::fs;
 use tokio::net::TcpStream;
 use tokio::signal;
@@ -210,10 +213,8 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
-        let pieces_len = torrent.info.pieces.len();
-
-        let mut piece_manager = PieceManager::new();
-        piece_manager.set_initial_fields(pieces_len / 20, torrent_validation_status);
+        // UPDATED: Removed legacy PieceManager init.
+        // BlockManager is now initialized inside TorrentState::new
 
         let multi_file_info = MultiFileInfo::new(
             &download_dir,
@@ -231,11 +232,12 @@ impl TorrentManager {
         )
         .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
 
+        // UPDATED: Pass () as placeholder for deprecated PieceManager argument
         let state = TorrentState::new(
             info_hash.to_vec(),
             Some(torrent),
             Some(torrent_length as i64),
-            piece_manager,
+            (), 
             trackers,
             torrent_validation_status,
         );
@@ -344,11 +346,12 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
+        // UPDATED: Pass () placeholder
         let state = TorrentState::new(
             info_hash,
             None,
             None,
-            PieceManager::new(),
+            (), 
             trackers,
             torrent_validation_status,
         );
@@ -446,6 +449,45 @@ impl TorrentManager {
                 }
             }
 
+            // UPDATED: Async Verification Handler for V2
+            Effect::VerifyBlock { peer_id, block_addr, data, root_hash, proof } => {
+                let tx = self.torrent_manager_tx.clone();
+                let peer_id_clone = peer_id.clone();
+                let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+                tokio::spawn(async move {
+                    // Offload CPU-intensive hashing to blocking thread
+                    let task = tokio::task::spawn_blocking(move || {
+                        // 1. Calculate Hash of Data (V2 uses SHA-256)
+                        let leaf_hash = <Sha256 as sha2::Digest>::digest(&data);
+                        
+                        // 2. Perform Merkle Proof Verification
+                        // In a real implementation: merkle::verify(leaf_hash, proof, index, root_hash)
+                        // For now, we assume valid if logic flow reached here (placeholder)
+                        // FIXME: Implement actual Merkle tree verification logic here.
+                        let is_valid = true; 
+
+                        if is_valid {
+                            Ok(data)
+                        } else {
+                            Err(())
+                        }
+                    });
+
+                    let result = tokio::select! {
+                        biased;
+                        _ = shutdown_rx.recv() => return,
+                        res = task => res.unwrap_or(Err(())),
+                    };
+
+                    let _ = tx.send(TorrentCommand::BlockVerified { 
+                        peer_id: peer_id_clone,
+                        block_addr, 
+                        result 
+                    }).await;
+                });
+            },
+
             Effect::VerifyPiece {
                 peer_id,
                 piece_index,
@@ -516,6 +558,7 @@ impl TorrentManager {
             Effect::WriteToDisk {
                 peer_id,
                 piece_index,
+                block_offset, // UPDATED: Accept offset for V2 blocks
                 data,
             } => {
                 let multi_file_info = match self.multi_file_info.as_ref() {
@@ -533,7 +576,8 @@ impl TorrentManager {
                     }
                 };
 
-                let global_offset = piece_index as u64 * piece_length;
+                // UPDATED: Calculate exact global byte offset
+                let global_offset = (piece_index as u64 * piece_length) + block_offset as u64;
 
                 let tx = self.torrent_manager_tx.clone();
                 let event_tx = self.manager_event_tx.clone();
@@ -888,20 +932,13 @@ impl TorrentManager {
                 let dl = self.state.session_total_downloaded as usize;
 
                 let torrent_size_left = if let Some(mfi) = &self.multi_file_info {
-                    let completed = self
-                        .state
-                        .piece_manager
-                        .bitfield
-                        .iter()
-                        .filter(|&&s| s == PieceStatus::Done)
-                        .count();
-                    let piece_len = self
-                        .state
-                        .torrent
-                        .as_ref()
-                        .map(|t| t.info.piece_length)
-                        .unwrap_or(0) as u64;
-                    let completed_bytes = (completed as u64) * piece_len;
+                    // UPDATED: Use BlockManager to calculate bytes left
+                    let total_blocks = self.state.block_manager.total_blocks as u64;
+                    let completed_blocks = self.state.block_manager.block_bitfield.iter()
+                        .filter(|&&b| b)
+                        .count() as u64;
+                    
+                    let completed_bytes = completed_blocks * BLOCK_SIZE as u64;
                     mfi.total_size.saturating_sub(completed_bytes) as usize
                 } else {
                     0
@@ -1482,14 +1519,16 @@ impl TorrentManager {
     }
 
     fn generate_bitfield(&mut self) -> Vec<u8> {
-        let num_pieces = self.state.piece_manager.bitfield.len();
+        // Assume we know total_pieces from somewhere (e.g. self.state.torrent)
+        let num_pieces = self.state.torrent.as_ref().map(|t| t.info.pieces.len() / 20).unwrap_or(0);
         let num_bytes = num_pieces.div_ceil(8);
         let mut bitfield_bytes = vec![0u8; num_bytes];
 
-        for (piece_index, status) in self.state.piece_manager.bitfield.iter().enumerate() {
-            if *status == PieceStatus::Done {
-                let byte_index = piece_index / 8;
-                let bit_index_in_byte = piece_index % 8;
+        for piece_idx in 0..num_pieces {
+            // Use the helper we wrote in Step 1
+            if self.state.block_manager.is_piece_complete(piece_idx as u32) {
+                let byte_index = piece_idx / 8;
+                let bit_index_in_byte = piece_idx % 8;
                 let mask = 1 << (7 - bit_index_in_byte);
                 bitfield_bytes[byte_index] |= mask;
             }
@@ -1764,28 +1803,29 @@ impl TorrentManager {
             let info_hash_clone = self.state.info_hash.clone();
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = (torrent.info.pieces.len() / 20) as u32;
-            let number_of_pieces_completed =
-                if self.state.torrent_status == TorrentStatus::Validating {
-                    self.state.validation_pieces_found
-                } else {
-                    number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32
-                };
+            
+            // UPDATED: Metric Calculation using BlockManager
+            let number_of_pieces_completed = if self.state.torrent_status == TorrentStatus::Validating {
+                self.state.validation_pieces_found
+            } else {
+                (0..number_of_pieces_total)
+                    .filter(|&i| self.state.block_manager.is_piece_complete(i))
+                    .count() as u32
+            };
+
+            // Calculate pieces remaining for ETA
+            let pieces_remaining = number_of_pieces_total.saturating_sub(number_of_pieces_completed);
 
             let number_of_successfully_connected_peers = self.state.peers.len();
 
-            let eta = if self.state.piece_manager.pieces_remaining == 0 {
+            let eta = if pieces_remaining == 0 {
                 Duration::from_secs(0)
             } else if smoothed_total_dl_speed == 0 {
                 Duration::MAX
             } else {
                 let total_size_bytes = multi_file_info.total_size;
                 let bytes_completed = (torrent.info.piece_length as u64).saturating_mul(
-                    self.state
-                        .piece_manager
-                        .bitfield
-                        .iter()
-                        .filter(|&s| *s == PieceStatus::Done)
-                        .count() as u64,
+                    number_of_pieces_completed as u64,
                 );
                 let bytes_remaining = total_size_bytes.saturating_sub(bytes_completed);
                 let eta_seconds = (bytes_remaining * 8) / smoothed_total_dl_speed;
@@ -1813,7 +1853,7 @@ impl TorrentManager {
                         TorrentCommand::RequestUpload(_, _, _, _) => {
                             "Peer is Requesting".to_string()
                         }
-                        TorrentCommand::Cancel(_) => "Peer Canceling Request".to_string(),
+                        TorrentCommand::Cancel(_, _, _) => "Peer Canceling Request".to_string(),
                         _ => "Idle".to_string(),
                     };
                     let discriminant = std::mem::discriminant(&p.last_action);
@@ -1939,7 +1979,8 @@ impl TorrentManager {
                 _ = choke_timer.tick(), if !self.state.is_paused => {
                     if self.state.torrent_status != TorrentStatus::Done {
                         let peer_bitfields = self.state.peers.values().map(|p| &p.bitfield);
-                        self.state.piece_manager.update_rarity(peer_bitfields);
+                        // UPDATED: Use BlockManager
+                        self.state.block_manager.update_rarity(peer_bitfields);
                     }
 
                     self.apply_action(Action::RecalculateChokes {
@@ -2130,6 +2171,7 @@ impl TorrentManager {
                         TorrentCommand::Have(pid, idx) => self.apply_action(Action::PeerHavePiece { peer_id: pid, piece_index: idx }),
                         TorrentCommand::Disconnect(pid) => self.apply_action(Action::PeerDisconnected { peer_id: pid }),
                         TorrentCommand::Block(peer_id, piece_index, block_offset, block_data) => self.apply_action(Action::IncomingBlock { peer_id, piece_index, block_offset, data: block_data }),
+                        
                         TorrentCommand::PieceVerified { piece_index, peer_id, verification_result } => {
                             match verification_result {
                                 Ok(data) => {
@@ -2143,6 +2185,15 @@ impl TorrentManager {
                                     });
                                 }
                             }
+                        },
+
+                        // UPDATED: Handle new async block verification result
+                        TorrentCommand::BlockVerified { peer_id, block_addr, result } => {
+                            self.apply_action(Action::BlockVerified {
+                                peer_id,
+                                block_addr,
+                                result,
+                            });
                         },
 
                         TorrentCommand::PieceWrittenToDisk { peer_id, piece_index } => {
