@@ -933,7 +933,6 @@ impl TorrentManager {
 
                 let torrent_size_left = if let Some(mfi) = &self.multi_file_info {
                     // UPDATED: Use BlockManager to calculate bytes left
-                    let total_blocks = self.state.block_manager.total_blocks as u64;
                     let completed_blocks = self.state.block_manager.block_bitfield.iter()
                         .filter(|&&b| b)
                         .count() as u64;

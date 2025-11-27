@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 pub mod manager;
-pub mod piece_manager;
 pub mod block_manager;
 pub mod state;
 

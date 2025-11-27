@@ -6,7 +6,7 @@ use crate::torrent_file::Torrent;
 
 use super::protocol::{
     parse_message, writer_task, ClientExtendedId,
-    ExtendedHandshakePayload, Message, MessageSummary, MetadataMessage,
+    ExtendedHandshakePayload, Message, MetadataMessage,
 };
 
 #[cfg(feature = "pex")]
@@ -30,15 +30,12 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
-use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
 use tracing::{event, instrument, Level};
-
-const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 5;
 
 struct DisconnectGuard {
     peer_ip_port: String,
@@ -92,9 +89,6 @@ pub struct PeerSession {
     writer_rx: Receiver<Message>,
     writer_tx: Sender<Message>,
 
-    // Only limit uploads (our sending), not downloads (requests)
-    block_upload_limit_semaphore: Arc<Semaphore>,
-
     peer_extended_id_mappings: HashMap<String, u8>,
     peer_extended_handshake_payload: Option<ExtendedHandshakePayload>,
     peer_torrent_metadata_piece_count: usize,
@@ -121,7 +115,6 @@ impl PeerSession {
             peer_ip_port: params.peer_ip_port,
             writer_rx,
             writer_tx,
-            block_upload_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
             peer_extended_id_mappings: HashMap::new(),
             peer_extended_handshake_payload: None,
             peer_torrent_metadata_piece_count: 0,

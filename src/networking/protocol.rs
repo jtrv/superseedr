@@ -7,7 +7,6 @@ use crate::token_bucket::TokenBucket;
 use tokio::sync::Mutex;
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
@@ -26,8 +25,6 @@ use tracing::{event, Level};
 
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
-
-const STANDARD_BLOCK_SIZE: u32 = 16384;
 
 #[derive(Debug)]
 pub enum MessageGenerationError {
@@ -102,29 +99,6 @@ pub struct ExtendedHandshakePayload {
     pub metadata_size: Option<i64>,
 }
 
-pub struct MessageSummary<'a>(pub &'a Message);
-impl fmt::Debug for MessageSummary<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Message::Bitfield(bitfield) => {
-                write!(f, "BITFIELD(len: {})", bitfield.len())
-            }
-            Message::Piece(index, begin, data) => {
-                write!(
-                    f,
-                    "PIECE(index: {}, begin: {}, len: {})",
-                    index,
-                    begin,
-                    data.len()
-                )
-            }
-
-            Message::Handshake(_, _) => write!(f, "HANDSHAKE(...)"),
-            other => write!(f, "{:?}", other),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum Message {
     Handshake(Vec<u8>, Vec<u8>),
@@ -149,25 +123,6 @@ pub struct BlockInfo {
     pub piece_index: u32,
     pub offset: u32,
     pub length: u32,
-}
-
-pub fn calculate_blocks_for_piece(piece_index: u32, piece_size: u32) -> HashSet<BlockInfo> {
-    let mut blocks = HashSet::new();
-
-    let mut current_offset = 0;
-    while current_offset < piece_size {
-        let block_length = std::cmp::min(STANDARD_BLOCK_SIZE, piece_size - current_offset);
-
-        blocks.insert(BlockInfo {
-            piece_index,
-            offset: current_offset,
-            length: block_length,
-        });
-
-        current_offset += block_length;
-    }
-
-    blocks
 }
 
 pub async fn writer_task(
