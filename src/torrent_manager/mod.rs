@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pub mod manager;
 pub mod block_manager;
+pub mod manager;
 pub mod state;
 
 use crate::Settings;

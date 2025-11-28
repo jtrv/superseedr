@@ -17,7 +17,7 @@ use crate::torrent_manager::DiskIoOperation;
 use crate::config::Settings;
 
 // UPDATED: Import BlockManager instead of PieceManager
-use crate::torrent_manager::block_manager::{BLOCK_SIZE};
+use crate::torrent_manager::block_manager::BLOCK_SIZE;
 
 use crate::torrent_manager::state::Action;
 use crate::torrent_manager::state::ChokeStatus;
@@ -74,7 +74,7 @@ use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
 // ADDED: Sha256 for V2 verification
-use sha2::Sha256; 
+use sha2::Sha256;
 
 use tokio::fs;
 use tokio::net::TcpStream;
@@ -237,7 +237,7 @@ impl TorrentManager {
             info_hash.to_vec(),
             Some(torrent),
             Some(torrent_length as i64),
-            (), 
+            (),
             trackers,
             torrent_validation_status,
         );
@@ -351,7 +351,7 @@ impl TorrentManager {
             info_hash,
             None,
             None,
-            (), 
+            (),
             trackers,
             torrent_validation_status,
         );
@@ -450,7 +450,13 @@ impl TorrentManager {
             }
 
             // UPDATED: Async Verification Handler for V2
-            Effect::VerifyBlock { peer_id, block_addr, data, root_hash, proof } => {
+            Effect::VerifyBlock {
+                peer_id,
+                block_addr,
+                data,
+                root_hash,
+                proof,
+            } => {
                 let tx = self.torrent_manager_tx.clone();
                 let peer_id_clone = peer_id.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -460,12 +466,12 @@ impl TorrentManager {
                     let task = tokio::task::spawn_blocking(move || {
                         // 1. Calculate Hash of Data (V2 uses SHA-256)
                         let leaf_hash = <Sha256 as sha2::Digest>::digest(&data);
-                        
+
                         // 2. Perform Merkle Proof Verification
                         // In a real implementation: merkle::verify(leaf_hash, proof, index, root_hash)
                         // For now, we assume valid if logic flow reached here (placeholder)
                         // FIXME: Implement actual Merkle tree verification logic here.
-                        let is_valid = true; 
+                        let is_valid = true;
 
                         if is_valid {
                             Ok(data)
@@ -480,13 +486,15 @@ impl TorrentManager {
                         res = task => res.unwrap_or(Err(())),
                     };
 
-                    let _ = tx.send(TorrentCommand::BlockVerified { 
-                        peer_id: peer_id_clone,
-                        block_addr, 
-                        result 
-                    }).await;
+                    let _ = tx
+                        .send(TorrentCommand::BlockVerified {
+                            peer_id: peer_id_clone,
+                            block_addr,
+                            result,
+                        })
+                        .await;
                 });
-            },
+            }
 
             Effect::VerifyPiece {
                 peer_id,
@@ -933,10 +941,14 @@ impl TorrentManager {
 
                 let torrent_size_left = if let Some(mfi) = &self.multi_file_info {
                     // UPDATED: Use BlockManager to calculate bytes left
-                    let completed_blocks = self.state.block_manager.block_bitfield.iter()
+                    let completed_blocks = self
+                        .state
+                        .block_manager
+                        .block_bitfield
+                        .iter()
                         .filter(|&&b| b)
                         .count() as u64;
-                    
+
                     let completed_bytes = completed_blocks * BLOCK_SIZE as u64;
                     mfi.total_size.saturating_sub(completed_bytes) as usize
                 } else {
@@ -1519,7 +1531,12 @@ impl TorrentManager {
 
     fn generate_bitfield(&mut self) -> Vec<u8> {
         // Assume we know total_pieces from somewhere (e.g. self.state.torrent)
-        let num_pieces = self.state.torrent.as_ref().map(|t| t.info.pieces.len() / 20).unwrap_or(0);
+        let num_pieces = self
+            .state
+            .torrent
+            .as_ref()
+            .map(|t| t.info.pieces.len() / 20)
+            .unwrap_or(0);
         let num_bytes = num_pieces.div_ceil(8);
         let mut bitfield_bytes = vec![0u8; num_bytes];
 
@@ -1802,18 +1819,20 @@ impl TorrentManager {
             let info_hash_clone = self.state.info_hash.clone();
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = (torrent.info.pieces.len() / 20) as u32;
-            
+
             // UPDATED: Metric Calculation using BlockManager
-            let number_of_pieces_completed = if self.state.torrent_status == TorrentStatus::Validating {
-                self.state.validation_pieces_found
-            } else {
-                (0..number_of_pieces_total)
-                    .filter(|&i| self.state.block_manager.is_piece_complete(i))
-                    .count() as u32
-            };
+            let number_of_pieces_completed =
+                if self.state.torrent_status == TorrentStatus::Validating {
+                    self.state.validation_pieces_found
+                } else {
+                    (0..number_of_pieces_total)
+                        .filter(|&i| self.state.block_manager.is_piece_complete(i))
+                        .count() as u32
+                };
 
             // Calculate pieces remaining for ETA
-            let pieces_remaining = number_of_pieces_total.saturating_sub(number_of_pieces_completed);
+            let pieces_remaining =
+                number_of_pieces_total.saturating_sub(number_of_pieces_completed);
 
             let number_of_successfully_connected_peers = self.state.peers.len();
 
@@ -1823,9 +1842,8 @@ impl TorrentManager {
                 Duration::MAX
             } else {
                 let total_size_bytes = multi_file_info.total_size;
-                let bytes_completed = (torrent.info.piece_length as u64).saturating_mul(
-                    number_of_pieces_completed as u64,
-                );
+                let bytes_completed = (torrent.info.piece_length as u64)
+                    .saturating_mul(number_of_pieces_completed as u64);
                 let bytes_remaining = total_size_bytes.saturating_sub(bytes_completed);
                 let eta_seconds = (bytes_remaining * 8) / smoothed_total_dl_speed;
                 Duration::from_secs(eta_seconds)
@@ -2170,7 +2188,7 @@ impl TorrentManager {
                         TorrentCommand::Have(pid, idx) => self.apply_action(Action::PeerHavePiece { peer_id: pid, piece_index: idx }),
                         TorrentCommand::Disconnect(pid) => self.apply_action(Action::PeerDisconnected { peer_id: pid }),
                         TorrentCommand::Block(peer_id, piece_index, block_offset, block_data) => self.apply_action(Action::IncomingBlock { peer_id, piece_index, block_offset, data: block_data }),
-                        
+
                         TorrentCommand::PieceVerified { piece_index, peer_id, verification_result } => {
                             match verification_result {
                                 Ok(data) => {

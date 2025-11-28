@@ -3,15 +3,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-pub const BLOCK_SIZE: u32 = 16_384; 
+pub const BLOCK_SIZE: u32 = 16_384;
 pub const V2_HASH_LEN: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct LegacyAssembler {
-    pub buffer: Vec<u8>,          // Pre-allocated flat buffer
-    pub received_blocks: usize,   // Count of blocks received
-    pub total_blocks: usize,      // Total expected blocks
-    pub mask: Vec<bool>,          // Tracks which blocks are filled
+    pub buffer: Vec<u8>,        // Pre-allocated flat buffer
+    pub received_blocks: usize, // Count of blocks received
+    pub total_blocks: usize,    // Total expected blocks
+    pub mask: Vec<bool>,        // Tracks which blocks are filled
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,7 +33,10 @@ pub enum BlockResult {
 
 #[derive(Debug, PartialEq)]
 pub enum BlockDecision {
-    VerifyV2 { root_hash: [u8; 32], proof: Vec<[u8; 32]> },
+    VerifyV2 {
+        root_hash: [u8; 32],
+        proof: Vec<[u8; 32]>,
+    },
     BufferV1,
     Duplicate,
     Error,
@@ -48,8 +51,8 @@ pub struct BlockManager {
 
     // --- METADATA ---
     pub piece_hashes_v1: Vec<[u8; 20]>,
-    pub file_merkle_roots: HashMap<usize, [u8; 32]>, 
-    
+    pub file_merkle_roots: HashMap<usize, [u8; 32]>,
+
     // --- V1 COMPATIBILITY ---
     pub legacy_buffers: HashMap<u32, LegacyAssembler>,
 
@@ -65,12 +68,12 @@ impl BlockManager {
     }
 
     pub fn set_geometry(
-        &mut self, 
-        piece_length: u32, 
-        total_length: u64, 
+        &mut self,
+        piece_length: u32,
+        total_length: u64,
         v1_hashes: Vec<[u8; 20]>,
         v2_roots: HashMap<usize, [u8; 32]>,
-        validation_complete: bool
+        validation_complete: bool,
     ) {
         self.piece_length = piece_length;
         self.total_length = total_length;
@@ -91,7 +94,9 @@ impl BlockManager {
         let mut picked = Vec::with_capacity(count);
 
         for &piece_idx in rarest_pieces {
-            if picked.len() >= count { break; }
+            if picked.len() >= count {
+                break;
+            }
 
             // Skip if peer doesn't have it
             if !peer_bitfield.get(piece_idx as usize).unwrap_or(&false) {
@@ -101,9 +106,15 @@ impl BlockManager {
             let (start_blk, end_blk) = self.get_block_range(piece_idx);
 
             for global_idx in start_blk..end_blk {
-                if picked.len() >= count { break; }
+                if picked.len() >= count {
+                    break;
+                }
 
-                let already_have = self.block_bitfield.get(global_idx as usize).copied().unwrap_or(true);
+                let already_have = self
+                    .block_bitfield
+                    .get(global_idx as usize)
+                    .copied()
+                    .unwrap_or(true);
                 let is_pending = self.pending_blocks.contains(&global_idx);
 
                 if !already_have {
@@ -129,7 +140,7 @@ impl BlockManager {
         let global_idx = self.flatten_address(addr);
 
         if global_idx as usize >= self.block_bitfield.len() {
-             return BlockResult::Duplicate; 
+            return BlockResult::Duplicate;
         }
 
         if self.block_bitfield[global_idx as usize] {
@@ -168,7 +179,7 @@ impl BlockManager {
         let global_offset = global_idx as u64 * BLOCK_SIZE as u64;
         let piece_index = (global_offset / self.piece_length as u64) as u32;
         let byte_offset_in_piece = (global_offset % self.piece_length as u64) as u32;
-        
+
         let remaining_len = self.total_length.saturating_sub(global_offset);
         let length = std::cmp::min(BLOCK_SIZE as u64, remaining_len) as u32;
 
@@ -189,7 +200,12 @@ impl BlockManager {
     pub fn is_piece_complete(&self, piece_index: u32) -> bool {
         let (start, end) = self.get_block_range(piece_index);
         for i in start..end {
-            if !self.block_bitfield.get(i as usize).copied().unwrap_or(false) {
+            if !self
+                .block_bitfield
+                .get(i as usize)
+                .copied()
+                .unwrap_or(false)
+            {
                 return false;
             }
         }
@@ -197,24 +213,29 @@ impl BlockManager {
     }
 
     /// V1 HELPER: Buffer a block for legacy assembly.
-    pub fn handle_v1_block_buffering(&mut self, addr: BlockAddress, data: &[u8]) -> Option<Vec<u8>> {
+    pub fn handle_v1_block_buffering(
+        &mut self,
+        addr: BlockAddress,
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
         let piece_len = self.calculate_piece_size(addr.piece_index);
         let num_blocks = self.blocks_in_piece(piece_len);
 
         // Get or Create Assembler
-        let assembler = self.legacy_buffers.entry(addr.piece_index).or_insert_with(|| {
-             LegacyAssembler {
-                 buffer: vec![0u8; piece_len as usize],
-                 received_blocks: 0,
-                 total_blocks: num_blocks as usize,
-                 mask: vec![false; num_blocks as usize],
-             }
-        });
+        let assembler = self
+            .legacy_buffers
+            .entry(addr.piece_index)
+            .or_insert_with(|| LegacyAssembler {
+                buffer: vec![0u8; piece_len as usize],
+                received_blocks: 0,
+                total_blocks: num_blocks as usize,
+                mask: vec![false; num_blocks as usize],
+            });
 
         // Write Data (Flat Copy)
         let offset = addr.byte_offset as usize;
         let end = offset + data.len();
-        
+
         // Safety Check
         if end <= assembler.buffer.len() && !assembler.mask[addr.block_index as usize] {
             assembler.buffer[offset..end].copy_from_slice(data);
@@ -224,20 +245,21 @@ impl BlockManager {
 
         // Check Completion
         if assembler.received_blocks == assembler.total_blocks {
-             if let Some(finished) = self.legacy_buffers.remove(&addr.piece_index) {
-                 return Some(finished.buffer);
-             }
+            if let Some(finished) = self.legacy_buffers.remove(&addr.piece_index) {
+                return Some(finished.buffer);
+            }
         }
         None
     }
 
     pub fn inflate_address_from_overlay(
-        &self, 
-        piece_index: u32, 
-        byte_offset: u32, 
-        length: u32
-    ) -> Option<BlockAddress> { // <--- Returns Option now
-        
+        &self,
+        piece_index: u32,
+        byte_offset: u32,
+        length: u32,
+    ) -> Option<BlockAddress> {
+        // <--- Returns Option now
+
         let piece_len = self.calculate_piece_size(piece_index);
 
         // SECURITY GUARD: Ensure the block fits INSIDE the piece boundaries.
@@ -248,7 +270,7 @@ impl BlockManager {
 
         let piece_start = piece_index as u64 * self.piece_length as u64;
         let global_offset = piece_start + byte_offset as u64;
-        
+
         Some(BlockAddress {
             piece_index,
             block_index: byte_offset / BLOCK_SIZE,
@@ -273,10 +295,10 @@ impl BlockManager {
         }
 
         if let Some(root) = self.get_root_for_offset(addr.global_offset) {
-             return BlockDecision::VerifyV2 { 
-                 root_hash: root, 
-                 proof: Vec::new() 
-             };
+            return BlockDecision::VerifyV2 {
+                root_hash: root,
+                proof: Vec::new(),
+            };
         }
 
         BlockDecision::BufferV1
@@ -338,7 +360,7 @@ impl BlockManager {
 
     // Helper to map global offset to a file's merkle root
     fn get_root_for_offset(&self, _offset: u64) -> Option<[u8; 32]> {
-        None 
+        None
     }
 }
 
@@ -363,7 +385,7 @@ mod tests {
         let piece_len = 2 * BLK_SIZE; // 32768
         let total_len = piece_len as u64 * 3; // 3 pieces total
         let manager = setup_manager(piece_len, total_len);
-        
+
         // Piece 0: 2 blocks (0-1), Piece 1: 2 blocks (2-3), Piece 2: 2 blocks (4-5)
         // Total blocks: 6
         assert_eq!(manager.piece_length, piece_len);
@@ -374,7 +396,7 @@ mod tests {
         // Case 2: Uneven total length
         let total_len = 100_000u64; // Requires 7 blocks (6 * 16384 + 1)
         let manager = setup_manager(piece_len, total_len);
-        assert_eq!(manager.total_blocks, 7); 
+        assert_eq!(manager.total_blocks, 7);
     }
 
     #[test]
@@ -391,9 +413,9 @@ mod tests {
 
         // Piece 2 (partial) - Expected size BLK_SIZE/2 (8192)
         assert_eq!(manager.calculate_piece_size(2), BLK_SIZE / 2);
-        
+
         // Piece 3 (non-existent)
-        assert_eq!(manager.calculate_piece_size(3), 0); 
+        assert_eq!(manager.calculate_piece_size(3), 0);
     }
 
     #[test]
@@ -403,18 +425,17 @@ mod tests {
         let manager = setup_manager(piece_len, total_len);
 
         // Piece 0: 3 blocks (0, 1, 2)
-        assert_eq!(manager.get_block_range(0), (0, 3)); 
+        assert_eq!(manager.get_block_range(0), (0, 3));
 
         // Piece 1: 3 blocks (3, 4, 5)
         assert_eq!(manager.get_block_range(1), (3, 6));
 
         // Piece 2 (partial): 1 block (6)
-        assert_eq!(manager.get_block_range(2), (6, 7)); 
+        assert_eq!(manager.get_block_range(2), (6, 7));
 
         // Non-existent piece: 0 blocks
-        assert_eq!(manager.get_block_range(3), (7, 7)); 
+        assert_eq!(manager.get_block_range(3), (7, 7));
     }
-
 
     #[test]
     fn test_inflate_and_flatten_address() {
@@ -439,7 +460,7 @@ mod tests {
         assert_eq!(addr_3.global_offset, 3 * BLK_SIZE as u64);
         assert_eq!(addr_3.length, BLK_SIZE);
         assert_eq!(manager.flatten_address(addr_3), global_idx_3);
-        
+
         // 3. First block of the second piece (Piece 1, Block 0)
         let global_idx_4 = 4;
         let addr_4 = manager.inflate_address(global_idx_4);
@@ -453,15 +474,15 @@ mod tests {
     #[test]
     fn test_inflate_address_final_partial_block() {
         let piece_len = 4 * BLK_SIZE; // 65536
-        // Total length is 1 full piece + 1/2 of a block for piece 1
-        let total_len = piece_len as u64 + (BLK_SIZE as u64 / 2); 
+                                      // Total length is 1 full piece + 1/2 of a block for piece 1
+        let total_len = piece_len as u64 + (BLK_SIZE as u64 / 2);
         let manager = setup_manager(piece_len, total_len);
-        
+
         // Piece 0 blocks (0, 1, 2, 3)
         // Piece 1 blocks (4) -> only 8192 bytes
         let global_idx_4 = 4;
         let addr_4 = manager.inflate_address(global_idx_4);
-        
+
         assert_eq!(manager.total_blocks, 5); // 4 full blocks + 1 partial block
         assert_eq!(addr_4.piece_index, 1);
         assert_eq!(addr_4.byte_offset, 0);
@@ -469,7 +490,7 @@ mod tests {
         assert_eq!(addr_4.length, BLK_SIZE / 2); // Half block (8192)
         assert_eq!(manager.flatten_address(addr_4), global_idx_4);
     }
-    
+
     #[test]
     fn test_inflate_address_from_overlay_security_guard() {
         let piece_len = 2 * BLK_SIZE; // 32768
@@ -479,7 +500,7 @@ mod tests {
         // VALID: Block 0 of Piece 0, full size
         let valid_addr = manager.inflate_address_from_overlay(0, 0, BLK_SIZE);
         assert!(valid_addr.is_some());
-        
+
         // VALID: Last block of Piece 0, starting at BLK_SIZE, size BLK_SIZE
         let valid_addr_2 = manager.inflate_address_from_overlay(0, BLK_SIZE, BLK_SIZE);
         assert!(valid_addr_2.is_some());
@@ -491,7 +512,7 @@ mod tests {
         // INVALID: Starts at BLK_SIZE, asks for BLK_SIZE + 1 (Oversize)
         let invalid_addr_2 = manager.inflate_address_from_overlay(0, BLK_SIZE, BLK_SIZE + 1);
         assert!(invalid_addr_2.is_none());
-        
+
         // INVALID: Starts one byte past the piece length
         let invalid_addr_3 = manager.inflate_address_from_overlay(0, piece_len, BLK_SIZE);
         assert!(invalid_addr_3.is_none());

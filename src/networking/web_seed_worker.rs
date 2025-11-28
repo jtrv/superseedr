@@ -58,7 +58,7 @@ pub async fn web_seed_worker(
                 match cmd {
                     // UPDATED: Handle granular block requests (index, offset, length)
                     Some(TorrentCommand::RequestDownload(piece_index, block_offset_i64, block_length_i64)) => {
-                        
+
                         let block_offset = block_offset_i64 as u64;
                         let block_length = block_length_i64 as u64;
 
@@ -66,7 +66,7 @@ pub async fn web_seed_worker(
                         let piece_start = piece_index as u64 * piece_length;
                         let request_start = piece_start + block_offset;
                         let request_end = request_start + block_length - 1;
-                        
+
                         let range_header = format!("bytes={}-{}", request_start, request_end);
 
                         let request = client.get(&url).header(RANGE, range_header).send();
@@ -85,10 +85,10 @@ pub async fn web_seed_worker(
                         };
 
                         // 3. Accumulate Body
-                        // Since we requested a specific block (e.g., 16KB), we stream it 
+                        // Since we requested a specific block (e.g., 16KB), we stream it
                         // entirely into a buffer before sending it back to the manager.
                         let mut block_data = Vec::with_capacity(block_length as usize);
-                        
+
                         let mut failed = false;
                         loop {
                             let chunk_option = tokio::select! {

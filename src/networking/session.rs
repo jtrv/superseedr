@@ -5,8 +5,8 @@ use crate::torrent_file::Info;
 use crate::torrent_file::Torrent;
 
 use super::protocol::{
-    parse_message, writer_task, ClientExtendedId,
-    ExtendedHandshakePayload, Message, MetadataMessage,
+    parse_message, writer_task, ClientExtendedId, ExtendedHandshakePayload, Message,
+    MetadataMessage,
 };
 
 #[cfg(feature = "pex")]
@@ -253,7 +253,7 @@ impl PeerSession {
                             let peer_ip_port_clone = self.peer_ip_port.clone();
                             let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
                             let global_dl_bucket_clone = self.global_dl_bucket.clone();
-                            
+
                             // Spawn to avoid blocking the read loop with token bucket wait
                             tokio::spawn(async move {
                                 consume_tokens(&global_dl_bucket_clone, block_data.len() as f64).await;
