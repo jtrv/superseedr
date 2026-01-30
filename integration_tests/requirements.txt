@@ -1,0 +1,17 @@
+# Integration Test Dependencies
+# SPDX-FileCopyrightText: 2025 The superseedr Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# HTTP client with retry support
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Bencode parsing (optional but recommended)
+bencodepy>=0.9.0
+
+# Testing utilities
+pytest>=7.4.0
+pytest-timeout>=2.1.0
+
+# Type hints
+typing-extensions>=4.7.0

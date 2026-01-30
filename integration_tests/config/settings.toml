@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2025 The superseedr Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Superseedr Integration Test Configuration
+# This configuration is optimized for testing with frequent status updates
+
+# Client Identification
+client_id = "superseedr-integration-test"
+client_port = 6681
+
+# Enable file watcher for integration tests
+watch_folder = "/app/watch"
+
+# Download location
+default_download_folder = "/app/downloads"
+
+# Disable DHT bootstrap nodes for isolated network testing
+# (The tracker is local within the Docker network)
+bootstrap_nodes = []
+
+# Status dump interval - set to 1 second for near real-time test monitoring
+output_status_interval = 1
+
+# Network settings for faster testing
+max_connected_peers = 10
+max_concurrent_validations = 8
+connection_attempt_permits = 10
+
+# Throttling settings
+upload_slots = 4
+peer_upload_in_flight_limit = 2
+
+# Tracker intervals (shorter for faster tests)
+tracker_fallback_interval_secs = 30
+client_leeching_fallback_interval_secs = 10
+
+# Disable bandwidth limits for maximum speed
+global_download_limit_bps = 0
+global_upload_limit_bps = 0
+
+# Torrent list (empty initially, populated by tests)
+torrents = []
+
+# Initial stats
+lifetime_downloaded = 0
+lifetime_uploaded = 0
+
+# Private client mode
+private_client = false

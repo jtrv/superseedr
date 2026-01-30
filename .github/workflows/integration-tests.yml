@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: 2025 The superseedr Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Integration Tests
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - 'integration_tests/**'
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - 'integration_tests/**'
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Test scenario to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - v1
+          - v2
+          - hybrid
+          - seeding
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integration-test:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            docker-compose \
+            netcat-openbsd \
+            curl \
+            hashdeep
+
+      - name: Install torrent tools
+        run: |
+          # Try to install torrenttools, fallback to mktorrent
+          if command -v apt-get &> /dev/null; then
+            sudo apt-get install -y mktorrent transmission-cli || true
+          fi
+          
+          # Install torrenttools if possible
+          if command -v pip3 &> /dev/null; then
+            pip3 install torrenttools || true
+          fi
+
+      - name: Install Python dependencies
+        working-directory: ./integration_tests
+        run: |
+          pip install -r requirements.txt
+
+      - name: Build Superseedr Docker image
+        run: |
+          cd integration_tests
+          docker compose build superseedr
+
+      - name: Start test environment
+        working-directory: ./integration_tests
+        run: |
+          docker compose up -d
+          
+          # Wait for services to be healthy
+          echo "Waiting for services to be healthy..."
+          timeout=120
+          elapsed=0
+          
+          while [ $elapsed -lt $timeout ]; do
+            # Check if all services are healthy
+            tracker_health=$(docker inspect --format='{{.State.Health.Status}}' bittorrent-tracker 2>/dev/null || echo "unknown")
+            qb_health=$(docker inspect --format='{{.State.Health.Status}}' qbittorrent-reference 2>/dev/null || echo "unknown")
+            
+            if [ "$tracker_health" = "healthy" ] && [ "$qb_health" = "healthy" ]; then
+              echo "All services are healthy!"
+              break
+            fi
+            
+            echo "Tracker: $tracker_health, qBittorrent: $qb_health"
+            sleep 5
+            elapsed=$((elapsed + 5))
+          done
+          
+          if [ $elapsed -ge $timeout ]; then
+            echo "Timeout waiting for services to be healthy"
+            docker compose logs
+            exit 1
+          fi
+
+      - name: Run integration tests
+        working-directory: ./integration_tests
+        run: |
+          SCENARIO="${{ github.event.inputs.scenario || 'all' }}"
+          python run_tests.py --scenario "$SCENARIO" --verbose
+        timeout-minutes: 20
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: ./integration_tests
+        run: |
+          mkdir -p artifacts
+          docker compose logs > artifacts/docker_logs.txt
+          docker compose ps > artifacts/docker_ps.txt
+          
+          # Copy status files if they exist
+          if [ -d "data/superseedr_status" ]; then
+            cp -r data/superseedr_status artifacts/
+          fi
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs
+          path: integration_tests/artifacts/
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        working-directory: ./integration_tests
+        run: |
+          docker compose down -v
+          docker system prune -f

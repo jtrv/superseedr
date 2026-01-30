@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2025 The superseedr Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+version: '3.8'
+
+networks:
+  bittorrent-test:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+services:
+  # --- Tracker Service ---
+  tracker:
+    image: ethan hunt/opentracker:latest
+    container_name: bittorrent-tracker
+    restart: unless-stopped
+    ports:
+      - "6969:6969/tcp"
+      - "6969:6969/udp"
+    networks:
+      bittorrent-test:
+        aliases:
+          - tracker
+    volumes:
+      - ./data/tracker_data:/var/lib/opentracker
+    command: >
+      opentracker -i 0.0.0.0
+      -p 6969
+      -P 6969
+      -A 0.0.0.0/0
+      --dedicated-network
+      --allow-public-ip
+      --no-log
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "6969"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # --- Superseedr Service ---
+  superseedr:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    container_name: superseedr-test
+    restart: "no"
+    depends_on:
+      tracker:
+        condition: service_healthy
+    networks:
+      bittorrent-test:
+        aliases:
+          - superseedr
+    volumes:
+      - ./data/superseedr_watch:/app/watch:rw
+      - ./data/superseedr_downloads:/app/downloads:rw
+      - ./data/superseedr_status:/app/status:rw
+      - ./config/settings.toml:/app/settings.toml:ro
+    environment:
+      - RUST_LOG=debug
+      - SUPERSEEDR_CONFIG=/app/settings.toml
+    command: >
+      /usr/local/bin/superseedr
+      --config /app/settings.toml
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/status/app_state.json"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
+
+  # --- Reference Client Service (qBittorrent) ---
+  qbittorrent:
+    image: linuxserver/qbittorrent:latest
+    container_name: qbittorrent-reference
+    restart: unless-stopped
+    depends_on:
+      tracker:
+        condition: service_healthy
+    networks:
+      bittorrent-test:
+        aliases:
+          - qbittorrent
+          - reference-client
+    ports:
+      - "8080:8080/tcp"
+    volumes:
+      - ./data/reference_client_downloads:/downloads:rw
+      - ./data/qbittorrent_config:/config:rw
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - WEBUI_PORT=8080
+      - TORRENTING_PORT=6881
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/app/version", "||", "curl", "-f", "http://localhost:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
