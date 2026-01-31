@@ -2616,6 +2616,7 @@ impl App {
             .torrents
             .insert(info_hash.clone(), placeholder_state);
         self.app_state.torrent_list_order.push(info_hash.clone());
+        self.app_state.mode = AppMode::Normal;
 
         let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(TcpStream, Vec<u8>)>(100);
         self.torrent_manager_incoming_peer_txs
@@ -2729,6 +2730,7 @@ impl App {
             .torrents
             .insert(info_hash.clone(), placeholder_state);
         self.app_state.torrent_list_order.push(info_hash.clone());
+        self.app_state.mode = AppMode::Normal;
 
         let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(TcpStream, Vec<u8>)>(100);
         self.torrent_manager_incoming_peer_txs
