@@ -5,11 +5,10 @@
 Integration test scenarios for Superseedr.
 """
 
-from .superseedr_monitor import SuperseedrMonitor, TorrentMetrics
 from .qbittorrent_client import QBittorrentClient
+from .transmission_client import TransmissionClient
 
 __all__ = [
-    "SuperseedrMonitor",
-    "TorrentMetrics",
     "QBittorrentClient",
+    "TransmissionClient",
 ]

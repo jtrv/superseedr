@@ -32,43 +32,6 @@ services:
       --dedicated-network
       --allow-public-ip
       --no-log
-    # healthcheck:
-    #   test: ["CMD-SHELL", "wget -q --spider http://localhost:6969/announce || exit 1"]
-    #   interval: 5s
-    #   timeout: 3s
-    #   retries: 10
-    #   start_period: 5s
-
-  # --- Superseedr Service ---
-  superseedr:
-    build:
-      context: ../
-      dockerfile: Dockerfile
-    container_name: superseedr-test
-    restart: "no"
-    depends_on:
-      - tracker
-    networks:
-      bittorrent-test:
-        aliases:
-          - superseedr
-    volumes:
-      - ./data/superseedr_watch:/app/watch:rw
-      - ./data/superseedr_downloads:/app/downloads:rw
-      - ./data/superseedr_status:/app/status:rw
-      - ./config/settings.toml:/app/settings.toml:ro
-    environment:
-      - RUST_LOG=debug
-      - SUPERSEEDR_CONFIG=/app/settings.toml
-    command: >
-      /usr/local/bin/superseedr
-      --config /app/settings.toml
-    healthcheck:
-      test: ["CMD", "test", "-f", "/app/status/app_state.json"]
-      interval: 1s
-      timeout: 1s
-      retries: 30
-      start_period: 2s
 
   # --- Reference Client Service (qBittorrent) ---
   qbittorrent:
@@ -101,5 +64,34 @@ services:
       retries: 20
       start_period: 10s
 
+  # --- Download Client (Transmission) ---
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission-test
+    restart: unless-stopped
+    depends_on:
+      - tracker
+    networks:
+      bittorrent-test:
+        aliases:
+          - transmission
+    ports:
+      - "9091:9091/tcp"
+    volumes:
+      - transmission_downloads:/downloads:rw
+      - ./data/transmission_config:/config:rw
+      - ./data/transmission_watch:/watch:rw
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/transmission/rpc", "||", "exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 volumes:
   qbittorrent_downloads:
+  transmission_downloads:

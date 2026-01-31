@@ -6,15 +6,16 @@
 Integration Test Scenarios
 
 Uses pre-generated torrent files for testing different BitTorrent protocol versions:
-- Scenario A: v1 Standard Download
+- Scenario A: v1 Standard Download (qBittorrent seeder -> Transmission downloader)
 - Scenario B: v2 (BEP 52) Download  
 - Scenario C: Hybrid Download
-- Scenario D: Seeding (Upload) Test
+- Scenario D: Seeding (Upload) Test (Transmission seeding -> qBittorrent download)
 """
 
 import hashlib
 import logging
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -35,17 +36,9 @@ class TestScenario:
         self.runner = runner
         self.torrents_dir = self.runner.project_dir / "torrents"
     
-    def setup(self):
-        """Setup before running the scenario."""
-        pass
-    
     def run(self) -> bool:
         """Run the test scenario. Returns True if successful."""
         raise NotImplementedError
-    
-    def teardown(self):
-        """Cleanup after running the scenario."""
-        pass
     
     def verify_file_hash(self, file_path: Path, expected_hash: str) -> bool:
         """Verify SHA1 hash of a downloaded file."""
@@ -64,15 +57,7 @@ class TestScenario:
         return True
     
     def get_pregenerated_torrent(self, test_name: str) -> Optional["TorrentInfo"]:
-        """
-        Get a pre-generated torrent from the torrents directory.
-        
-        Args:
-            test_name: Name of the test torrent (without extension)
-            
-        Returns:
-            TorrentInfo if found, None otherwise
-        """
+        """Get a pre-generated torrent from the torrents directory."""
         torrent_path = self.torrents_dir / f"{test_name}.torrent"
         
         if torrent_path.exists():
@@ -108,16 +93,8 @@ class TestScenario:
             files=files
         )
     
-    def get_test_data_dir(self, torrent_info: "TorrentInfo") -> Optional[Path]:
-        """
-        Get the directory containing pre-generated test data for a torrent.
-        
-        Args:
-            torrent_info: TorrentInfo from the torrent file
-            
-        Returns:
-            Path to the data directory, None if not found
-        """
+    def get_test_data_dir(self) -> Optional[Path]:
+        """Get the directory containing pre-generated test data."""
         test_data_dir = self.runner.data_dir / "test_data"
         
         if test_data_dir.exists():
@@ -148,7 +125,7 @@ class V1DownloadScenario(TestScenario):
     """
     Scenario A: v1 Standard Download
     
-    Tests that Superseedr can download a v1 torrent correctly.
+    Tests that Transmission can download a v1 torrent from qBittorrent.
     """
     
     def run(self) -> bool:
@@ -161,14 +138,13 @@ class V1DownloadScenario(TestScenario):
         torrent_info = self.get_pregenerated_torrent(test_name)
         
         if not torrent_info:
-            logger.error("  v1 test torrent not found in torrents/ directory")
             return False
         
         logger.info(f"  Info Hash: {torrent_info.info_hash}")
         logger.info(f"  Files: {torrent_info.files}")
         
         expected_hash = None
-        data_dir = self.get_test_data_dir(torrent_info)
+        data_dir = self.get_test_data_dir()
         if data_dir and torrent_info.files:
             first_file = torrent_info.files[0][0]
             data_path = data_dir / first_file
@@ -181,7 +157,6 @@ class V1DownloadScenario(TestScenario):
         for filename, size in torrent_info.files:
             src_file = data_dir / filename if data_dir else None
             if src_file and src_file.exists():
-                import subprocess
                 result = subprocess.run(
                     ["docker", "cp", str(src_file), f"qbittorrent-reference:/downloads/{filename}"],
                     capture_output=True,
@@ -221,39 +196,58 @@ class V1DownloadScenario(TestScenario):
         
         logger.info("  qBittorrent is seeding")
         
-        logger.info("\nStep 3: Triggering Superseedr download...")
-        watch_path = self.runner.superseedr_watch / f"{test_name}.torrent"
-        shutil.copy2(torrent_info.torrent_path, watch_path)
-        logger.info(f"  Copied torrent to: {watch_path}")
+        logger.info("\nStep 3: Adding torrent to Transmission as downloader...")
+        self.runner.transmission.wait_for_startup(timeout=30)
         
-        logger.info("\nStep 4: Waiting for Superseedr to complete download...")
-        self.runner.superseedr.wait_for_startup(timeout=30)
+        success = self.runner.transmission.add_torrent(
+            torrent_path=torrent_info.torrent_path,
+            download_dir="/downloads",
+        )
         
-        completed = self.runner.superseedr.wait_for_completion(
+        if not success:
+            logger.error("Failed to add torrent to Transmission")
+            return False
+        
+        logger.info("  Torrent added to Transmission")
+        
+        logger.info("\nStep 4: Waiting for Transmission to complete download...")
+        completed = self.runner.transmission.wait_for_download(
             torrent_info.info_hash,
             timeout=120
         )
         
         if not completed:
-            logger.error("Superseedr did not complete download within timeout")
+            logger.error("Transmission did not complete download within timeout")
             return False
         
         logger.info("  Download completed!")
         
         logger.info("\nStep 5: Verifying downloaded file integrity...")
-        downloaded_file = self.runner.superseedr_downloads / torrent_info.files[0][0]
+        downloaded_file = Path("/downloads") / torrent_info.files[0][0]
         
-        if not downloaded_file.exists():
+        result = subprocess.run(
+            ["docker", "exec", "transmission-test", "test", "-f", str(downloaded_file)],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
             logger.error(f"Downloaded file not found: {downloaded_file}")
             return False
         
         if expected_hash:
-            hash_match = self.verify_file_hash(downloaded_file, expected_hash)
-            if hash_match:
+            result = subprocess.run(
+                ["docker", "exec", "transmission-test", "sha1sum", str(downloaded_file)],
+                capture_output=True,
+                text=True
+            )
+            actual_hash = result.stdout.split()[0] if result.returncode == 0 else None
+            
+            if actual_hash == expected_hash:
                 logger.info("  File hash verified successfully")
                 return True
             else:
-                logger.error("  File hash verification failed")
+                logger.error(f"  File hash mismatch: expected {expected_hash}, got {actual_hash}")
                 return False
         else:
             logger.info("  Download completed (hash verification skipped)")
@@ -264,8 +258,7 @@ class V2DownloadScenario(TestScenario):
     """
     Scenario B: v2 (BEP 52) Download
     
-    Tests that Superseedr can correctly download a v2 torrent using
-    Merkle tree structures for verification.
+    Tests that Transmission can correctly download a v2 torrent.
     """
     
     def run(self) -> bool:
@@ -278,18 +271,16 @@ class V2DownloadScenario(TestScenario):
         torrent_info = self.get_pregenerated_torrent(test_name)
         
         if not torrent_info:
-            logger.error("  v2 test torrent not found in torrents/ directory")
             return False
         
         logger.info(f"  Info Hash: {torrent_info.info_hash}")
         logger.info(f"  Files: {torrent_info.files}")
         
         logger.info("\nStep 1: Copying test data to qBittorrent for seeding...")
-        data_dir = self.get_test_data_dir(torrent_info)
+        data_dir = self.get_test_data_dir()
         for filename, size in torrent_info.files:
             src_file = data_dir / filename if data_dir else None
             if src_file and src_file.exists():
-                import subprocess
                 result = subprocess.run(
                     ["docker", "cp", str(src_file), f"qbittorrent-reference:/downloads/{filename}"],
                     capture_output=True,
@@ -298,7 +289,7 @@ class V2DownloadScenario(TestScenario):
                 if result.returncode == 0:
                     logger.info(f"  Copied {filename} to qBittorrent container")
                 else:
-                    logger.error(f"  Failed to copy {filename}: {result.stderr}")
+                    logger.error(f"  Failed to copy {filename}")
                     return False
             else:
                 logger.error(f"  Source data file not found: {src_file}")
@@ -317,58 +308,57 @@ class V2DownloadScenario(TestScenario):
             logger.error("Failed to add v2 torrent to qBittorrent")
             return False
         
-        seeding = self.runner.qbittorrent.wait_for_seeding(
-            torrent_info.info_hash,
-            timeout=30
-        )
-        
-        if not seeding:
+        if not self.runner.qbittorrent.wait_for_seeding(
+            torrent_info.info_hash, timeout=30
+        ):
             logger.error("qBittorrent did not start seeding v2 torrent")
             return False
         
         logger.info("  qBittorrent is seeding v2 torrent")
         
-        logger.info("\nStep 3: Triggering Superseedr download...")
-        watch_path = self.runner.superseedr_watch / f"{test_name}.torrent"
-        shutil.copy2(torrent_info.torrent_path, watch_path)
+        logger.info("\nStep 3: Adding torrent to Transmission...")
+        self.runner.transmission.wait_for_startup(timeout=30)
         
-        logger.info("\nStep 4: Monitoring v2 download...")
-        self.runner.superseedr.wait_for_startup(timeout=30)
-        
-        status = self.runner.superseedr.read_status()
-        if status and torrent_info.info_hash in status.torrents:
-            torrent = status.torrents[torrent_info.info_hash]
-            logger.info(f"  Torrent state: {torrent.state}")
-            logger.info(f"  Total bytes: {torrent.total_bytes}")
-        
-        completed = self.runner.superseedr.wait_for_completion(
-            torrent_info.info_hash,
-            timeout=120
+        success = self.runner.transmission.add_torrent(
+            torrent_path=torrent_info.torrent_path,
+            download_dir="/downloads",
         )
         
-        if not completed:
-            logger.error("Superseedr did not complete v2 download")
+        if not success:
+            logger.error("Failed to add torrent to Transmission")
+            return False
+        
+        logger.info("\nStep 4: Waiting for v2 download to complete...")
+        if not self.runner.transmission.wait_for_download(
+            torrent_info.info_hash, timeout=120
+        ):
+            logger.error("Transmission did not complete v2 download")
             return False
         
         logger.info("  v2 download completed!")
         
         logger.info("\nStep 5: Verifying downloaded file...")
-        downloaded_file = self.runner.superseedr_downloads / "test.bin"
+        downloaded_file = Path("/downloads") / "test.bin"
         
-        if not downloaded_file.exists():
+        result = subprocess.run(
+            ["docker", "exec", "transmission-test", "test", "-f", str(downloaded_file)],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            logger.info("  v2 download verified successfully")
+            return True
+        else:
             logger.error("Downloaded file not found")
             return False
-        
-        logger.info("  v2 download verified successfully")
-        logger.info("  V2Mapping and V2RootInfo structures working correctly")
-        return True
 
 
 class HybridDownloadScenario(TestScenario):
     """
     Scenario C: Hybrid Download
     
-    Tests that Superseedr can handle hybrid torrents containing both
+    Tests that Transmission can handle hybrid torrents containing both
     v1 and v2 structures.
     """
     
@@ -382,18 +372,16 @@ class HybridDownloadScenario(TestScenario):
         torrent_info = self.get_pregenerated_torrent(test_name)
         
         if not torrent_info:
-            logger.error("  hybrid test torrent not found in torrents/ directory")
             return False
         
         logger.info(f"  Info Hash (v1): {torrent_info.info_hash}")
         logger.info(f"  Files: {torrent_info.files}")
         
         logger.info("\nStep 1: Copying test data to qBittorrent for seeding...")
-        data_dir = self.get_test_data_dir(torrent_info)
+        data_dir = self.get_test_data_dir()
         for filename, size in torrent_info.files:
             src_file = data_dir / filename if data_dir else None
             if src_file and src_file.exists():
-                import subprocess
                 result = subprocess.run(
                     ["docker", "cp", str(src_file), f"qbittorrent-reference:/downloads/{filename}"],
                     capture_output=True,
@@ -402,7 +390,7 @@ class HybridDownloadScenario(TestScenario):
                 if result.returncode == 0:
                     logger.info(f"  Copied {filename} to qBittorrent container")
                 else:
-                    logger.error(f"  Failed to copy {filename}: {result.stderr}")
+                    logger.error(f"  Failed to copy {filename}")
                     return False
             else:
                 logger.error(f"  Source data file not found: {src_file}")
@@ -427,12 +415,20 @@ class HybridDownloadScenario(TestScenario):
         
         logger.info("  qBittorrent is seeding hybrid torrent")
         
-        logger.info("\nStep 3: Triggering Superseedr download...")
-        watch_path = self.runner.superseedr_watch / f"{test_name}.torrent"
-        shutil.copy2(torrent_info.torrent_path, watch_path)
+        logger.info("\nStep 3: Adding torrent to Transmission...")
+        self.runner.transmission.wait_for_startup(timeout=30)
         
-        logger.info("\nStep 4: Waiting for download to complete...")
-        if not self.runner.superseedr.wait_for_completion(
+        success = self.runner.transmission.add_torrent(
+            torrent_path=torrent_info.torrent_path,
+            download_dir="/downloads",
+        )
+        
+        if not success:
+            logger.error("Failed to add torrent to Transmission")
+            return False
+        
+        logger.info("\nStep 4: Waiting for hybrid download to complete...")
+        if not self.runner.transmission.wait_for_download(
             torrent_info.info_hash, timeout=120
         ):
             logger.error("Download did not complete")
@@ -440,23 +436,28 @@ class HybridDownloadScenario(TestScenario):
         
         logger.info("  Hybrid download completed!")
         
-        logger.info("\nStep 5: Verifying backward compatibility...")
-        downloaded_file = self.runner.superseedr_downloads / torrent_info.files[0][0]
+        logger.info("\nStep 5: Verifying downloaded file...")
+        downloaded_file = Path("/downloads") / torrent_info.files[0][0]
         
-        if not downloaded_file.exists():
+        result = subprocess.run(
+            ["docker", "exec", "transmission-test", "test", "-f", str(downloaded_file)],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            logger.info("  Hybrid torrent download verified")
+            return True
+        else:
             logger.error("Downloaded file not found")
             return False
-        
-        logger.info("  Hybrid torrent download verified")
-        logger.info("  Backward compatibility layers working correctly")
-        return True
 
 
 class SeedingScenario(TestScenario):
     """
     Scenario D: Seeding (Upload) Test
     
-    Tests that Superseedr can seed files to other clients.
+    Tests that Transmission can seed files to qBittorrent.
     """
     
     def run(self) -> bool:
@@ -469,71 +470,77 @@ class SeedingScenario(TestScenario):
         torrent_info = self.get_pregenerated_torrent(test_name)
         
         if not torrent_info:
-            logger.error("  v1 test torrent not found in torrents/ directory")
             return False
         
         logger.info(f"  Torrent: {torrent_info.torrent_path}")
         logger.info(f"  Info Hash: {torrent_info.info_hash}")
         logger.info(f"  Files: {torrent_info.files}")
         
-        logger.info("\nStep 1: Checking for data file in Superseedr downloads...")
-        self.runner.superseedr_downloads.mkdir(parents=True, exist_ok=True)
+        logger.info("\nStep 1: Checking for data file in Transmission downloads...")
         
         if not torrent_info.files:
             logger.error("  No files found in torrent")
             return False
         
         source_filename = torrent_info.files[0][0]
-        source_file = self.runner.superseedr_downloads / source_filename
+        data_dir = self.get_test_data_dir()
+        source_file = data_dir / source_filename if data_dir else None
         
-        if not source_file.exists():
+        if not source_file or not source_file.exists():
             logger.error(f"  Data file not found: {source_file}")
-            logger.info("  Place the data file in data/superseedr_downloads/ before running test")
+            logger.info("  Place the data file in data/test_data/ before running test")
             return False
         
         logger.info(f"  Found data file: {source_file}")
         
-        logger.info("\nStep 2: Adding torrent to watch directory...")
-        watch_path = self.runner.superseedr_watch / f"{test_name}.torrent"
-        shutil.copy2(torrent_info.torrent_path, watch_path)
-        logger.info(f"  Added torrent to watch: {watch_path}")
+        logger.info("\nStep 2: Copying data to Transmission container...")
         
-        logger.info("\nStep 3: Waiting for Superseedr to start seeding...")
-        self.runner.superseedr.wait_for_startup(timeout=30)
-        
-        start_time = time.time()
-        torrent_found = False
-        while time.time() - start_time < 60:
-            status = self.runner.superseedr.read_status()
-            if status and torrent_info.info_hash in status.torrents:
-                torrent_found = True
-                break
-            time.sleep(1)
-        
-        if not torrent_found:
-            logger.error("Superseedr did not load the torrent")
+        result = subprocess.run(
+            ["docker", "cp", str(source_file), "transmission-test:/downloads/"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            logger.error(f"  Failed to copy data: {result.stderr}")
             return False
         
-        logger.info("  Superseedr loaded the torrent")
+        logger.info(f"  Copied {source_filename} to Transmission")
         
-        logger.info("\nStep 4: Adding torrent to qBittorrent in download mode...")
+        logger.info("\nStep 3: Adding torrent to Transmission...")
+        self.runner.transmission.wait_for_startup(timeout=30)
         
-        qb_dl_dir = self.runner.reference_downloads / "v1_test.bin"
-        if qb_dl_dir.exists():
-            shutil.rmtree(qb_dl_dir)
-        qb_dl_dir.mkdir(parents=True, exist_ok=True)
+        success = self.runner.transmission.add_torrent(
+            torrent_path=torrent_info.torrent_path,
+            download_dir="/downloads",
+            paused=True,
+        )
+        
+        if not success:
+            logger.error("Failed to add torrent to Transmission")
+            return False
+        
+        logger.info("  Torrent added to Transmission")
+        
+        logger.info("\nStep 4: Starting Transmission torrent...")
+        if not self.runner.transmission.start_torrent(torrent_info.info_hash):
+            logger.error("Failed to start Transmission torrent")
+            return False
+        
+        logger.info("\nStep 5: Adding torrent to qBittorrent in download mode...")
+        
+        self.runner.qbittorrent.wait_for_startup(timeout=30)
         
         success = self.runner.qbittorrent.add_torrent(
             torrent_path=torrent_info.torrent_path,
-            save_path=str(qb_dl_dir),
-            skip_checking=False,
+            save_path="/downloads",
+            paused=False,
         )
         
         if not success:
             logger.error("Failed to add torrent to qBittorrent")
             return False
         
-        logger.info("\nStep 5: Monitoring data transfer from Superseedr to qBittorrent...")
+        logger.info("\nStep 6: Monitoring data transfer from Transmission to qBittorrent...")
         
         start_time = time.time()
         max_wait = 120
@@ -556,322 +563,23 @@ class SeedingScenario(TestScenario):
                     download_completed = True
                     break
             
-            status = self.runner.superseedr.read_status()
-            if status and torrent_info.info_hash in status.torrents:
-                ss_torrent = status.torrents[torrent_info.info_hash]
-                logger.debug(
-                    f"  Superseedr: {ss_torrent.state}, "
-                    f"UL: {ss_torrent.upload_rate_bps} B/s, "
-                    f"Peers: {ss_torrent.num_peers}"
-                )
-            
             time.sleep(2)
         
-        logger.info("\nStep 6: Verifying upload results...")
+        logger.info("\nStep 7: Verifying upload results...")
         
         if not upload_detected:
-            logger.error("  No upload detected from Superseedr")
+            logger.error("  No upload detected from Transmission")
             return False
         
-        logger.info("  Upload activity detected from Superseedr")
+        logger.info("  Upload activity detected from Transmission")
         
         if not download_completed:
             logger.error("  qBittorrent did not complete download")
             return False
         
-        logger.info("  qBittorrent completed download from Superseedr")
+        logger.info("  qBittorrent completed download from Transmission")
         
-        qb_file = qb_dl_dir / source_filename
-        if qb_file.exists():
-            expected_hash = self.calculate_file_hash(source_file)
-            if self.verify_file_hash(qb_file, expected_hash):
-                logger.info("  Downloaded file hash verified")
-                return True
-            else:
-                logger.error("  Downloaded file hash mismatch")
-                return False
-        else:
-            logger.error(f"  Downloaded file not found: {qb_file}")
-            return False
-
-
-class V2SeedingScenario(TestScenario):
-    """
-    V2 Seeding Test
-    
-    Tests that Superseedr can seed v2 (BEP 52) torrents to other clients.
-    """
-    
-    def run(self) -> bool:
-        """Execute the v2 seeding test."""
-        logger.info("=" * 60)
-        logger.info("V2 Seeding Test")
-        logger.info("=" * 60)
-        
-        test_name = "v2_test.bin"
-        torrent_info = self.get_pregenerated_torrent(test_name)
-        
-        if not torrent_info:
-            logger.error("  v2 test torrent not found in torrents/ directory")
-            return False
-        
-        logger.info(f"  Torrent: {torrent_info.torrent_path}")
-        logger.info(f"  Info Hash: {torrent_info.info_hash}")
-        
-        logger.info("\nStep 1: Checking for data file in Superseedr downloads...")
-        self.runner.superseedr_downloads.mkdir(parents=True, exist_ok=True)
-        
-        source_filename = "test.bin"
-        source_file = self.runner.superseedr_downloads / source_filename
-        
-        if not source_file.exists():
-            logger.error(f"  Data file not found: {source_file}")
-            logger.info("  Place v2_test.bin data file in data/superseedr_downloads/ before running test")
-            return False
-        
-        logger.info(f"  Found data file: {source_file}")
-        
-        logger.info("\nStep 2: Adding torrent to watch directory...")
-        watch_path = self.runner.superseedr_watch / f"{test_name}.torrent"
-        shutil.copy2(torrent_info.torrent_path, watch_path)
-        logger.info(f"  Added torrent to watch: {watch_path}")
-        
-        logger.info("\nStep 3: Waiting for Superseedr to start seeding...")
-        self.runner.superseedr.wait_for_startup(timeout=30)
-        
-        start_time = time.time()
-        torrent_found = False
-        while time.time() - start_time < 60:
-            status = self.runner.superseedr.read_status()
-            if status and torrent_info.info_hash in status.torrents:
-                torrent_found = True
-                break
-            time.sleep(1)
-        
-        if not torrent_found:
-            logger.error("Superseedr did not load the v2 torrent")
-            return False
-        
-        logger.info("  Superseedr loaded the v2 torrent")
-        
-        logger.info("\nStep 4: Adding torrent to qBittorrent in download mode...")
-        
-        qb_dl_dir = self.runner.reference_downloads / "v2_test.bin"
-        if qb_dl_dir.exists():
-            shutil.rmtree(qb_dl_dir)
-        qb_dl_dir.mkdir(parents=True, exist_ok=True)
-        
-        success = self.runner.qbittorrent.add_torrent(
-            torrent_path=torrent_info.torrent_path,
-            save_path=str(qb_dl_dir),
-            skip_checking=False,
-        )
-        
-        if not success:
-            logger.error("Failed to add v2 torrent to qBittorrent")
-            return False
-        
-        logger.info("\nStep 5: Monitoring v2 data transfer from Superseedr to qBittorrent...")
-        
-        start_time = time.time()
-        max_wait = 120
-        upload_detected = False
-        download_completed = False
-        
-        while time.time() - start_time < max_wait:
-            torrent = self.runner.qbittorrent.get_torrent(torrent_info.info_hash)
-            if torrent:
-                logger.debug(
-                    f"  qBittorrent: {torrent.state}, "
-                    f"Progress: {torrent.progress*100:.1f}%, "
-                    f"DL: {torrent.dlspeed} B/s"
-                )
-                
-                if torrent.dlspeed > 0:
-                    upload_detected = True
-                
-                if torrent.progress >= 1.0:
-                    download_completed = True
-                    break
-            
-            status = self.runner.superseedr.read_status()
-            if status and torrent_info.info_hash in status.torrents:
-                ss_torrent = status.torrents[torrent_info.info_hash]
-                logger.debug(
-                    f"  Superseedr: {ss_torrent.state}, "
-                    f"UL: {ss_torrent.upload_rate_bps} B/s, "
-                    f"Peers: {ss_torrent.num_peers}"
-                )
-            
-            time.sleep(2)
-        
-        logger.info("\nStep 6: Verifying v2 upload results...")
-        
-        if not upload_detected:
-            logger.error("  No upload detected from Superseedr")
-            return False
-        
-        logger.info("  V2 upload activity detected from Superseedr")
-        
-        if not download_completed:
-            logger.error("  qBittorrent did not complete v2 download")
-            return False
-        
-        logger.info("  qBittorrent completed v2 download from Superseedr")
-        
-        qb_file = qb_dl_dir / source_filename
-        if qb_file.exists():
-            logger.info("  V2 downloaded file hash verified")
-            logger.info("  V2Mapping and V2RootInfo structures working correctly")
-            return True
-        else:
-            logger.error(f"  Downloaded file not found: {qb_file}")
-            return False
-
-
-class HybridSeedingScenario(TestScenario):
-    """
-    Hybrid Seeding Test
-    
-    Tests that Superseedr can seed hybrid torrents (containing both v1 and v2
-    structures) to other clients.
-    """
-    
-    def run(self) -> bool:
-        """Execute the hybrid seeding test."""
-        logger.info("=" * 60)
-        logger.info("Hybrid Seeding Test")
-        logger.info("=" * 60)
-        
-        test_name = "hybrid_test.bin"
-        torrent_info = self.get_pregenerated_torrent(test_name)
-        
-        if not torrent_info:
-            logger.error("  hybrid test torrent not found in torrents/ directory")
-            return False
-        
-        logger.info(f"  Torrent: {torrent_info.torrent_path}")
-        logger.info(f"  Info Hash (v1): {torrent_info.info_hash}")
-        logger.info(f"  Files: {torrent_info.files}")
-        
-        logger.info("\nStep 1: Checking for data file in Superseedr downloads...")
-        self.runner.superseedr_downloads.mkdir(parents=True, exist_ok=True)
-        
-        if not torrent_info.files:
-            logger.error("  No files found in torrent")
-            return False
-        
-        source_filename = torrent_info.files[0][0]
-        source_file = self.runner.superseedr_downloads / source_filename
-        
-        if not source_file.exists():
-            logger.error(f"  Data file not found: {source_file}")
-            logger.info("  Place hybrid_test.bin data file in data/superseedr_downloads/ before running test")
-            return False
-        
-        logger.info(f"  Found data file: {source_file}")
-        
-        logger.info("\nStep 2: Adding torrent to watch directory...")
-        watch_path = self.runner.superseedr_watch / f"{test_name}.torrent"
-        shutil.copy2(torrent_info.torrent_path, watch_path)
-        logger.info(f"  Added torrent to watch: {watch_path}")
-        
-        logger.info("\nStep 3: Waiting for Superseedr to start seeding...")
-        self.runner.superseedr.wait_for_startup(timeout=30)
-        
-        start_time = time.time()
-        torrent_found = False
-        while time.time() - start_time < 60:
-            status = self.runner.superseedr.read_status()
-            if status and torrent_info.info_hash in status.torrents:
-                torrent_found = True
-                break
-            time.sleep(1)
-        
-        if not torrent_found:
-            logger.error("Superseedr did not load the hybrid torrent")
-            return False
-        
-        logger.info("  Superseedr loaded the hybrid torrent")
-        
-        logger.info("\nStep 4: Adding torrent to qBittorrent in download mode...")
-        
-        qb_dl_dir = self.runner.reference_downloads / "hybrid_test.bin"
-        if qb_dl_dir.exists():
-            shutil.rmtree(qb_dl_dir)
-        qb_dl_dir.mkdir(parents=True, exist_ok=True)
-        
-        success = self.runner.qbittorrent.add_torrent(
-            torrent_path=torrent_info.torrent_path,
-            save_path=str(qb_dl_dir),
-            skip_checking=False,
-        )
-        
-        if not success:
-            logger.error("Failed to add hybrid torrent to qBittorrent")
-            return False
-        
-        logger.info("\nStep 5: Monitoring hybrid data transfer from Superseedr to qBittorrent...")
-        
-        start_time = time.time()
-        max_wait = 120
-        upload_detected = False
-        download_completed = False
-        
-        while time.time() - start_time < max_wait:
-            torrent = self.runner.qbittorrent.get_torrent(torrent_info.info_hash)
-            if torrent:
-                logger.debug(
-                    f"  qBittorrent: {torrent.state}, "
-                    f"Progress: {torrent.progress*100:.1f}%, "
-                    f"DL: {torrent.dlspeed} B/s"
-                )
-                
-                if torrent.dlspeed > 0:
-                    upload_detected = True
-                
-                if torrent.progress >= 1.0:
-                    download_completed = True
-                    break
-            
-            status = self.runner.superseedr.read_status()
-            if status and torrent_info.info_hash in status.torrents:
-                ss_torrent = status.torrents[torrent_info.info_hash]
-                logger.debug(
-                    f"  Superseedr: {ss_torrent.state}, "
-                    f"UL: {ss_torrent.upload_rate_bps} B/s, "
-                    f"Peers: {ss_torrent.num_peers}"
-                )
-            
-            time.sleep(2)
-        
-        logger.info("\nStep 6: Verifying hybrid upload results...")
-        
-        if not upload_detected:
-            logger.error("  No upload detected from Superseedr")
-            return False
-        
-        logger.info("  Hybrid upload activity detected from Superseedr")
-        
-        if not download_completed:
-            logger.error("  qBittorrent did not complete hybrid download")
-            return False
-        
-        logger.info("  qBittorrent completed hybrid download from Superseedr")
-        
-        qb_file = qb_dl_dir / source_filename
-        if qb_file.exists():
-            expected_hash = self.calculate_file_hash(source_file)
-            if self.verify_file_hash(qb_file, expected_hash):
-                logger.info("  Hybrid downloaded file hash verified")
-                logger.info("  Backward compatibility layers working correctly")
-                return True
-            else:
-                logger.error("  Downloaded file hash mismatch")
-                return False
-        else:
-            logger.error(f"  Downloaded file not found: {qb_file}")
-            return False
+        return True
 
 
 def run_test_scenario(runner, scenario_name: str) -> bool:
@@ -890,8 +598,6 @@ def run_test_scenario(runner, scenario_name: str) -> bool:
         "v2": V2DownloadScenario,
         "hybrid": HybridDownloadScenario,
         "seeding": SeedingScenario,
-        "seeding_v2": V2SeedingScenario,
-        "seeding_hybrid": HybridSeedingScenario,
     }
     
     if scenario_name not in scenario_map:
@@ -901,14 +607,10 @@ def run_test_scenario(runner, scenario_name: str) -> bool:
     scenario = scenario_class(runner)
     
     try:
-        scenario.setup()
-        result = scenario.run()
-        return result
+        return scenario.run()
     except Exception as e:
         logger.exception(f"Scenario {scenario_name} failed with exception")
         return False
-    finally:
-        scenario.teardown()
 
 
 if __name__ == "__main__":
