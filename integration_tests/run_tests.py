@@ -25,7 +25,6 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from superseedr_monitor import SuperseedrMonitor
 from qbittorrent_client import QBittorrentClient
-from torrent_generator import TorrentGenerator, TorrentVersion
 
 # Configure logging
 logging.basicConfig(
@@ -149,18 +148,23 @@ class IntegrationTestRunner:
             try:
                 result = self._run_compose(["ps", "--format", "json"], check=False)
                 if result.returncode == 0:
-                    services = json.loads(result.stdout)
-                    all_healthy = True
+                    lines = result.stdout.strip().split('\n')
+                    all_running = True
                     
-                    for service in services:
-                        health = service.get("Health", "")
-                        state = service.get("State", "")
-                        
-                        if state != "running" or health != "healthy":
-                            all_healthy = False
-                            break
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        try:
+                            service = json.loads(line)
+                            state = service.get("State", "")
+                            
+                            if state != "running":
+                                all_running = False
+                                break
+                        except json.JSONDecodeError:
+                            continue
                     
-                    if all_healthy:
+                    if all_running:
                         return True
                 
                 time.sleep(2)
@@ -203,7 +207,7 @@ def main():
     parser = argparse.ArgumentParser(description="Superseedr Integration Test Runner")
     parser.add_argument(
         "--scenario",
-        choices=["all", "v1", "v2", "hybrid", "seeding"],
+        choices=["all", "v1", "v2", "hybrid", "seeding", "seeding_v2", "seeding_hybrid"],
         default="all",
         help="Which test scenario to run"
     )
@@ -234,7 +238,7 @@ def main():
         from scenarios import run_test_scenario
         
         if args.scenario == "all":
-            scenarios = ["v1", "v2", "hybrid", "seeding"]
+            scenarios = ["v1", "v2", "hybrid", "seeding", "seeding_v2", "seeding_hybrid"]
         else:
             scenarios = [args.scenario]
         

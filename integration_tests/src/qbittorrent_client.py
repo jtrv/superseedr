@@ -11,6 +11,7 @@ the reference client during integration tests.
 
 import hashlib
 import logging
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,7 +75,6 @@ class QBittorrentClient:
         self._session = requests.Session()
         self._authenticated = False
         
-        # Setup retry strategy
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
@@ -84,6 +84,24 @@ class QBittorrentClient:
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
     
+    def _get_temp_password(self) -> Optional[str]:
+        """Try to get the temporary password from container logs."""
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "qbittorrent-reference"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            for line in result.stdout.split('\n'):
+                if "temporary password" in line.lower():
+                    parts = line.split(':')
+                    if len(parts) > 1:
+                        return parts[-1].strip()
+        except Exception as e:
+            logger.debug(f"Could not get temp password: {e}")
+        return None
+    
     def authenticate(self) -> bool:
         """
         Authenticate with qBittorrent.
@@ -91,27 +109,36 @@ class QBittorrentClient:
         Returns:
             True if authentication successful
         """
-        try:
-            response = self._session.post(
-                f"{self.base_url}/api/v2/auth/login",
-                data={
-                    "username": self.username,
-                    "password": self.password
-                },
-                timeout=self.timeout
-            )
-            
-            if response.status_code == 200 and response.text == "Ok.":
-                self._authenticated = True
-                logger.info("Authenticated with qBittorrent")
-                return True
-            else:
-                logger.error(f"Authentication failed: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Authentication error: {e}")
-            return False
+        passwords_to_try = [self.password]
+        
+        temp_pwd = self._get_temp_password()
+        if temp_pwd and temp_pwd not in passwords_to_try:
+            passwords_to_try.insert(0, temp_pwd)
+        
+        for pwd in passwords_to_try:
+            try:
+                response = self._session.post(
+                    f"{self.base_url}/api/v2/auth/login",
+                    data={
+                        "username": self.username,
+                        "password": pwd
+                    },
+                    timeout=self.timeout
+                )
+
+                if response.status_code == 200 and response.text == "Ok.":
+                    self._authenticated = True
+                    self.password = pwd
+                    mask = pwd[:2] + '*' * (len(pwd) - 2) if len(pwd) > 2 else '***'
+                    logger.info(f"Authenticated with qBittorrent (password: {mask})")
+                    return True
+                    
+            except Exception as e:
+                logger.debug(f"Auth attempt failed: {e}")
+                continue
+        
+        logger.error(f"All authentication attempts failed")
+        return False
     
     def _ensure_auth(self):
         """Ensure client is authenticated."""
@@ -368,10 +395,16 @@ class QBittorrentClient:
             torrent = self.get_torrent(info_hash)
             
             if torrent:
-                if torrent.state in ["uploading", "stalledUP", "forcedUP", "allocating"]:
+                if torrent.state in ["uploading", "stalledUP", "forcedUP", "allocating"] and torrent.progress >= 1.0:
                     logger.info(
                         f"Torrent {info_hash[:16]}... is seeding "
                         f"(progress: {torrent.progress*100:.1f}%)"
+                    )
+                    return True
+                
+                if torrent.progress >= 1.0 and torrent.state in ["paused", "queued"] and torrent.upspeed > 0:
+                    logger.info(
+                        f"Torrent {info_hash[:16]}... is seeding (paused/queued but complete)"
                     )
                     return True
                 

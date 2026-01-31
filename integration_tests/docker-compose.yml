@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2025 The superseedr Contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version: '3.8'
-
 networks:
   bittorrent-test:
     driver: bridge
@@ -13,7 +11,8 @@ networks:
 services:
   # --- Tracker Service ---
   tracker:
-    image: ethan hunt/opentracker:latest
+    image: anthonyzou/opentracker:latest
+    platform: linux/arm64
     container_name: bittorrent-tracker
     restart: unless-stopped
     ports:
@@ -33,12 +32,12 @@ services:
       --dedicated-network
       --allow-public-ip
       --no-log
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "6969"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
+    # healthcheck:
+    #   test: ["CMD-SHELL", "wget -q --spider http://localhost:6969/announce || exit 1"]
+    #   interval: 5s
+    #   timeout: 3s
+    #   retries: 10
+    #   start_period: 5s
 
   # --- Superseedr Service ---
   superseedr:
@@ -48,8 +47,7 @@ services:
     container_name: superseedr-test
     restart: "no"
     depends_on:
-      tracker:
-        condition: service_healthy
+      - tracker
     networks:
       bittorrent-test:
         aliases:
@@ -78,8 +76,7 @@ services:
     container_name: qbittorrent-reference
     restart: unless-stopped
     depends_on:
-      tracker:
-        condition: service_healthy
+      - tracker
     networks:
       bittorrent-test:
         aliases:
@@ -88,16 +85,21 @@ services:
     ports:
       - "8080:8080/tcp"
     volumes:
-      - ./data/reference_client_downloads:/downloads:rw
+      - qbittorrent_downloads:/downloads:rw
       - ./data/qbittorrent_config:/config:rw
     environment:
       - PUID=1000
       - PGID=1000
       - WEBUI_PORT=8080
       - TORRENTING_PORT=6881
+      - TZ=UTC
+      - PASSWORD=adminadmin
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/app/version", "||", "curl", "-f", "http://localhost:8080/"]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 10s
+
+volumes:
+  qbittorrent_downloads:
