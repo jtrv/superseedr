@@ -69,7 +69,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
 
     if app_state.show_help {
-        draw_help_popup(f, app_state);
+        draw_help_popup(f, app_state, settings);
         return;
     }
 
@@ -3080,7 +3080,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     f.render_widget(footer_paragraph, box_internal_chunks[2]);
 }
 
-fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
+fn draw_help_popup(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let (settings_path_str, log_path_str) = if let Some((config_dir, data_dir)) = get_app_paths() {
         (
             config_dir
@@ -3102,6 +3102,10 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
 
     let area = centered_rect(60, 100, f.area());
     f.render_widget(Clear, area);
+
+    let watch_path_str = settings.watch_folder.as_deref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Disabled".to_string());
 
     if let Some(warning_text) = &app_state.system_warning {
         let warning_width = area.width.saturating_sub(2).max(1) as usize;
@@ -3145,6 +3149,13 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
                 Span::styled("Log File: ", Style::default().fg(theme::TEXT)),
                 Span::styled(
                     truncate_with_ellipsis(&log_path_str, footer_inner_area.width as usize - 10),
+                    Style::default().fg(theme::SUBTEXT0),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Watch Dir: ", Style::default().fg(theme::TEXT)),
+                Span::styled(
+                    truncate_with_ellipsis(&watch_path_str, footer_inner_area.width as usize - 11),
                     Style::default().fg(theme::SUBTEXT0),
                 ),
             ]),
