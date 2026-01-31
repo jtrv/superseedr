@@ -1343,11 +1343,9 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let color_discovered = theme::YELLOW;
     let color_connected = theme::TEAL;
     let color_disconnected = theme::MAROON;
-    let color_title = theme::SUBTEXT0;
     let color_border = theme::SURFACE2;
-    let color_axis = theme::OVERLAY0;
 
-    let default_slice: Vec<u64> = Vec::new(); // Empty reference
+    let default_slice: Vec<u64> = Vec::new();
 
     let (disc_slice, conn_slice, disconn_slice) = if let Some(torrent) = selected_torrent {
         let width = area.width.saturating_sub(2).max(1) as usize;
@@ -1364,214 +1362,113 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         (&default_slice[..], &default_slice[..], &default_slice[..])
     };
 
-    let discovered_count: u64 = disc_slice.iter().sum();
-    let connected_count: u64 = conn_slice.iter().sum();
-    let disconnected_count: u64 = disconn_slice.iter().sum();
+    let time_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
 
-    // Use placeholder style for legend if count is 0 / no torrent
-    let legend_style_fn = |count: u64, color: Color| {
-        if selected_torrent.is_some() && count > 0 {
-            Style::default().fg(color)
-        } else {
-            Style::default().fg(theme::SURFACE1) // Greyed out
+    // Vectors for "Small" activity (Braille)
+    let mut conn_points_small = Vec::new();
+    let mut disc_points_small = Vec::new();
+    let mut disconn_points_small = Vec::new();
+
+    // Vectors for "Large" activity (Dots)
+    let mut conn_points_large = Vec::new();
+    let mut disc_points_large = Vec::new();
+    let mut disconn_points_large = Vec::new();
+
+    let mut rng = StdRng::seed_from_u64(time_seed);
+
+    // Closure to split data into small vs large points
+    let mut generate_points = |data_slice: &[u64],
+                               small_points: &mut Vec<(f64, f64)>,
+                               large_points: &mut Vec<(f64, f64)>,
+                               base_y: f64| {
+        for (i, &val) in data_slice.iter().enumerate() {
+            if val == 0 {
+                continue;
+            }
+            let val_f = val as f64;
+
+            // Threshold: If activity > 3, we add a "Heavy Dot" to emphasize it.
+            // We ALWAYS add small dots (Braille) to create the "cloud" texture.
+            let is_heavy = val > 3;
+
+            // 1. Calculate Density (How many Braille dots)
+            let small_dot_count = (val_f.sqrt().ceil() as usize).clamp(1, 6);
+
+            // 2. Calculate Jitter (Spread)
+            let activity_spread = (val_f * 0.08).min(0.6);
+            let base_jitter = 0.05;
+            let intensity = base_jitter + activity_spread;
+
+            // Add the "cloud" (Braille points)
+            for _ in 0..small_dot_count {
+                let x_jitter = rng.random_range(-intensity..intensity);
+                let y_jitter = rng.random_range(-intensity..intensity);
+                small_points.push((i as f64 + x_jitter, base_y + y_jitter));
+            }
+
+            // If heavy activity, add ONE big dot in the center of the cloud
+            if is_heavy {
+                // Slight jitter for the heavy dot too so it doesn't look robotic
+                let heavy_jitter = rng.random_range(-0.1..0.1);
+                large_points.push((i as f64 + heavy_jitter, base_y + heavy_jitter));
+            }
         }
     };
 
-    let legend_line = Line::from(vec![
-        Span::styled(
-            "Connected:",
-            legend_style_fn(connected_count, color_connected),
-        ),
-        Span::styled(
-            connected_count.to_string(),
-            legend_style_fn(connected_count, color_connected),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "Discovered:",
-            legend_style_fn(discovered_count, color_discovered),
-        ),
-        Span::styled(
-            discovered_count.to_string(),
-            legend_style_fn(discovered_count, color_discovered),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "Disconnected:",
-            legend_style_fn(disconnected_count, color_disconnected),
-        ),
-        Span::styled(
-            disconnected_count.to_string(),
-            legend_style_fn(disconnected_count, color_disconnected),
-        ),
-        Span::raw(" "),
-    ]);
+    generate_points(conn_slice, &mut conn_points_small, &mut conn_points_large, 3.0);
+    generate_points(disc_slice, &mut disc_points_small, &mut disc_points_large, 2.0);
+    generate_points(disconn_slice, &mut disconn_points_small, &mut disconn_points_large, 1.0);
 
-    let max_disc = disc_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
-    let max_conn = conn_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
-    let max_disconn = disconn_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
-
-    // ... [Calculations for markers stay the same, they handle empty iterators gracefully] ...
-
-    let y_discovered = 2.0;
-    let y_connected = 3.0;
-    let y_disconnected = 1.0;
-
-    let small_marker = Marker::Block;
-    let medium_marker = Marker::Block;
-    let large_marker = Marker::Block;
-
-    let mut disc_data_light = Vec::new();
-    let mut disc_data_medium = Vec::new();
-    let mut disc_data_dark = Vec::new();
-    // ... (Repeat for conn/disconn - code matches existing) ...
-    let mut conn_data_light = Vec::new();
-    let mut conn_data_medium = Vec::new();
-    let mut conn_data_dark = Vec::new();
-    let mut disconn_data_light = Vec::new();
-    let mut disconn_data_medium = Vec::new();
-    let mut disconn_data_dark = Vec::new();
-
-    for (i, &v) in disc_slice.iter().enumerate() {
-        if v == 0 {
-            continue;
-        }
-        let norm_val = v as f64 / max_disc;
-        let y_val = y_discovered;
-        if norm_val < 0.33 {
-            disc_data_light.push((i as f64, y_val));
-        } else if norm_val < 0.66 {
-            disc_data_medium.push((i as f64, y_val));
-        } else {
-            disc_data_dark.push((i as f64, y_val));
-        }
-    }
-    for (i, &v) in conn_slice.iter().enumerate() {
-        if v == 0 {
-            continue;
-        }
-        let norm_val = v as f64 / max_conn;
-        let y_val = y_connected;
-        if norm_val < 0.33 {
-            conn_data_light.push((i as f64, y_val));
-        } else if norm_val < 0.66 {
-            conn_data_medium.push((i as f64, y_val));
-        } else {
-            conn_data_dark.push((i as f64, y_val));
-        }
-    }
-    for (i, &v) in disconn_slice.iter().enumerate() {
-        if v == 0 {
-            continue;
-        }
-        let norm_val = v as f64 / max_disconn;
-        let y_val = y_disconnected;
-        if norm_val < 0.33 {
-            disconn_data_light.push((i as f64, y_val));
-        } else if norm_val < 0.66 {
-            disconn_data_medium.push((i as f64, y_val));
-        } else {
-            disconn_data_dark.push((i as f64, y_val));
-        }
-    }
-
+    // We layer the datasets: Braille first (background), Dots second (foreground)
     let datasets = vec![
+        // --- BRAILLE LAYERS (Background Cloud) ---
         Dataset::default()
-            .data(&disc_data_light)
-            .marker(small_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_discovered)
-                    .add_modifier(Modifier::DIM),
-            ),
+            .marker(symbols::Marker::Braille)
+            .style(Style::default().fg(color_connected).add_modifier(Modifier::DIM))
+            .data(&conn_points_small),
         Dataset::default()
-            .data(&disc_data_medium)
-            .marker(medium_marker)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color_discovered)),
+            .marker(symbols::Marker::Braille)
+            .style(Style::default().fg(color_discovered).add_modifier(Modifier::DIM))
+            .data(&disc_points_small),
         Dataset::default()
-            .data(&disc_data_dark)
-            .marker(large_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_discovered)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .marker(symbols::Marker::Braille)
+            .style(Style::default().fg(color_disconnected).add_modifier(Modifier::DIM))
+            .data(&disconn_points_small),
+
+        // --- DOT LAYERS (Heavy Activity Highlights) ---
         Dataset::default()
-            .data(&conn_data_light)
-            .marker(small_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_connected)
-                    .add_modifier(Modifier::DIM),
-            ),
+            .marker(symbols::Marker::Dot)
+            .style(Style::default().fg(color_connected).add_modifier(Modifier::BOLD))
+            .data(&conn_points_large),
         Dataset::default()
-            .data(&conn_data_medium)
-            .marker(medium_marker)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color_connected)),
+            .marker(symbols::Marker::Dot)
+            .style(Style::default().fg(color_discovered).add_modifier(Modifier::BOLD))
+            .data(&disc_points_large),
         Dataset::default()
-            .data(&conn_data_dark)
-            .marker(large_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_connected)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        Dataset::default()
-            .data(&disconn_data_light)
-            .marker(small_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_disconnected)
-                    .add_modifier(Modifier::DIM),
-            ),
-        Dataset::default()
-            .data(&disconn_data_medium)
-            .marker(medium_marker)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color_disconnected)),
-        Dataset::default()
-            .data(&disconn_data_dark)
-            .marker(large_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_disconnected)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .marker(symbols::Marker::Dot)
+            .style(Style::default().fg(color_disconnected).add_modifier(Modifier::BOLD))
+            .data(&disconn_points_large),
     ];
 
-    // Bounds: X axis 0..width. If width=0 (empty), use 1.0 to avoid crash/ugly render
     let x_bound = disc_slice.len().max(1).saturating_sub(1) as f64;
 
-    let discovery_chart = Chart::new(datasets)
+    let chart = Chart::new(datasets)
         .block(
             Block::default()
-                .title_top(
-                    Line::from(Span::styled(
-                        "Peer Stream",
-                        Style::default().fg(color_title),
-                    ))
-                    .alignment(Alignment::Left),
-                )
-                .title_top(legend_line.alignment(Alignment::Right))
+                .title(Span::styled(
+                    " Peer Activity Stream ",
+                    Style::default().fg(theme::SUBTEXT0),
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(color_border)),
         )
-        .x_axis(
-            Axis::default()
-                .style(Style::default().fg(color_axis))
-                .bounds([0.0, x_bound]),
-        )
+        .x_axis(Axis::default().bounds([0.0, x_bound]))
         .y_axis(Axis::default().bounds([0.5, 3.5]));
 
-    f.render_widget(discovery_chart, area);
+    f.render_widget(chart, area);
 }
 
 fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
