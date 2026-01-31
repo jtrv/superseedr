@@ -42,3 +42,32 @@ rust-toolchain
 *.tar
 *.gz
 *.nfo
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# --- Integration Tests ---
+# Test data directories (generated during tests)
+integration_tests/__pycache__/
+integration_tests/src/__pycache__/
+integration_tests/data/generated/
+integration_tests/data/superseedr_watch/
+integration_tests/data/superseedr_downloads/
+integration_tests/data/superseedr_status/
+integration_tests/data/reference_client_downloads/
+integration_tests/data/tracker_data/
+integration_tests/data/qbittorrent_config/
+integration_tests/data/transmission_config/
+integration_tests/data/transmission_watch/
+integration_tests/data/test_data/
+integration_tests/artifacts/
+integration_tests/torrents/*.torrent
+!integration_tests/torrents/*.torrent.example
