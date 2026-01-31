@@ -55,7 +55,7 @@ build/
 *.egg
 
 # --- Integration Tests ---
-# Test data directories (generated during tests)
+# Runtime-generated test data (ignore these)
 integration_tests/__pycache__/
 integration_tests/src/__pycache__/
 integration_tests/data/generated/
@@ -67,7 +67,9 @@ integration_tests/data/tracker_data/
 integration_tests/data/qbittorrent_config/
 integration_tests/data/transmission_config/
 integration_tests/data/transmission_watch/
-integration_tests/data/test_data/
+integration_tests/data/transmission_downloads/
 integration_tests/artifacts/
-integration_tests/torrents/*.torrent
-!integration_tests/torrents/*.torrent.example
+
+# Static test data (track these)
+!integration_tests/data/test_data/
+!integration_tests/torrents/
