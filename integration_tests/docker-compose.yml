@@ -11,7 +11,7 @@ networks:
 services:
   # --- Tracker Service ---
   tracker:
-    image: anthonyzou/opentracker:latest
+    image: python:3.12-slim
     container_name: bittorrent-tracker
     restart: unless-stopped
     ports:
@@ -21,11 +21,9 @@ services:
         aliases:
           - tracker
     volumes:
-      - ./data/tracker_data:/var/lib/opentracker
-    entrypoint: ["/bin/sh", "-c"]
+      - ./scripts/tracker.py:/tracker.py:ro
     command: >
-      echo "listen.tcp 0.0.0.0:6969" > /etc/opentracker.conf
-      && opentracker -f /etc/opentracker.conf
+      python3 /tracker.py
 
   # --- Reference Client Service (qBittorrent) ---
   qbittorrent:
