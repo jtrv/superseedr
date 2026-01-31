@@ -164,6 +164,14 @@ class V1DownloadScenario(TestScenario):
                 )
                 if result.returncode == 0:
                     logger.info(f"  Copied {filename} to qBittorrent container")
+                    # Fix ownership to match container user (abc:users = 1000:1000)
+                    chown_result = subprocess.run(
+                        ["docker", "exec", "qbittorrent-reference", "chown", "1000:1000", f"/downloads/{filename}"],
+                        capture_output=True,
+                        text=True
+                    )
+                    if chown_result.returncode != 0:
+                        logger.warning(f"  Failed to fix ownership: {chown_result.stderr}")
                 else:
                     logger.error(f"  Failed to copy {filename}: {result.stderr}")
                     return False
@@ -301,7 +309,6 @@ class V2DownloadScenario(TestScenario):
         success = self.runner.qbittorrent.add_torrent(
             torrent_path=torrent_info.torrent_path,
             save_path="/downloads",
-            skip_checking=True,
         )
         
         if not success:
@@ -400,7 +407,6 @@ class HybridDownloadScenario(TestScenario):
         success = self.runner.qbittorrent.add_torrent(
             torrent_path=torrent_info.torrent_path,
             save_path="/downloads",
-            skip_checking=True,
         )
         
         if not success:
@@ -533,7 +539,6 @@ class SeedingScenario(TestScenario):
         success = self.runner.qbittorrent.add_torrent(
             torrent_path=torrent_info.torrent_path,
             save_path="/downloads",
-            paused=False,
         )
         
         if not success:
