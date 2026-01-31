@@ -14,7 +14,7 @@ def bencode(data):
         s = data.encode("utf-8")
         return f"{len(s)}:{s.decode()}".encode()
     elif isinstance(data, bytes):
-        return f"{len(data)}:{data.decode('latin-1')}".encode()
+        return f"{len(data)}:{data.decode('latin-1', errors='replace')}".encode()
     elif isinstance(data, list):
         result = b"l"
         for item in data:
@@ -38,15 +38,17 @@ class TrackerHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
             return
         
-        query = parse_qs(parsed.query)
+        query = parse_qs(parsed.query, keep_blank_values=True)
         
-        info_hash = query.get("info_hash", [b""])[0]
-        if isinstance(info_hash, bytes):
-            info_hash = info_hash.hex()
+        info_hash_raw = query.get("info_hash", [""])[0]
+        if isinstance(info_hash_raw, bytes):
+            info_hash_raw = info_hash_raw.decode("latin-1", errors="replace")
+        info_hash = info_hash_raw
         
-        peer_id = query.get("peer_id", [b""])[0]
-        if isinstance(peer_id, bytes):
-            peer_id = peer_id.decode("latin-1", errors="replace")
+        peer_id_raw = query.get("peer_id", [""])[0]
+        if isinstance(peer_id_raw, bytes):
+            peer_id_raw = peer_id_raw.decode("latin-1", errors="replace")
+        peer_id = peer_id_raw
         
         port = int(query.get("port", ["0"])[0])
         event = query.get("event", [""])[0]
