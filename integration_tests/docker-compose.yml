@@ -12,26 +12,20 @@ services:
   # --- Tracker Service ---
   tracker:
     image: anthonyzou/opentracker:latest
-    platform: linux/arm64
     container_name: bittorrent-tracker
     restart: unless-stopped
     ports:
       - "6969:6969/tcp"
-      - "6969:6969/udp"
     networks:
       bittorrent-test:
         aliases:
           - tracker
     volumes:
       - ./data/tracker_data:/var/lib/opentracker
+    entrypoint: ["/bin/sh", "-c"]
     command: >
-      opentracker -i 0.0.0.0
-      -p 6969
-      -P 6969
-      -A 0.0.0.0/0
-      --dedicated-network
-      --allow-public-ip
-      --no-log
+      echo "listen.tcp 0.0.0.0:6969" > /etc/opentracker.conf
+      && opentracker -f /etc/opentracker.conf
 
   # --- Reference Client Service (qBittorrent) ---
   qbittorrent:
