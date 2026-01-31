@@ -75,7 +75,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
 
     match &app_state.mode {
         AppMode::Welcome => {
-            draw_welcome_screen(f);
+            draw_welcome_screen(f, settings);
             return;
         }
         AppMode::PowerSaving => {
@@ -2847,7 +2847,7 @@ fn draw_torrent_preview_panel(
     }
 }
 
-fn draw_welcome_screen(f: &mut Frame) {
+fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
     let area = f.area();
 
     // 1. Draw the Background first (The stars/lines)
@@ -2862,6 +2862,13 @@ fn draw_welcome_screen(f: &mut Frame) {
 
     let (w_large, h_large) = get_dims(LOGO_LARGE);
     let (w_medium, h_medium) = get_dims(LOGO_MEDIUM);
+
+    // CHANGE: Resolve the path string for display
+    let download_path_str = settings
+        .default_download_folder
+        .as_ref()
+        .map(|p| p.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Manual Selection"));
 
     // Define the Main Body Text
     let text_lines = vec![
@@ -2920,6 +2927,18 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::raw("Drop files into your "),
             Span::styled("Watch Folder", Style::default().fg(theme::SKY).bold()),
             Span::raw(" to add them automatically."),
+        ]),
+        Line::from(vec![
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::raw("Download Location: "),
+            Span::styled(
+                download_path_str,
+                Style::default().fg(theme::SKY).bold(),
+            ),
+        ]),
+        Line::from(vec![
+             Span::raw("      - "),
+             Span::styled("Change or remove in Config [c]", Style::default().fg(theme::SURFACE2).italic()),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -3016,9 +3035,6 @@ fn draw_welcome_screen(f: &mut Frame) {
     // --- RENDER ---
 
     // A. Render Transparent Gradient Logo
-    // We cannot use `Paragraph` because it overwrites the background with spaces.
-    // Instead, we manually calculate positions and write only non-space characters
-    // to the buffer.
     let buf = f.buffer_mut();
     for (y_local, line) in logo_text.lines().enumerate() {
         if y_local >= final_logo_area.height as usize {
@@ -3046,7 +3062,6 @@ fn draw_welcome_screen(f: &mut Frame) {
     }
 
     // B. Render Content Box (Opaque)
-    // We clear the box area first because we WANT this to obscure the background stars
     f.render_widget(Clear, final_box_area);
 
     let block = Block::default()
