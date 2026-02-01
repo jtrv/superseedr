@@ -1,47 +1,135 @@
-name: Test Signing ONLY (No Build)
+name: Test macOS Build Fix
 
-on: workflow_dispatch
+on: 
+  push:
+    branches: [ "**" ] # Triggers on push to any branch for testing
 
 env:
-  KEYCHAIN_PASS: "temp-pass"
-  KEYCHAIN_NAME: "build.keychain"
+  CARGO_TERM_COLOR: always
+  APP_NAME: superseedr
+  KEYCHAIN_NAME: build.keychain
 
 jobs:
-  test_signing_mechanics:
+  test_macos_build:
+    timeout-minutes: 120
+    name: Test Build macOS Universal PKG (${{ matrix.suffix }})
     runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - suffix: "normal"
+            flags: ""
+          - suffix: "private"
+            flags: --no-default-features
     steps:
-      - name: 🔐 Setup Keychain (Zero Dependency)
-        env:
-          p12_base64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
-          p12_password: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+      - uses: actions/checkout@v6
+    
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Rust Apple Targets
         run: |
-          # 1. Create and Unlock Keychain
-          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+
+      # [NEW] Pre-compile binaries here to prevent Keychain timeout later
+      - name: Pre-compile Rust Binaries
+        run: |
+          echo "Starting pre-compilation to separate build time from signing time..."
+          echo "Building x86_64..."
+          cargo build --release --target x86_64-apple-darwin ${{ matrix.flags }}
+          echo "Building aarch64..."
+          cargo build --release --target aarch64-apple-darwin ${{ matrix.flags }}
+
+      - name: Setup macOS Keychain and Certificate
+        id: setup_keychain
+        env:
+          APPLE_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+        run: |
+          # Create a new keychain
+          security create-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
+          security list-keychains -s "$KEYCHAIN_NAME"
           security default-keychain -s "$KEYCHAIN_NAME"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
-          security set-keychain-settings -t 0 -u "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
           
-          # 2. Decode and Import Cert
-          echo "$p12_base64" | base64 --decode > certificate.p12
-          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$p12_password" -T /usr/bin/codesign
+          # Decode and import the .p12
+          echo $APPLE_INSTALLER_CERT_P12_BASE64 | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_INSTALLER_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
           rm certificate.p12
           
-          # 3. SET PARTITION LIST (Critical Step)
-          # This specific command prevents the "UI Prompt" hang.
-          # -S: Defines the partition list (permissions).
-          # -s: Prevents legacy warnings.
-          # -k: The keychain password (REQUIRED, otherwise it hangs waiting for input).
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
+          # Set keychain to allow signing
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" "$KEYCHAIN_NAME"
           
-          # Verify identity
-          security find-identity -v "$KEYCHAIN_NAME"
+          echo "Waiting for keychain to settle..."
+          sleep 2
 
-      - name: ✍️ Test Signing on Dummy File
+          # Find the certificate's Common Name (CN).
+          CERT_CN=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID Installer" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+
+          if [ -z "$CERT_CN" ]; then
+            echo "::error:: No valid codesigning identity found in keychain."
+            security find-identity -v "$KEYCHAIN_NAME" # Print all identities for debugging
+            exit 1
+          fi
+     
+          echo "Using certificate: $CERT_CN"
+          echo "CERT_NAME=$CERT_CN" >> $GITHUB_ENV
+      
+      - name: Execute Custom macOS Build Script
+        id: build_pkg
         run: |
-          touch dummy_app.bin
-          CERT_IDENTITY=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          SCRIPT_PATH="build_scripts/build_osx_universal_pkg.sh"
+          chmod +x "$SCRIPT_PATH"
           
-          echo "Signing with: $CERT_IDENTITY"
-          /usr/bin/codesign --force --sign "$CERT_IDENTITY" dummy_app.bin
+          set -o pipefail
           
-          echo "✅ Signing worked! No hang detected."
+          # Script will now effectively skip compilation and move straight to packaging
+          "$SCRIPT_PATH" \
+            "${{ github.ref_name }}" \
+            "${{ matrix.suffix }}" \
+            "${{ env.CERT_NAME }}" \
+            ${{ matrix.flags }} \
+            2>&1 | tee build_log.txt
+   
+          PKG_PATH=$(grep 'PKG_PATH=' build_log.txt | head -n 1 | sed -n 's/.*PKG_PATH=\(.*\)/\1/p' | tr -d '[:space:]')
+          
+          if [ -z "$PKG_PATH" ]; then
+            echo "::error::Build script finished, but 'PKG_PATH=' was not found in the log."
+            exit 1
+          fi
+          
+          echo "PKG_PATH found: $PKG_PATH"
+          echo "pkg_path=$PKG_PATH" >> $GITHUB_OUTPUT
+
+      - name: Notarize and Staple PKG
+        id: notarize
+        env:
+          APPLE_NOTARY_USERNAME: ${{ secrets.APPLE_NOTARY_USERNAME }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          PKG_FILE_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
+          echo "Submitting $PKG_FILE_PATH for notarization..."
+          
+          xcrun notarytool submit "$PKG_FILE_PATH" \
+            --apple-id "$APPLE_NOTARY_USERNAME" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+             
+          echo "Notarization successful. Stapling ticket..."
+          xcrun stapler staple "$PKG_FILE_PATH"
+
+      - name: Cleanup Keychain
+        if: always()
+        run: |
+          security delete-keychain "$KEYCHAIN_NAME"
