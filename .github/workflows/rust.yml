@@ -1,22 +1,19 @@
-name: Build macOS Universal PKG
+name: Test macOS Build Fix
 
-on:
+on: 
   push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+    branches: [ "**" ] # Triggers on push to any branch for testing
 
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: superseedr
+  KEYCHAIN_NAME: build.keychain
 
 jobs:
-  bundle_macos:
+  test_macos_build:
     timeout-minutes: 120
-    name: Build macOS Universal PKG (${{ matrix.suffix }})
+    name: Test Build macOS Universal PKG (${{ matrix.suffix }})
     runs-on: macos-latest
-    env:
-      KEYCHAIN_NAME: build.keychain
     strategy:
       matrix:
         include:
@@ -26,10 +23,7 @@ jobs:
             flags: --no-default-features
     steps:
       - uses: actions/checkout@v6
-
-      # --- PHASE 1: COMPILATION (No Keychain Active) ---
-      # Running the heavy build first prevents the keychain from timing out 
-      # or locking up during the long compilation process.
+    
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -46,61 +40,74 @@ jobs:
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
 
-      - name: Build Binaries (Release)
+      # [NEW] Pre-compile binaries here to prevent Keychain timeout later
+      - name: Pre-compile Rust Binaries
         run: |
-          echo "Building for Apple Silicon..."
-          cargo build --release --target aarch64-apple-darwin ${{ matrix.flags }}
-          echo "Building for Intel..."
+          echo "Starting pre-compilation to separate build time from signing time..."
+          echo "Building x86_64..."
           cargo build --release --target x86_64-apple-darwin ${{ matrix.flags }}
+          echo "Building aarch64..."
+          cargo build --release --target aarch64-apple-darwin ${{ matrix.flags }}
 
-      # --- PHASE 2: SIGNING SETUP ---
-      # Now that compilation is done, we initialize the keychain.
       - name: Setup macOS Keychain and Certificate
         id: setup_keychain
         env:
           APPLE_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
           APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
         run: |
+          # Create a new keychain
           security create-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
           security list-keychains -s "$KEYCHAIN_NAME"
           security default-keychain -s "$KEYCHAIN_NAME"
           security unlock-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
           
+          # Decode and import the .p12
           echo $APPLE_INSTALLER_CERT_P12_BASE64 | base64 --decode > certificate.p12
           security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_INSTALLER_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
           rm certificate.p12
           
-          # Allows the codesign/productsign tools to access the keychain without a popup.
+          # Set keychain to allow signing
           security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" "$KEYCHAIN_NAME"
           
+          echo "Waiting for keychain to settle..."
+          sleep 2
+
+          # Find the certificate's Common Name (CN).
           CERT_CN=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID Installer" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+
           if [ -z "$CERT_CN" ]; then
-            echo "::error:: No valid codesigning identity found."
+            echo "::error:: No valid codesigning identity found in keychain."
+            security find-identity -v "$KEYCHAIN_NAME" # Print all identities for debugging
             exit 1
           fi
+     
+          echo "Using certificate: $CERT_CN"
           echo "CERT_NAME=$CERT_CN" >> $GITHUB_ENV
-
-      # --- PHASE 3: PACKAGING & NOTARIZATION ---
+      
       - name: Execute Custom macOS Build Script
         id: build_pkg
         run: |
           SCRIPT_PATH="build_scripts/build_osx_universal_pkg.sh"
           chmod +x "$SCRIPT_PATH"
+          
           set -o pipefail
           
-          # Ensure this script uses the pre-built binaries in target/ to avoid re-compilation.
+          # Script will now effectively skip compilation and move straight to packaging
           "$SCRIPT_PATH" \
-            ${{ github.ref_name }} \
-            ${{ matrix.suffix }} \
+            "${{ github.ref_name }}" \
+            "${{ matrix.suffix }}" \
             "${{ env.CERT_NAME }}" \
             ${{ matrix.flags }} \
             2>&1 | tee build_log.txt
-          
+   
           PKG_PATH=$(grep 'PKG_PATH=' build_log.txt | head -n 1 | sed -n 's/.*PKG_PATH=\(.*\)/\1/p' | tr -d '[:space:]')
+          
           if [ -z "$PKG_PATH" ]; then
-            echo "::error:: PKG_PATH not found in build logs."
+            echo "::error::Build script finished, but 'PKG_PATH=' was not found in the log."
             exit 1
           fi
+          
+          echo "PKG_PATH found: $PKG_PATH"
           echo "pkg_path=$PKG_PATH" >> $GITHUB_OUTPUT
 
       - name: Notarize and Staple PKG
@@ -112,31 +119,17 @@ jobs:
         run: |
           PKG_FILE_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
           echo "Submitting $PKG_FILE_PATH for notarization..."
+          
           xcrun notarytool submit "$PKG_FILE_PATH" \
             --apple-id "$APPLE_NOTARY_USERNAME" \
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
-          
-          echo "Stapling notarization ticket..."
+             
+          echo "Notarization successful. Stapling ticket..."
           xcrun stapler staple "$PKG_FILE_PATH"
 
-      - name: Stage macOS PKG
-        id: stage_pkg
-        run: |
-          mkdir -p staging
-          PKG_SRC_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
-          [ "${{ matrix.suffix }}" = "normal" ] && SUFFIX_VAL="" || SUFFIX_VAL="-${{ matrix.suffix }}"
-          PKG_NAME="${{ env.APP_NAME }}-${{ github.ref_name }}${SUFFIX_VAL}-universal-macos.pkg"
-          mv "$PKG_SRC_PATH" "staging/$PKG_NAME"
-          echo "final_pkg_path=staging/$PKG_NAME" >> $GITHUB_OUTPUT
-
       - name: Cleanup Keychain
-        if: always() # Ensures the keychain is removed even on failure.
-        run: security delete-keychain "$KEYCHAIN_NAME"
-
-      - name: Upload macOS PKG Artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: superseedr-macos-${{ matrix.suffix }}-universal-${{ github.ref_name }} 
-          path: ${{ steps.stage_pkg.outputs.final_pkg_path }}
+        if: always()
+        run: |
+          security delete-keychain "$KEYCHAIN_NAME"
