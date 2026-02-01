@@ -1,68 +1,88 @@
-name: Test Signing (Manual & Secure)
+name: Debug Signing Hang
 
-# Trigger on push, but keep manual button just in case
-on:
-  push:
-  workflow_dispatch:
+on: [push, workflow_dispatch]
 
 env:
   KEYCHAIN_PASS: "temp-build-password"
 
 jobs:
-  test_signing_manual:
+  debug_signing:
     runs-on: macos-latest
-    timeout-minutes: 10  # <--- Added 10 minute timeout
-    
+    timeout-minutes: 5 # Fail fast if the whole job gets stuck
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🔐 Setup Keychain (Absolute Path Fix)
+      - name: 🔍 Deep Debug Keychain Setup
         env:
           p12_base64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
           p12_password: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
         run: |
-          # Use absolute path to prevent "UI Prompt" hangs
-          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          # --- ENABLE DEBUG MODE ---
+          set -x  # This prints every command to the log
           
-          # 1. Create and Configure
+          # 1. Define Paths
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          echo "Debug: Using keychain at $KEYCHAIN_PATH"
+
+          # 2. Create & Configure
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          security set-keychain-settings -t 0 -u "$KEYCHAIN_PATH"
           
-          # 2. Import Certificate (Allow All Apps)
+          # 3. Unlock & Verify
+          echo "Debug: Unlocking..."
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          
+          # Print info to prove it is unlocked (Look for "no-timeout" in logs)
+          security show-keychain-info "$KEYCHAIN_PATH"
+
+          # 4. Import Cert
           echo "$p12_base64" | base64 --decode > certificate.p12
+          
+          echo "Debug: Importing certificate..."
+          # We use -A to trust all apps. 
+          # We also verify the file size to ensure decoding worked.
+          ls -l certificate.p12
           security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$p12_password" -A
           rm certificate.p12
+
+          # 5. List Identities (Did import work?)
+          echo "Debug: Listing identities..."
+          security find-identity -v "$KEYCHAIN_PATH"
+
+          # 6. ATTEMPTING PARTITION LIST (The Danger Zone)
+          echo "Debug: setting partition list permissions..."
           
-          # 3. Set Partition List (The Critical Fix)
-          #    Using absolute path and explicit unlock
+          # We force unlock again explicitly
           security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+
+          # We wrap this in a timeout. If it hangs, it dies in 30s so we see the log.
+          # We also removed 'apple-tool:' and 'apple:' to simplify the request to just 'codesign'
+          # This helps narrow down if a specific tool reference is breaking it.
           
-          echo "Setting permissions..."
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
+          timeout 30s security set-key-partition-list \
+            -S codesign: \
             -s \
             -k "$KEYCHAIN_PASS" \
             "$KEYCHAIN_PATH"
-          
-          # 4. Verify
-          security find-identity -v "$KEYCHAIN_PATH"
+            
+          echo "Debug: Partition list command finished (pass or fail)."
+
+          # Export for next step
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
-      - name: ✍️ Test Signing (Dummy File)
+      - name: ✍️ Test Signing
         run: |
+          set -x
           touch dummy_app.bin
           
-          # Find identity
           CERT_IDENTITY=$(security find-identity -v "$KEYCHAIN_PATH" | grep "Developer ID" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
           
           if [ -z "$CERT_IDENTITY" ]; then
-             echo "::error::No Identity Found!"
+             echo "::error::No Identity Found - Import likely failed"
              exit 1
           fi
           
-          echo "Signing with: $CERT_IDENTITY"
-          /usr/bin/codesign --force --sign "$CERT_IDENTITY" dummy_app.bin
+          echo "Debug: Attempting to sign with '$CERT_IDENTITY'"
           
-          echo "✅ Success! Signing worked."
+          # Sign with verbose output
+          /usr/bin/codesign -vvv --force --sign "$CERT_IDENTITY" dummy_app.bin
