@@ -1,4 +1,4 @@
-name: Test Signing (Final Fix)
+name: Test Signing (Explicit Trust)
 
 on: [push, workflow_dispatch]
 
@@ -8,46 +8,48 @@ env:
 jobs:
   test_signing_mechanics:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 5 # Fail fast
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🔐 Setup Keychain
+      - name: 🔐 Setup Keychain (Trust Strategy)
         env:
           p12_base64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
           p12_password: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
         run: |
-          set -e # Fail script immediately on error
+          set -e
           
-          # 1. Define Absolute Path (Critical for avoiding UI prompts)
+          # 1. Define Absolute Path
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
           echo "Using keychain at: $KEYCHAIN_PATH"
 
           # 2. Create & Configure
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           
-          # 3. SET TIMEOUT TO 0 (Infinite)
-          # Your logs showed 300s previously. This fixes the long-build hang.
+          # --- CRITICAL MISSING STEP ---
+          # We must add the keychain to the search list, or codesign won't find it.
+          security list-keychains -s "$KEYCHAIN_PATH"
+          
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -t 0 -u "$KEYCHAIN_PATH"
 
-          # 4. Import Certificate (Allow All Apps)
+          # 3. Import with Explicit Trust (-T)
+          # We REMOVED -A (Allow All) and replaced it with -T (Trust Tool).
+          # This tells the keychain: "Allow /usr/bin/codesign to use this key immediately."
+          # This creates the ACL entry during import, making 'set-key-partition-list' unnecessary.
+          
           echo "$p12_base64" | base64 --decode > certificate.p12
-          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$p12_password" -A
+          
+          security import certificate.p12 \
+            -k "$KEYCHAIN_PATH" \
+            -P "$p12_password" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productsign
+          
           rm certificate.p12
 
-          # 5. Set Partition List (The Fix)
-          # We removed 'timeout 30s' because it crashed. 
-          # The absolute path + -k flag should prevent the hang.
-          echo "Setting partition list permissions..."
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
-            -s \
-            -k "$KEYCHAIN_PASS" \
-            "$KEYCHAIN_PATH"
-
-          # 6. Verify Identity
+          # 4. Verify Identity
           security find-identity -v "$KEYCHAIN_PATH"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
@@ -63,6 +65,8 @@ jobs:
           fi
           
           echo "Signing with: $CERT_IDENTITY"
+          
+          # Force sign. If this works, the build is fixed.
           /usr/bin/codesign -vvv --force --sign "$CERT_IDENTITY" dummy_app.bin
           
           echo "✅ Signing Success!"
