@@ -3,23 +3,36 @@
 
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+use strum_macros::{Display, EnumIter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumIter, Display)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
-    CatppuccinMocha,
-    Neon,
+    #[strum(serialize = "Candy Land Pink")]
     #[serde(alias = "candly_land_pink")]
     CandyLandPink,
+    #[strum(serialize = "Catppuccin Mocha")]
+    CatppuccinMocha,
+    #[strum(serialize = "Dracula")]
     Dracula,
-    Nord,
-    GruvboxDark,
-    TokyoNight,
-    OneDark,
-    SolarizedDark,
-    Monokai,
+    #[strum(serialize = "Everforest Dark")]
     EverforestDark,
+    #[strum(serialize = "Gruvbox Dark")]
+    GruvboxDark,
+    #[strum(serialize = "Monokai")]
+    Monokai,
+    #[strum(serialize = "Neon")]
+    Neon,
+    #[strum(serialize = "Nord")]
+    Nord,
+    #[strum(serialize = "One Dark")]
+    OneDark,
+    #[strum(serialize = "Rose Pine")]
     RosePine,
+    #[strum(serialize = "Solarized Dark")]
+    SolarizedDark,
+    #[strum(serialize = "Tokyo Night")]
+    TokyoNight,
 }
 
 impl Default for ThemeName {
@@ -108,18 +121,18 @@ pub struct Theme {
 impl Theme {
     pub fn builtin(name: ThemeName) -> Self {
         match name {
-            ThemeName::CatppuccinMocha => Self::catppuccin_mocha(),
-            ThemeName::Neon => Self::neon(),
             ThemeName::CandyLandPink => Self::candy_land_pink(),
+            ThemeName::CatppuccinMocha => Self::catppuccin_mocha(),
             ThemeName::Dracula => Self::dracula(),
-            ThemeName::Nord => Self::nord(),
-            ThemeName::GruvboxDark => Self::gruvbox_dark(),
-            ThemeName::TokyoNight => Self::tokyo_night(),
-            ThemeName::OneDark => Self::one_dark(),
-            ThemeName::SolarizedDark => Self::solarized_dark(),
-            ThemeName::Monokai => Self::monokai(),
             ThemeName::EverforestDark => Self::everforest_dark(),
+            ThemeName::GruvboxDark => Self::gruvbox_dark(),
+            ThemeName::Monokai => Self::monokai(),
+            ThemeName::Neon => Self::neon(),
+            ThemeName::Nord => Self::nord(),
+            ThemeName::OneDark => Self::one_dark(),
             ThemeName::RosePine => Self::rose_pine(),
+            ThemeName::SolarizedDark => Self::solarized_dark(),
+            ThemeName::TokyoNight => Self::tokyo_night(),
         }
     }
 

@@ -213,6 +213,26 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
                             }
                         }
+                        KeyCode::Char('<') => {
+                            use strum::IntoEnumIterator;
+                            let themes: Vec<_> = crate::theme::ThemeName::iter().collect();
+                            let current_idx = themes.iter().position(|&t| t == app.client_configs.ui_theme).unwrap_or(0);
+                            let new_idx = if current_idx == 0 {
+                                themes.len() - 1
+                            } else {
+                                current_idx - 1
+                            };
+                            app.client_configs.ui_theme = themes[new_idx];
+                            app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                        }
+                        KeyCode::Char('>') => {
+                            use strum::IntoEnumIterator;
+                            let themes: Vec<_> = crate::theme::ThemeName::iter().collect();
+                            let current_idx = themes.iter().position(|&t| t == app.client_configs.ui_theme).unwrap_or(0);
+                            let new_idx = (current_idx + 1) % themes.len();
+                            app.client_configs.ui_theme = themes[new_idx];
+                            app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                        }
                         KeyCode::Char('p') => {
                             if let Some(info_hash) = app
                                 .app_state
