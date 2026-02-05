@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use ratatui::style::Color;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::{Display, EnumIter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumIter, Display)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
 pub enum ThemeName {
     #[strum(serialize = "Candy Land Pink")]
-    #[serde(alias = "candly_land_pink")]
     CandyLandPink,
     #[strum(serialize = "Catppuccin Mocha")]
     CatppuccinMocha,
@@ -38,6 +36,56 @@ pub enum ThemeName {
 impl Default for ThemeName {
     fn default() -> Self {
         Self::CatppuccinMocha
+    }
+}
+
+impl Serialize for ThemeName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = match self {
+            ThemeName::CandyLandPink => "candy_land_pink",
+            ThemeName::CatppuccinMocha => "catppuccin_mocha",
+            ThemeName::Dracula => "dracula",
+            ThemeName::EverforestDark => "everforest_dark",
+            ThemeName::GruvboxDark => "gruvbox_dark",
+            ThemeName::Monokai => "monokai",
+            ThemeName::Neon => "neon",
+            ThemeName::Nord => "nord",
+            ThemeName::OneDark => "one_dark",
+            ThemeName::RosePine => "rose_pine",
+            ThemeName::SolarizedDark => "solarized_dark",
+            ThemeName::TokyoNight => "tokyo_night",
+        };
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ThemeName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "candy_land_pink" | "Candy Land Pink" => Ok(ThemeName::CandyLandPink),
+            "catppuccin_mocha" | "Catppuccin Mocha" => Ok(ThemeName::CatppuccinMocha),
+            "dracula" | "Dracula" => Ok(ThemeName::Dracula),
+            "everforest_dark" | "Everforest Dark" => Ok(ThemeName::EverforestDark),
+            "gruvbox_dark" | "Gruvbox Dark" => Ok(ThemeName::GruvboxDark),
+            "monokai" | "Monokai" => Ok(ThemeName::Monokai),
+            "neon" | "Neon" => Ok(ThemeName::Neon),
+            "nord" | "Nord" => Ok(ThemeName::Nord),
+            "one_dark" | "One Dark" => Ok(ThemeName::OneDark),
+            "rose_pine" | "Rose Pine" => Ok(ThemeName::RosePine),
+            "solarized_dark" | "Solarized Dark" => Ok(ThemeName::SolarizedDark),
+            "tokyo_night" | "Tokyo Night" => Ok(ThemeName::TokyoNight),
+            _ => {
+                // Unknown theme - default to CatppuccinMocha
+                Ok(ThemeName::CatppuccinMocha)
+            }
+        }
     }
 }
 
@@ -947,4 +995,112 @@ fn categorical_ip_hash(categorical: ThemeCategorical) -> [Color; 14] {
         categorical.blue,
         categorical.lavender,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_known_themes_snake_case() {
+        // Test that all known themes deserialize correctly in snake_case
+        let themes = vec![
+            ("candy_land_pink", ThemeName::CandyLandPink),
+            ("catppuccin_mocha", ThemeName::CatppuccinMocha),
+            ("dracula", ThemeName::Dracula),
+            ("everforest_dark", ThemeName::EverforestDark),
+            ("gruvbox_dark", ThemeName::GruvboxDark),
+            ("monokai", ThemeName::Monokai),
+            ("neon", ThemeName::Neon),
+            ("nord", ThemeName::Nord),
+            ("one_dark", ThemeName::OneDark),
+            ("rose_pine", ThemeName::RosePine),
+            ("solarized_dark", ThemeName::SolarizedDark),
+            ("tokyo_night", ThemeName::TokyoNight),
+        ];
+
+        for (input, expected) in themes {
+            let deserialized: ThemeName = serde_json::from_str(&format!("\"{}\"", input)).unwrap();
+            assert_eq!(deserialized, expected, "Failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_known_themes_display_format() {
+        // Test that all known themes deserialize correctly in display format
+        let themes = vec![
+            ("Candy Land Pink", ThemeName::CandyLandPink),
+            ("Catppuccin Mocha", ThemeName::CatppuccinMocha),
+            ("Dracula", ThemeName::Dracula),
+            ("Everforest Dark", ThemeName::EverforestDark),
+            ("Gruvbox Dark", ThemeName::GruvboxDark),
+            ("Monokai", ThemeName::Monokai),
+            ("Neon", ThemeName::Neon),
+            ("Nord", ThemeName::Nord),
+            ("One Dark", ThemeName::OneDark),
+            ("Rose Pine", ThemeName::RosePine),
+            ("Solarized Dark", ThemeName::SolarizedDark),
+            ("Tokyo Night", ThemeName::TokyoNight),
+        ];
+
+        for (input, expected) in themes {
+            let deserialized: ThemeName = serde_json::from_str(&format!("\"{}\"", input)).unwrap();
+            assert_eq!(deserialized, expected, "Failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_unknown_themes_default_to_catppuccin_mocha() {
+        // Test that unknown themes default to CatppuccinMocha
+        let unknown_themes = vec![
+            "cuppochinmocha",
+            "invalid_theme",
+            "unknown",
+            "",
+            "   ",
+            "CatpuccinMocha",
+            "mocha",
+            "dark_theme",
+        ];
+
+        for input in unknown_themes {
+            let deserialized: ThemeName = serde_json::from_str(&format!("\"{}\"", input)).unwrap();
+            assert_eq!(
+                deserialized,
+                ThemeName::CatppuccinMocha,
+                "Unknown theme '{}' should default to CatppuccinMocha",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_theme_default_is_catppuccin_mocha() {
+        assert_eq!(ThemeName::default(), ThemeName::CatppuccinMocha);
+    }
+
+    #[test]
+    fn test_theme_name_roundtrip() {
+        // Test that all themes can be serialized and deserialized
+        let all_themes = vec![
+            ThemeName::CandyLandPink,
+            ThemeName::CatppuccinMocha,
+            ThemeName::Dracula,
+            ThemeName::EverforestDark,
+            ThemeName::GruvboxDark,
+            ThemeName::Monokai,
+            ThemeName::Neon,
+            ThemeName::Nord,
+            ThemeName::OneDark,
+            ThemeName::RosePine,
+            ThemeName::SolarizedDark,
+            ThemeName::TokyoNight,
+        ];
+
+        for theme in all_themes {
+            let serialized = serde_json::to_string(&theme).unwrap();
+            let deserialized: ThemeName = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(theme, deserialized);
+        }
+    }
 }
