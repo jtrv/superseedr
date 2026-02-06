@@ -50,12 +50,22 @@ The theme is split into **semantic** and **scale** slots. Semantic slots describ
 - `dust` (foreground/midground/background for parallax dust)
 - `categorical` (legacy categorical palette used across components)
 
-**Theme Effects (Initial, No Behavioral Change)**
-- `glow_enabled: bool`
-- `flicker_hz: f32`
-- `flicker_intensity: f32`
-These fields exist for extensibility but are not required to affect rendering in the first iteration.
-Effects should be addable later without refactoring if components always source colors through the theme instance.
+**Theme Effects Implementation Strategy**
+- `glow_enabled: bool`: If true, applies a glow effect to supported elements (borders, headers, key text).
+- `flicker_hz: f32`: Frequency of the flicker effect (e.g., 18.0 Hz).
+- `flicker_intensity: f32`: Intensity of the flicker (0.0 to 1.0).
+
+**Implementation Details**
+- A helper function `apply_theme_effects(style: Style, theme: &Theme) -> Style` will be created in `src/tui/view.rs`.
+- This function will:
+    - Check `theme.effects.glow_enabled`.
+    - Calculate a pulse/flicker modifier based on `flicker_hz` and current time.
+    - Modify the `fg` or `bg` of the style to simulate glow or flicker (e.g., by boosting brightness or shifting color).
+- The rendering loop (`draw` functions) will wrap semantic styles with `apply_theme_effects` for key elements:
+    - **Borders**: Block borders for panels.
+    - **Headers**: Column headers in tables.
+    - **Text**: Important text elements like status messages, download/upload speeds, and key metrics.
+
 
 **Theme Selection**
 - Introduce a `ui_theme` config field in settings to select a built-in theme.
@@ -94,7 +104,7 @@ Effects should be addable later without refactoring if components always source 
 **Rollout**
 - Phase 1: Structural refactor + default theme parity.
 - Phase 2: Add built-in palettes (Neon, Candy Land Pink) without effects.
-- Phase 3: Introduce effects and tune per-theme behavior if desired.
+- Phase 3: Introduce effects (glow/flicker) using `apply_theme_effects` helper and tune per-theme behavior.
 
 **Open Questions**
 - Should theme selection be exposed in the TUI config screen immediately?
