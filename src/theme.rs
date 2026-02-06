@@ -2164,8 +2164,8 @@ impl Theme {
             name: ThemeName::Aurora,
             effects: ThemeEffects {
                 glow_enabled: true,
-                flicker_hz: 2.0,
-                flicker_intensity: 0.15,
+                flicker_hz: 3.0,
+                flicker_intensity: 0.40,
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(150, 255, 200),

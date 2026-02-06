@@ -1844,7 +1844,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
                 )
                 .title_top(legend_line.alignment(Alignment::Right))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(color_border)),
+                .border_style(apply_theme_effects(Style::default().fg(color_border), theme)),
         )
         .x_axis(Axis::default().bounds([0.0, x_bound]))
         .y_axis(Axis::default().bounds([0.5, 3.5]));
@@ -1904,7 +1904,7 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let block = Block::default()
         .title(Line::from(title_spans))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(color_border));
+        .border_style(apply_theme_effects(Style::default().fg(color_border), theme));
 
     let Some(torrent) = selected_torrent else {
         f.render_widget(block, area);
@@ -3384,20 +3384,20 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme:
     let text_lines = vec![
         Line::from(Span::styled(
             "How to Get Started:",
-            Style::default().fg(theme.scale.categorical.yellow).bold(),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow).bold(), theme),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
+            Span::styled(" ★ ", apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme)),
             Span::raw("Paste ("),
             Span::styled(
                 "Ctrl+V",
-                Style::default().fg(theme.scale.categorical.sky).bold(),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky).bold(), theme),
             ),
             Span::raw(") a "),
             Span::styled(
                 "magnet link",
-                Style::default().fg(theme.scale.categorical.peach),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.peach), theme),
             ),
             Span::raw(" from your clipboard."),
         ]),
@@ -3411,25 +3411,25 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme:
             ),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
+            Span::styled(" ★ ", apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme)),
             Span::raw("Press "),
             Span::styled(
                 "[a]",
-                Style::default().fg(theme.scale.categorical.mauve).bold(),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve).bold(), theme),
             ),
             Span::raw(" to open the file picker and select a "),
             Span::styled(
                 "`.torrent`",
-                Style::default().fg(theme.scale.categorical.peach),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.peach), theme),
             ),
             Span::raw(" file."),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
+            Span::styled(" ★ ", apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme)),
             Span::raw("Use the "),
             Span::styled(
                 "CLI",
-                Style::default().fg(theme.scale.categorical.sky).bold(),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky).bold(), theme),
             ),
             Span::raw(" from another terminal:"),
         ]),
@@ -3448,20 +3448,20 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme:
             ),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
+            Span::styled(" ★ ", apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme)),
             Span::raw("Drop files into your "),
             Span::styled(
                 "Watch Folder",
-                Style::default().fg(theme.scale.categorical.sky).bold(),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky).bold(), theme),
             ),
             Span::raw(" to add them automatically."),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
+            Span::styled(" ★ ", apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme)),
             Span::raw("Download Location: "),
             Span::styled(
                 download_path_str,
-                Style::default().fg(theme.scale.categorical.sky).bold(),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky).bold(), theme),
             ),
         ]),
         Line::from(vec![
@@ -3475,7 +3475,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme:
         Line::from(vec![
             Span::styled(
                 "Browser Support: ",
-                Style::default().fg(theme.scale.categorical.yellow).bold(),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow).bold(), theme),
             ),
             Span::raw("To open magnet links directly from your browser,"),
         ]),
@@ -3491,17 +3491,17 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme:
     ];
 
     let footer_line = Line::from(vec![
-        Span::styled(" [m] ", Style::default().fg(theme.scale.categorical.teal)),
-        Span::styled("Manual/Help", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" [m] ", apply_theme_effects(Style::default().fg(theme.scale.categorical.teal), theme)),
+        Span::styled("Manual/Help", apply_theme_effects(Style::default().fg(theme.semantic.subtext1), theme)),
         Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
-        Span::styled(" [c] ", Style::default().fg(theme.scale.categorical.mauve)),
-        Span::styled("Config", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" [c] ", apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme)),
+        Span::styled("Config", apply_theme_effects(Style::default().fg(theme.semantic.subtext1), theme)),
         Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
-        Span::styled(" [Q] ", Style::default().fg(theme.scale.categorical.red)),
-        Span::styled("Quit", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" [Q] ", apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme)),
+        Span::styled("Quit", apply_theme_effects(Style::default().fg(theme.semantic.subtext1), theme)),
         Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
-        Span::styled(" [Esc] ", Style::default().fg(theme.scale.categorical.red)),
-        Span::styled("Dismiss", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" [Esc] ", apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme)),
+        Span::styled("Dismiss", apply_theme_effects(Style::default().fg(theme.semantic.subtext1), theme)),
     ]);
 
     let text_content_height = text_lines.len() as u16;
@@ -3675,7 +3675,10 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.scale.categorical.red)),
+                    .border_style(apply_theme_effects(
+                        Style::default().fg(theme.scale.categorical.red),
+                        theme,
+                    )),
             )
             .style(Style::default().fg(theme.scale.categorical.yellow));
         f.render_widget(warning_paragraph, chunks[0]);
@@ -4158,7 +4161,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.semantic.border))
+            .border_style(apply_theme_effects(Style::default().fg(theme.semantic.border), theme))
             .padding(Padding::new(2, 2, 1, 1)),
     );
 
@@ -4182,7 +4185,7 @@ fn draw_config_screen(
             Style::default().fg(theme.scale.categorical.mauve),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.semantic.border));
+        .border_style(apply_theme_effects(Style::default().fg(theme.semantic.border), theme));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -4669,7 +4672,7 @@ fn draw_swarm_heatmap(
         .title(title)
         .borders(Borders::NONE)
         .padding(Padding::new(1, 1, 0, 1))
-        .border_style(Style::default().fg(theme.semantic.border));
+        .border_style(apply_theme_effects(Style::default().fg(theme.semantic.border), theme));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -4836,7 +4839,7 @@ fn get_animated_style(theme: &crate::theme::Theme, x: usize, y: usize) -> Style 
     // This makes individual characters flicker like the block stream particles
     let seed = (x as f64 * 13.0 + y as f64 * 29.0 + time * 15.0).sin();
 
-    if seed > 0.85 {
+    let style = if seed > 0.85 {
         // High energy sparkle: White/Bright + Bold (Active Data)
         Style::default()
             .fg(theme.semantic.white)
@@ -4847,7 +4850,9 @@ fn get_animated_style(theme: &crate::theme::Theme, x: usize, y: usize) -> Style 
     } else {
         // Low energy: Base Color + Dim (Background Flow)
         Style::default().fg(base_color).add_modifier(Modifier::DIM)
-    }
+    };
+
+    apply_theme_effects(style, theme)
 }
 
 // Updated: 3-Layer Parallax "Data Field" Background
