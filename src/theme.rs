@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use ratatui::style::{Color, Style, Modifier};
-use std::time::{SystemTime, UNIX_EPOCH};
+use ratatui::style::{Color, Style};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 use strum_macros::{Display, EnumIter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
@@ -271,13 +271,13 @@ pub fn apply_theme_effects(style: Style, theme: &Theme) -> Style {
         // Interference Pattern Algorithm:
         // 1. Global Rhythm: A steady pulse shared by everyone (sync anchor)
         // 2. Local Drift: A faster, phase-shifted pulse unique to the color (chaos)
-        
+
         // Color-based phase shift
         let phase_offset = (r as f64 * 3.0 + g as f64 * 5.0 + b as f64 * 7.0) * 0.01;
 
         // Base wave (Global sync)
         let base_wave = (time * freq).sin();
-        
+
         // Offset wave (Local drift) - 1.4x speed creates a polyrhythm
         let drift_wave = ((time * freq * 1.4) + phase_offset).sin();
 
@@ -291,7 +291,7 @@ pub fn apply_theme_effects(style: Style, theme: &Theme) -> Style {
         } else {
             // Negative cycle: Dim (mix with Black)
             // We use a slightly reduced intensity for dimming to preserve legibility
-            let factor = wave.abs() * (intensity * 0.8); 
+            let factor = wave.abs() * (intensity * 0.8);
             blend_colors((r, g, b), (0, 0, 0), factor)
         };
 
