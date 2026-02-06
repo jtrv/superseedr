@@ -13,10 +13,10 @@ use crate::tui::tree::{TreeFilter, TreeMathHelper};
 use crate::app::FileBrowserMode;
 use crate::app::FileMetadata;
 use crate::app::GraphDisplayMode;
-use crate::theme::{apply_theme_effects, blend_colors, color_to_rgb};
 use crate::app::PeerInfo;
 use crate::app::{AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::app::{BrowserPane, FilePriority};
+use crate::theme::{apply_theme_effects, blend_colors, color_to_rgb};
 
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::PeerColumnId;
@@ -324,14 +324,20 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                                 ColumnId::DownSpeed => {
                                     Cell::from(format_speed(torrent.smoothed_download_speed_bps))
                                         .style(apply_theme_effects(
-                                            speed_to_style(theme, torrent.smoothed_download_speed_bps),
+                                            speed_to_style(
+                                                theme,
+                                                torrent.smoothed_download_speed_bps,
+                                            ),
                                             theme,
                                         ))
                                 }
                                 ColumnId::UpSpeed => {
                                     Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
                                         .style(apply_theme_effects(
-                                            speed_to_style(theme, torrent.smoothed_upload_speed_bps),
+                                            speed_to_style(
+                                                theme,
+                                                torrent.smoothed_upload_speed_bps,
+                                            ),
                                             theme,
                                         ))
                                 }
@@ -412,13 +418,16 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         let empty_msg = vec![
             Line::from(Span::styled(
                 "No Torrents",
-                Style::default()
-                    .fg(theme.semantic.surface2)
-                    .add_modifier(Modifier::BOLD),
+                apply_theme_effects(
+                    Style::default()
+                        .fg(theme.semantic.surface2)
+                        .add_modifier(Modifier::BOLD),
+                    theme,
+                ),
             )),
             Line::from(Span::styled(
                 "Press [a] to add a file or [v] to paste a magnet link",
-                Style::default().fg(theme.semantic.surface2),
+                apply_theme_effects(Style::default().fg(theme.semantic.surface2), theme),
             )),
         ];
 
@@ -596,10 +605,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
     ];
     let mut title_spans: Vec<Span> = vec![Span::styled(
         "Network Activity ",
-        apply_theme_effects(
-            Style::default().fg(theme.scale.categorical.peach),
-            theme,
-        ),
+        apply_theme_effects(Style::default().fg(theme.scale.categorical.peach), theme),
     )];
     for (i, &mode) in all_modes.iter().enumerate() {
         let is_active = mode == app_state.graph_mode;
@@ -768,26 +774,17 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled(
                 "Run Time: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.teal),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.teal), theme),
             ),
             Span::styled(
                 format_time(app_state.run_time),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.teal),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.teal), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "Torrents: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.peach),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.peach), theme),
             ),
             Span::styled(
                 format!(
@@ -795,10 +792,7 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
                     app_state.torrents.len(),
                     format_bytes(total_library_size)
                 ),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.peach),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.peach), theme),
             ),
         ]),
         Line::from(""),
@@ -806,36 +800,23 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled(
                 "Session DL: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::styled(
                 format_bytes(app_state.session_total_downloaded),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "Lifetime DL: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::styled(
                 format_bytes(
-                    app_state.lifetime_downloaded_from_config
-                        + app_state.session_total_downloaded,
+                    app_state.lifetime_downloaded_from_config + app_state.session_total_downloaded,
                 ),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
         ]),
         Line::from(""),
@@ -843,69 +824,44 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled(
                 "Session UL: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 format_bytes(app_state.session_total_uploaded),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "Lifetime UL: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 format_bytes(
-                    app_state.lifetime_uploaded_from_config
-                        + app_state.session_total_uploaded,
+                    app_state.lifetime_uploaded_from_config + app_state.session_total_uploaded,
                 ),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(
                 "CPU: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.red),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme),
             ),
             Span::styled(
                 format!("{:.1}%", app_state.cpu_usage),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.red),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "RAM: ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.yellow),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
             ),
             Span::styled(
                 format!("{:.1}%", app_state.ram_usage_percent),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.yellow),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
             ),
         ]),
         Line::from(vec![
@@ -915,137 +871,86 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
             ),
             Span::styled(
                 format_memory(app_state.app_ram_usage),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.flamingo),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.flamingo), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled("Disk    ", Style::default().fg(theme.semantic.text)),
             Span::styled(
                 "↑ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 format!("{:<12}", format_speed(app_state.avg_disk_read_bps)),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 "↓ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::styled(
                 format_speed(app_state.avg_disk_write_bps),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled("Seek    ", Style::default().fg(theme.semantic.text)),
             Span::styled(
                 "↑ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 format!(
                     "{:<12}",
                     format_bytes(app_state.global_disk_read_thrash_score)
                 ),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 "↓ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::styled(
                 format_bytes(app_state.global_disk_write_thrash_score),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled("Latency ", Style::default().fg(theme.semantic.text)),
             Span::styled(
                 "↑ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 format!("{:<12}", format_latency(app_state.avg_disk_read_latency)),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 "↓ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::styled(
                 format_latency(app_state.avg_disk_write_latency),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
         ]),
         Line::from(vec![
             Span::styled("IOPS    ", Style::default().fg(theme.semantic.text)),
             Span::styled(
                 "↑ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 format!("{:<12}", format_iops(app_state.read_iops)),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::styled(
                 "↓ ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::styled(
                 format_iops(app_state.write_iops),
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
         ]),
         Line::from(""),
@@ -1058,10 +963,7 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
                 "Disk Thrash: ",
                 Style::default().fg(theme.scale.categorical.teal),
             ),
-            Span::styled(
-                thrash_text,
-                apply_theme_effects(thrash_style, theme),
-            ),
+            Span::styled(thrash_text, apply_theme_effects(thrash_style, theme)),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1093,10 +995,7 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled(
                 "Disk Reads:    ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.green),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ),
             Span::raw(app_state.limits.disk_read_permits.to_string()),
             format_limit_delta(
@@ -1108,10 +1007,7 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled(
                 "Disk Writes:   ",
-                apply_theme_effects(
-                    Style::default().fg(theme.scale.categorical.sky),
-                    theme,
-                ),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
             ),
             Span::raw(app_state.limits.disk_write_permits.to_string()),
             format_limit_delta(
@@ -1151,10 +1047,7 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Span::raw(" "),
         Span::styled(
             gauge_str,
-            apply_theme_effects(
-                Style::default().fg(theme.scale.categorical.green),
-                theme,
-            ),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
         ),
     ];
 
@@ -1256,7 +1149,10 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
         };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Status:   ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "Status:   ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(status_text),
             ])),
             detail_rows[1],
@@ -1286,7 +1182,10 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             });
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Peers:    ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "Peers:    ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(format!(
                     "{} (",
                     state.number_of_successfully_connected_peers
@@ -1308,13 +1207,19 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
         let written_size_spans = if state.number_of_pieces_completed < state.number_of_pieces_total
         {
             vec![
-                Span::styled("Written:  ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "Written:  ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(format_bytes(state.bytes_written)),
                 Span::raw(format!(" / {}", format_bytes(state.total_size))),
             ]
         } else {
             vec![
-                Span::styled("Size:     ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "Size:     ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(format_bytes(state.total_size)),
             ]
         };
@@ -1325,7 +1230,10 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Pieces:   ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "Pieces:   ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(format!(
                     "{}/{}",
                     state.number_of_pieces_completed, state.number_of_pieces_total
@@ -1336,7 +1244,10 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("ETA:      ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "ETA:      ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(format_duration(state.eta)),
             ])),
             detail_rows[5],
@@ -1344,14 +1255,17 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Announce: ", Style::default().fg(theme.semantic.text)),
+                Span::styled(
+                    "Announce: ",
+                    apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                ),
                 Span::raw(format_countdown(state.next_announce_in)),
             ])),
             detail_rows[6],
         );
     } else {
         let placeholder_style = Style::default().fg(theme.semantic.overlay0);
-        let label_style = Style::default().fg(theme.semantic.surface2);
+        let label_style = apply_theme_effects(Style::default().fg(theme.semantic.surface2), theme);
 
         // Row 0: Progress
         let progress_chunks =
@@ -1514,10 +1428,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
                 Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
                 Span::styled(
                     theme.name.to_string(),
-                    apply_theme_effects(
-                        Style::default().fg(theme.scale.categorical.mauve),
-                        theme,
-                    ),
+                    apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme),
                 ),
             ])
         } else {
@@ -2208,10 +2119,7 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("DL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        apply_theme_effects(
-                            Style::default().fg(theme.semantic.subtext0),
-                            theme,
-                        ),
+                        apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
                     ))
                     .borders(Borders::ALL)
                     .border_style(apply_theme_effects(
@@ -2236,10 +2144,7 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("UL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        apply_theme_effects(
-                            Style::default().fg(theme.semantic.subtext0),
-                            theme,
-                        ),
+                        apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
                     ))
                     .borders(Borders::ALL)
                     .border_style(apply_theme_effects(
@@ -2332,10 +2237,7 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("DL (Peak: {})", format_speed(dl_nice_max)),
-                        apply_theme_effects(
-                            Style::default().fg(theme.semantic.subtext0),
-                            theme,
-                        ),
+                        apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
                     ))
                     .borders(Borders::ALL)
                     .border_style(apply_theme_effects(
@@ -2356,10 +2258,7 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("UL (Peak: {})", format_speed(ul_nice_max)),
-                        apply_theme_effects(
-                            Style::default().fg(theme.semantic.subtext0),
-                            theme,
-                        ),
+                        apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
                     ))
                     .borders(Borders::ALL)
                     .border_style(apply_theme_effects(
@@ -2451,7 +2350,7 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 let body = if *with_files {
                     vec![
                         Line::from(""),
-                            Line::from(Span::styled(
+                        Line::from(Span::styled(
                             "⚠️ PERMANENT TORRENT FILES DELETION ON ⚠️",
                             apply_theme_effects(
                                 Style::default().fg(theme.scale.categorical.red).bold(),
@@ -2475,7 +2374,7 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 } else {
                     vec![
                         Line::from(""),
-                            Line::from(Span::styled(
+                        Line::from(Span::styled(
                             "Safe Removal (Files Kept)",
                             apply_theme_effects(
                                 Style::default().fg(theme.scale.categorical.green),
@@ -2620,14 +2519,12 @@ fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState) {
     let progress_bar = Gauge::default()
         .ratio(app_state.shutdown_progress)
         .label(progress_label)
-        .gauge_style(
-            apply_theme_effects(
-                Style::default()
-                    .fg(theme.scale.categorical.mauve)
-                    .bg(theme.semantic.surface0),
-                theme,
-            ),
-        );
+        .gauge_style(apply_theme_effects(
+            Style::default()
+                .fg(theme.scale.categorical.mauve)
+                .bg(theme.semantic.surface0),
+            theme,
+        ));
     f.render_widget(progress_bar, chunks[0]);
 }
 
@@ -2926,7 +2823,10 @@ pub fn draw_file_browser(
                 BrowserPane::TorrentPreview => {
                     footer_spans.push(Span::styled(
                         "[Space]",
-                        apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
+                        apply_theme_effects(
+                            Style::default().fg(theme.scale.categorical.yellow),
+                            theme,
+                        ),
                     ));
                     footer_spans.push(Span::raw(" Priority | "));
                 }
@@ -3387,7 +3287,10 @@ fn draw_torrent_preview_panel(
             Paragraph::new(info_text).block(
                 Block::default()
                     .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme.semantic.border)),
+                    .border_style(apply_theme_effects(
+                        Style::default().fg(theme.semantic.border),
+                        theme,
+                    )),
             ),
             layout[0],
         );
@@ -3692,7 +3595,10 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme:
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.semantic.border));
+        .border_style(apply_theme_effects(
+            Style::default().fg(theme.semantic.border),
+            theme,
+        ));
     let inner_box = block.inner(final_box_area);
     f.render_widget(block, final_box_area);
 
@@ -3775,8 +3681,10 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
         f.render_widget(warning_paragraph, chunks[0]);
         draw_help_table(f, app_state, chunks[1]);
 
-        let footer_block =
-            Block::default().border_style(Style::default().fg(theme.semantic.border));
+        let footer_block = Block::default().border_style(apply_theme_effects(
+            Style::default().fg(theme.semantic.border),
+            theme,
+        ));
         let footer_inner_area = footer_block.inner(chunks[2]);
         f.render_widget(footer_block, chunks[2]);
         let footer_lines = vec![
@@ -3811,8 +3719,10 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
     } else {
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(area);
         draw_help_table(f, app_state, chunks[0]);
-        let footer_block =
-            Block::default().border_style(Style::default().fg(theme.semantic.border));
+        let footer_block = Block::default().border_style(apply_theme_effects(
+            Style::default().fg(theme.semantic.border),
+            theme,
+        ));
         let footer_inner_area = footer_block.inner(chunks[1]);
         f.render_widget(footer_block, chunks[1]);
         let footer_lines = vec![
@@ -4939,7 +4849,6 @@ fn get_animated_style(theme: &crate::theme::Theme, x: usize, y: usize) -> Style 
         Style::default().fg(base_color).add_modifier(Modifier::DIM)
     }
 }
-
 
 // Updated: 3-Layer Parallax "Data Field" Background
 fn draw_background_dust(f: &mut Frame, area: Rect, theme: &crate::theme::Theme) {
