@@ -233,11 +233,12 @@ fn apply_theme_effects_to_frame(f: &mut Frame, ctx: &ThemeContext) {
 
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            let cell = buf.get_mut(x, y);
-            if palette.iter().any(|&c| c == cell.fg) {
-                let style = ctx.apply(Style::default().fg(cell.fg));
-                if let Some(new_fg) = style.fg {
-                    cell.fg = new_fg;
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                if palette.iter().any(|&c| c == cell.fg) {
+                    let style = ctx.apply(Style::default().fg(cell.fg));
+                    if let Some(new_fg) = style.fg {
+                        cell.fg = new_fg;
+                    }
                 }
             }
         }
@@ -4834,7 +4835,7 @@ fn render_sparkles<'a>(
     let mut rng = StdRng::seed_from_u64(seed);
     for _ in 0..count {
         let is_bold: bool = rng.random();
-        let mut style = ctx.apply(Style::default().fg(color));
+        let mut style = Style::default().fg(color);
         style = if is_bold {
             style.add_modifier(Modifier::BOLD)
         } else {
