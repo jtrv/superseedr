@@ -3,7 +3,7 @@
 
 use ratatui::style::{Color, Style};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use strum_macros::{Display, EnumIter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
@@ -239,50 +239,57 @@ pub fn blend_colors(c1: (u8, u8, u8), c2: (u8, u8, u8), ratio: f64) -> Color {
     Color::Rgb(r, g, b)
 }
 
-pub fn apply_theme_effects(style: Style, theme: &Theme) -> Style {
-    if !theme.effects.glow_enabled {
-        return style;
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeContext {
+    pub theme: Theme,
+    pub frame_time: f64,
+}
+
+impl ThemeContext {
+    pub fn new(theme: Theme, frame_time: f64) -> Self {
+        Self { theme, frame_time }
     }
 
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
+    pub fn apply(&self, style: Style) -> Style {
+        if !self.theme.effects.glow_enabled {
+            return style;
+        }
 
-    let freq = theme.effects.flicker_hz as f64;
-    let intensity = theme.effects.flicker_intensity as f64;
+        let freq = self.theme.effects.flicker_hz as f64;
+        let intensity = self.theme.effects.flicker_intensity as f64;
 
-    if intensity <= 0.001 {
-        return style;
-    }
+        if intensity <= 0.001 {
+            return style;
+        }
 
-    if let Some(fg) = style.fg {
-        let (r, g, b) = color_to_rgb(fg);
+        if let Some(fg) = style.fg {
+            let (r, g, b) = color_to_rgb(fg);
 
-        // Interference Pattern Algorithm:
-        // 1. Global Rhythm: A steady pulse shared by everyone (sync anchor)
-        // 2. Local Drift: A faster, phase-shifted pulse unique to the color (chaos)
+            // Interference Pattern Algorithm:
+            // 1. Global Rhythm: A steady pulse shared by everyone (sync anchor)
+            // 2. Local Drift: A faster, phase-shifted pulse unique to the color (chaos)
 
-        let phase_offset = (r as f64 * 3.0 + g as f64 * 5.0 + b as f64 * 7.0) * 0.01;
+            let phase_offset = (r as f64 * 3.0 + g as f64 * 5.0 + b as f64 * 7.0) * 0.01;
 
-        let base_wave = (time * freq).sin();
+            let base_wave = (self.frame_time * freq).sin();
 
-        // Offset wave (Local drift) - 1.4x speed creates a polyrhythm
-        let drift_wave = ((time * freq * 1.4) + phase_offset).sin();
+            // Offset wave (Local drift) - 1.4x speed creates a polyrhythm
+            let drift_wave = ((self.frame_time * freq * 1.4) + phase_offset).sin();
 
-        let wave = (base_wave + drift_wave) / 2.0;
+            let wave = (base_wave + drift_wave) / 2.0;
 
-        let final_color = if wave > 0.0 {
-            let factor = wave * intensity;
-            blend_colors((r, g, b), (255, 255, 255), factor)
+            let final_color = if wave > 0.0 {
+                let factor = wave * intensity;
+                blend_colors((r, g, b), (255, 255, 255), factor)
+            } else {
+                let factor = wave.abs() * (intensity * 0.8);
+                blend_colors((r, g, b), (0, 0, 0), factor)
+            };
+
+            style.fg(final_color)
         } else {
-            let factor = wave.abs() * (intensity * 0.8);
-            blend_colors((r, g, b), (0, 0, 0), factor)
-        };
-
-        style.fg(final_color)
-    } else {
-        style
+            style
+        }
     }
 }
 
