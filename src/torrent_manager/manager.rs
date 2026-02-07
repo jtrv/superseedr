@@ -1199,6 +1199,27 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
+        if skip_hashing {
+            let piece_len = torrent.info.piece_length as u64;
+            let mut completed_pieces = Vec::new();
+
+            if piece_len > 0 {
+                if torrent.info.meta_version == Some(2) {
+                    let v2_piece_count = torrent.calculate_v2_mapping().piece_count as u32;
+                    completed_pieces = (0..v2_piece_count).collect();
+                } else {
+                    let num_pieces = multi_file_info.total_size.div_ceil(piece_len) as u32;
+                    completed_pieces = (0..num_pieces).collect();
+                }
+            }
+
+            let _ = manager_tx
+                .send(TorrentCommand::ValidationProgress(completed_pieces.len() as u32))
+                .await;
+
+            return Ok(completed_pieces);
+        }
+
         let is_fresh_download = tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
@@ -4458,5 +4479,141 @@ mod resource_tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_skip_hashing_true_does_not_require_disk_reads() {
+        let (_manager, _torrent_tx, _cmd_tx, shutdown_tx, rm_client) = setup_scale_test_harness();
+
+        let temp_dir = std::env::temp_dir().join("skip_hashing_no_disk_read");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let torrent_name = "payload.bin";
+        let payload_path = temp_dir.join(torrent_name);
+
+        // Create a directory where a file is expected.
+        // If validation attempts to read, it will fail with an IO error.
+        std::fs::create_dir_all(&payload_path).unwrap();
+
+        let piece_len: i64 = 16 * 1024;
+        let total_len: u64 = (piece_len as u64) * 2;
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.name = torrent_name.to_string();
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = total_len as i64;
+
+        let multi_file_info = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            torrent_name,
+            None,
+            Some(total_len),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let (progress_tx, mut progress_rx) = mpsc::channel(64);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            while progress_rx.recv().await.is_some() {}
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            TorrentManager::perform_validation(
+                multi_file_info,
+                torrent,
+                rm_client,
+                shutdown_tx.subscribe(),
+                progress_tx,
+                event_tx,
+                true,
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "skip_hashing=true should not block on disk reads"
+        );
+
+        let result = result.unwrap();
+        assert!(
+            result.is_ok(),
+            "skip_hashing=true should bypass disk reads and succeed"
+        );
+
+        let completed = result.unwrap();
+        assert_eq!(completed, vec![0, 1]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_skip_hashing_v2_uses_aligned_v2_piece_space() {
+        let (_manager, torrent_tx, _cmd_tx, shutdown_tx, rm_client) = setup_scale_test_harness();
+
+        let temp_dir = std::env::temp_dir().join("skip_hashing_v2_piece_space");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let piece_len: i64 = 16384;
+        let root_a = vec![0x11; 32];
+        let root_b = vec![0x22; 32];
+
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.name = "v2_skip_hashing_alignment".to_string();
+        torrent.info.piece_length = piece_len;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new();
+        torrent.info.length = 0;
+        torrent.info.file_tree = Some(build_mock_v2_file_tree(vec![
+            ("a.bin".to_string(), 100, root_a.clone()),
+            ("b.bin".to_string(), 100, root_b.clone()),
+        ]));
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["a.bin".into()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["b.bin".into()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        let multi_file_info = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            &torrent.info.name,
+            Some(&torrent.info.files),
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let result = TorrentManager::perform_validation(
+            multi_file_info,
+            torrent,
+            rm_client,
+            shutdown_tx.subscribe(),
+            torrent_tx,
+            event_tx,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result,
+            vec![0, 1],
+            "V2 skip_hashing should return aligned V2 piece indices"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
