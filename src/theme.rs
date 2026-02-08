@@ -3,6 +3,7 @@
 
 use ratatui::style::{Color, Style};
 use serde::{Deserialize, Deserializer, Serialize};
+use strum::IntoEnumIterator;
 
 use strum_macros::{Display, EnumIter};
 
@@ -62,10 +63,10 @@ pub enum ThemeName {
     Oxocarbon,
     #[strum(serialize = "PaperColor Light")]
     PaperColorLight,
-    #[strum(serialize = "Black Hole")]
-    BlackHole,
     #[strum(serialize = "Bioluminescent Reef")]
     BioluminescentReef,
+    #[strum(serialize = "Black Hole")]
+    BlackHole,
     #[strum(serialize = "Rainbow")]
     Rainbow,
     #[strum(serialize = "Rose Pine")]
@@ -87,6 +88,14 @@ pub enum ThemeName {
 impl Default for ThemeName {
     fn default() -> Self {
         Self::CatppuccinMocha
+    }
+}
+
+impl ThemeName {
+    pub fn sorted_for_ui() -> Vec<Self> {
+        let mut themes: Vec<Self> = Self::iter().collect();
+        themes.sort_by_key(|theme| theme.to_string());
+        themes
     }
 }
 
@@ -296,6 +305,47 @@ pub struct ThemeScale {
     pub categorical: ThemeCategorical,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeStateSlots {
+    pub error: Color,
+    pub warning: Color,
+    pub success: Color,
+    pub info: Color,
+    pub selected: Color,
+    pub complete: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeMetricSlots {
+    pub download: Color,
+    pub upload: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemePeerSlots {
+    pub discovered: Color,
+    pub connected: Color,
+    pub disconnected: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeAccentSlots {
+    pub sky: Color,
+    pub teal: Color,
+    pub peach: Color,
+    pub sapphire: Color,
+    pub maroon: Color,
+    pub flamingo: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeRoleSlots {
+    pub state: ThemeStateSlots,
+    pub metric: ThemeMetricSlots,
+    pub peer: ThemePeerSlots,
+    pub accent: ThemeAccentSlots,
+}
+
 pub fn color_to_rgb(color: Color) -> (u8, u8, u8) {
     match color {
         Color::Rgb(r, g, b) => (r, g, b),
@@ -341,6 +391,74 @@ impl ThemeContext {
     pub fn apply(&self, style: Style) -> Style {
         // Style construction stays deterministic; effects are applied once in the frame pass.
         style
+    }
+
+    pub fn state_error(&self) -> Color {
+        self.theme.role_slots().state.error
+    }
+
+    pub fn state_warning(&self) -> Color {
+        self.theme.role_slots().state.warning
+    }
+
+    pub fn state_success(&self) -> Color {
+        self.theme.role_slots().state.success
+    }
+
+    pub fn state_info(&self) -> Color {
+        self.theme.role_slots().state.info
+    }
+
+    pub fn state_selected(&self) -> Color {
+        self.theme.role_slots().state.selected
+    }
+
+    pub fn state_complete(&self) -> Color {
+        self.theme.role_slots().state.complete
+    }
+
+    pub fn metric_download(&self) -> Color {
+        self.theme.role_slots().metric.download
+    }
+
+    pub fn metric_upload(&self) -> Color {
+        self.theme.role_slots().metric.upload
+    }
+
+    pub fn peer_discovered(&self) -> Color {
+        self.theme.role_slots().peer.discovered
+    }
+
+    pub fn peer_connected(&self) -> Color {
+        self.theme.role_slots().peer.connected
+    }
+
+    pub fn peer_disconnected(&self) -> Color {
+        self.theme.role_slots().peer.disconnected
+    }
+
+    pub fn accent_sky(&self) -> Color {
+        self.theme.role_slots().accent.sky
+    }
+
+    pub fn accent_teal(&self) -> Color {
+        self.theme.role_slots().accent.teal
+    }
+
+    pub fn accent_peach(&self) -> Color {
+        self.theme.role_slots().accent.peach
+    }
+
+    pub fn accent_sapphire(&self) -> Color {
+        self.theme.role_slots().accent.sapphire
+    }
+
+    pub fn accent_maroon(&self) -> Color {
+        self.theme.role_slots().accent.maroon
+    }
+
+    pub fn accent_flamingo(&self) -> Color {
+        self.theme.role_slots().accent.flamingo
     }
 
     pub fn apply_effects_to_color_at(
@@ -452,6 +570,36 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn role_slots(&self) -> ThemeRoleSlots {
+        ThemeRoleSlots {
+            state: ThemeStateSlots {
+                error: self.scale.categorical.red,
+                warning: self.scale.categorical.yellow,
+                success: self.scale.categorical.green,
+                info: self.scale.categorical.blue,
+                selected: self.scale.categorical.mauve,
+                complete: self.scale.categorical.lavender,
+            },
+            metric: ThemeMetricSlots {
+                download: self.scale.categorical.sky,
+                upload: self.scale.categorical.green,
+            },
+            peer: ThemePeerSlots {
+                discovered: self.scale.categorical.yellow,
+                connected: self.scale.categorical.teal,
+                disconnected: self.scale.categorical.maroon,
+            },
+            accent: ThemeAccentSlots {
+                sky: self.scale.categorical.sky,
+                teal: self.scale.categorical.teal,
+                peach: self.scale.categorical.peach,
+                sapphire: self.scale.categorical.sapphire,
+                maroon: self.scale.categorical.maroon,
+                flamingo: self.scale.categorical.flamingo,
+            },
+        }
+    }
+
     pub fn builtin(name: ThemeName) -> Self {
         match name {
             ThemeName::Andromeda => Self::andromeda(),
@@ -2898,8 +3046,8 @@ mod tests {
             ThemeName::OneDark,
             ThemeName::Oxocarbon,
             ThemeName::PaperColorLight,
-            ThemeName::BlackHole,
             ThemeName::BioluminescentReef,
+            ThemeName::BlackHole,
             ThemeName::Rainbow,
             ThemeName::RosePine,
             ThemeName::SolarizedDark,
