@@ -39,6 +39,7 @@ pub const MINUTES_HISTORY_MAX: usize = 48 * 60;
 const ASCII_TREE_DIR_ICON: &str = "> ";
 const ASCII_TREE_FILE_ICON: &str = "  ";
 const ASCII_TREE_ROOT_ICON: &str = "> ";
+const WELCOME_LICENSE_LABEL: &str = "GNU General Public License v3.0";
 
 const LOGO_LARGE: &str = r#"
                                                              __          
@@ -1697,8 +1698,8 @@ fn draw_footer(
         ctx.apply(Style::default().fg(ctx.state_complete())),
     );
     push_if_fits(
-        "[D]",
-        "elete+data",
+        "[d]",
+        "elete",
         ctx.apply(Style::default().fg(ctx.state_error())),
     );
     push_if_fits(
@@ -3746,6 +3747,12 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
     let footer_paragraph = Paragraph::new(footer_line).alignment(Alignment::Center);
 
     f.render_widget(footer_paragraph, box_internal_chunks[2]);
+
+    let license_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+    let license_paragraph = Paragraph::new(WELCOME_LICENSE_LABEL)
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)))
+        .alignment(Alignment::Center);
+    f.render_widget(license_paragraph, license_area);
 }
 
 fn draw_help_popup(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
