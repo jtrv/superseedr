@@ -203,10 +203,7 @@ impl<'de> Deserialize<'de> for ThemeName {
             "tokyo_night" | "Tokyo Night" => Ok(ThemeName::TokyoNight),
             "vesper" | "Vesper" => Ok(ThemeName::Vesper),
             "zenburn" | "Zenburn" => Ok(ThemeName::Zenburn),
-            _ => {
-                // Unknown theme - default to CatppuccinMocha
-                Ok(ThemeName::CatppuccinMocha)
-            }
+            _ => Ok(ThemeName::CatppuccinMocha),
         }
     }
 }
@@ -242,7 +239,7 @@ impl Default for ThemeEffects {
             local_enabled: false,
             flicker_hz: 0.0,
             flicker_intensity: 0.0,
-            // Preserve pre-burst behavior by default: always in burst window, normal intensity.
+            // Preserve legacy behavior by default (always in burst, unchanged intensity).
             local_burst_duty: 1.0,
             local_burst_hz: 0.0,
             local_idle_intensity: 1.0,
@@ -493,8 +490,7 @@ impl ThemeContext {
             let intensity = self.theme.effects.flicker_intensity as f64;
             if intensity > 0.001 {
                 let phase_offset = (r as f64 * 3.0 + g as f64 * 5.0 + b as f64 * 7.0) * 0.01;
-                // Burst gate controls how often a color enters an active "neon flicker" phase.
-                // duty=1.0 preserves old always-on behavior.
+                // Burst duty controls active flicker time; 1.0 preserves always-on behavior.
                 let duty = self.theme.effects.local_burst_duty.clamp(0.0, 1.0) as f64;
                 let burst_hz = if self.theme.effects.local_burst_hz <= 0.0 {
                     freq * 0.35
@@ -3329,7 +3325,6 @@ mod tests {
 
     #[test]
     fn test_known_themes_snake_case() {
-        // Test that all known themes deserialize correctly in snake_case
         let themes = vec![
             ("andromeda", ThemeName::Andromeda),
             ("aurora", ThemeName::Aurora),
@@ -3381,7 +3376,6 @@ mod tests {
 
     #[test]
     fn test_known_themes_display_format() {
-        // Test that all known themes deserialize correctly in display format
         let themes = vec![
             ("Andromeda", ThemeName::Andromeda),
             ("Aurora", ThemeName::Aurora),
@@ -3433,7 +3427,6 @@ mod tests {
 
     #[test]
     fn test_unknown_themes_default_to_catppuccin_mocha() {
-        // Test that unknown themes default to CatppuccinMocha
         let unknown_themes = vec![
             "cuppochinmocha",
             "invalid_theme",
@@ -3463,7 +3456,6 @@ mod tests {
 
     #[test]
     fn test_theme_name_roundtrip() {
-        // Test that all themes can be serialized and deserialized
         for theme in all_theme_names() {
             let serialized = serde_json::to_string(&theme).unwrap();
             let deserialized: ThemeName = serde_json::from_str(&serialized).unwrap();
