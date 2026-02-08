@@ -1639,17 +1639,15 @@ mod tests {
     #[test]
     fn test_nav_right_jumps_to_peers_when_only_name_column_visible() {
         let mut app_state = create_test_app_state();
-        app_state.selected_torrent_index = 0; // "hash_a" has peers
+        app_state.selected_torrent_index = 0;
         app_state.selected_header = SelectedHeader::Torrent(0);
 
-        // Ensure Status is hidden: mark torrent as finished.
         if let Some(torrent) = app_state.torrents.get_mut("hash_a".as_bytes()) {
             torrent.latest_state.activity_message = "Seeding".to_string();
             torrent.latest_state.number_of_pieces_total = 100;
             torrent.latest_state.number_of_pieces_completed = 100;
         }
 
-        // No DL/UL activity anywhere -> hide speed columns.
         for torrent in app_state.torrents.values_mut() {
             torrent.smoothed_download_speed_bps = 0;
             torrent.smoothed_upload_speed_bps = 0;

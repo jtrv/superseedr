@@ -4492,8 +4492,7 @@ mod resource_tests {
         let torrent_name = "payload.bin";
         let payload_path = temp_dir.join(torrent_name);
 
-        // Create a directory where a file is expected.
-        // If validation attempts to read, it will fail with an IO error.
+        // Deliberately create a directory at the payload path; any disk read would error.
         std::fs::create_dir_all(&payload_path).unwrap();
 
         let piece_len: i64 = 16 * 1024;
