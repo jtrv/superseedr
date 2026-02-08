@@ -8736,7 +8736,9 @@ mod integration_tests {
     use crate::resource_manager::{ResourceManager, ResourceManagerClient};
     use crate::token_bucket::TokenBucket;
     use crate::torrent_file::Torrent;
-    use crate::torrent_manager::{ManagerCommand, TorrentManager, TorrentMetrics, TorrentParameters};
+    use crate::torrent_manager::{
+        ManagerCommand, TorrentManager, TorrentMetrics, TorrentParameters,
+    };
 
     fn create_manager_harness(
         name: &str,
