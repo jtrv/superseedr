@@ -1373,8 +1373,24 @@ fn draw_footer(
         } else {
             ctx.theme.name.to_string()
         };
+        let fit_theme_label = |prefix: &str| -> String {
+            let max_theme_width = (client_id_chunk.width as usize).saturating_sub(prefix.chars().count());
+            if max_theme_width == 0 {
+                String::new()
+            } else if max_theme_width <= 3 {
+                ".".repeat(max_theme_width)
+            } else {
+                truncate_with_ellipsis(&theme_label, max_theme_width)
+            }
+        };
 
         let client_display_line = if let Some(new_version) = &app_state.update_available {
+            let theme_display = fit_theme_label(&format!(
+                "UPDATE AVAILABLE: v{} -> v{} | {} | ",
+                APP_VERSION,
+                new_version,
+                app_state.data_rate.to_string()
+            ));
             Line::from(vec![
                 Span::styled(
                     "UPDATE AVAILABLE: ",
@@ -1407,7 +1423,7 @@ fn draw_footer(
                     ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                 ),
                 Span::styled(
-                    theme_label.clone(),
+                    theme_display,
                     ctx.apply(Style::default().fg(ctx.state_selected())),
                 ),
             ])
@@ -1415,6 +1431,11 @@ fn draw_footer(
             // Standard branding logic
             #[cfg(all(feature = "dht", feature = "pex"))]
             {
+                let theme_display = fit_theme_label(&format!(
+                    "superseedr v{} | {} | ",
+                    APP_VERSION,
+                    app_state.data_rate.to_string()
+                ));
                 Line::from(vec![
                     Span::styled(
                         "super",
@@ -1445,13 +1466,18 @@ fn draw_footer(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ),
                     Span::styled(
-                        theme_label.clone(),
+                        theme_display,
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     ),
                 ])
             }
             #[cfg(not(all(feature = "dht", feature = "pex")))]
             {
+                let theme_display = fit_theme_label(&format!(
+                    "superseedr [PRIVATE] v{} | {} | ",
+                    APP_VERSION,
+                    app_state.data_rate.to_string()
+                ));
                 Line::from(vec![
                     Span::styled(
                         "superseedr",
@@ -1481,7 +1507,7 @@ fn draw_footer(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ),
                     Span::styled(
-                        theme_label,
+                        theme_display,
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     ),
                 ])
