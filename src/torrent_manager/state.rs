@@ -36,7 +36,7 @@ const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
 pub const MAX_PIPELINE_DEPTH: usize = 512;
 // Quality gate: once we have this many connected peers, pause admitting new peers
 // to avoid churn storms. This is intentionally independent of resource-manager limits.
-const PEER_ADMISSION_QUALITY_THRESHOLD: usize = 200;
+const PEER_ADMISSION_QUALITY_THRESHOLD: usize = 500;
 
 pub type PeerAddr = (String, u16);
 
