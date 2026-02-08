@@ -213,7 +213,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         }
                         KeyCode::Char('<') => {
-                            let themes: Vec<_> = crate::theme::ThemeName::iter().collect();
+                            let themes = crate::theme::ThemeName::sorted_for_ui();
                             let current_idx = themes
                                 .iter()
                                 .position(|&t| t == app.client_configs.ui_theme)
@@ -230,7 +230,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
                         }
                         KeyCode::Char('>') => {
-                            let themes: Vec<_> = crate::theme::ThemeName::iter().collect();
+                            let themes = crate::theme::ThemeName::sorted_for_ui();
                             let current_idx = themes
                                 .iter()
                                 .position(|&t| t == app.client_configs.ui_theme)

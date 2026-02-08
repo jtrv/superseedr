@@ -383,9 +383,9 @@ pub fn format_permits_spans<'a>(
     };
 
     let status_color = if usage_ratio > 0.9 {
-        ctx.theme.scale.categorical.red
+        ctx.state_error()
     } else if usage_ratio > 0.7 {
-        ctx.theme.scale.categorical.yellow
+        ctx.state_warning()
     } else {
         ctx.theme.semantic.text
     };
@@ -420,9 +420,9 @@ pub fn format_limit_delta(ctx: &ThemeContext, current: usize, last: usize) -> Sp
         return Span::raw("");
     }
     let (sign, style) = if delta > 0 {
-        ("+", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)))
+        ("+", ctx.apply(Style::default().fg(ctx.state_success())))
     } else {
-        ("-", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)))
+        ("-", ctx.apply(Style::default().fg(ctx.state_error())))
     };
     Span::styled(format!(" ({}{})", sign, delta.abs()), ctx.apply(style))
 }
