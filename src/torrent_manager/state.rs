@@ -34,9 +34,10 @@ const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
 pub const MAX_PIPELINE_DEPTH: usize = 512;
+
 // Quality gate: once we have this many connected peers, pause admitting new peers
 // to avoid churn storms. This is intentionally independent of resource-manager limits.
-const PEER_ADMISSION_QUALITY_THRESHOLD: usize = 500;
+const PEER_ADMISSION_QUALITY_THRESHOLD: usize = 400;
 
 pub type PeerAddr = (String, u16);
 
@@ -1089,7 +1090,7 @@ impl TorrentState {
                     self.pending_disconnects.push(peer_id);
                 }
 
-                if !force && self.pending_disconnects.len() < 100 {
+                if !force && self.pending_disconnects.len() < 50 {
                     return vec![Effect::DoNothing];
                 }
 
@@ -2409,7 +2410,7 @@ impl TorrentState {
 
 impl TorrentState {
     fn refresh_peer_admission_guard(&mut self) {
-        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 75) / 100;
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
         let connected = self.number_of_successfully_connected_peers;
 
         if self.accepting_new_peers {
@@ -2603,12 +2604,13 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_admission_guard_reopens_at_75_percent_threshold() {
+    fn test_peer_admission_guard_reopens_at_reopen_threshold() {
         let mut state = create_empty_state();
         state.torrent_status = TorrentStatus::Standard;
         state.accepting_new_peers = false;
 
-        for i in 0..150 {
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
+        for i in 0..reopen_threshold {
             add_peer(&mut state, &format!("peer_{}", i));
         }
         state.number_of_successfully_connected_peers = state.peers.len();
@@ -2617,7 +2619,7 @@ mod tests {
 
         assert!(
             state.accepting_new_peers,
-            "expected admission guard to reopen at 75 percent of threshold"
+            "expected admission guard to reopen at configured reopen threshold"
         );
     }
 
@@ -2667,7 +2669,7 @@ mod tests {
         state.torrent_status = TorrentStatus::Standard;
         state.accepting_new_peers = false;
 
-        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 75) / 100;
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
         for i in 0..(reopen_threshold + 1) {
             add_peer(&mut state, &format!("peer_{}", i));
         }
@@ -2687,7 +2689,7 @@ mod tests {
         state.torrent_status = TorrentStatus::Standard;
         state.accepting_new_peers = false;
 
-        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 75) / 100;
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
         for i in 0..reopen_threshold {
             add_peer(&mut state, &format!("peer_{}", i));
         }
@@ -6641,9 +6643,10 @@ mod tests {
     fn test_peer_disconnect_batches_until_threshold() {
         let mut state = create_empty_state();
         state.torrent_status = TorrentStatus::Standard;
+        let disconnect_batch_threshold = 50;
 
-        // Add 101 peers to ensure we cross the threshold
-        for i in 0..101 {
+        // Add threshold + 1 peers to ensure we cross the threshold exactly once.
+        for i in 0..(disconnect_batch_threshold + 1) {
             let pid = format!("peer_{}", i);
             add_peer(&mut state, &pid);
 
@@ -6652,18 +6655,18 @@ mod tests {
                 force: false,
             });
 
-            if i < 99 {
+            if i < disconnect_batch_threshold - 1 {
                 // Should not have processed yet
                 assert!(effects.is_empty() || matches!(effects[0], Effect::DoNothing));
                 assert_eq!(state.pending_disconnects.len(), i + 1);
-            } else if i == 99 {
-                // On the 100th peer, it should flush the first 100
-                assert_eq!(effects.len(), 200); // 100 DisconnectPeer + 100 EmitManagerEvent
+            } else if i == disconnect_batch_threshold - 1 {
+                // On the threshold peer, it should flush that full batch.
+                assert_eq!(effects.len(), disconnect_batch_threshold * 2);
                 assert!(state.pending_disconnects.is_empty());
             }
         }
 
-        // The 101st peer should now be sitting alone in the new batch
+        // The final peer should now be sitting alone in the new batch.
         assert_eq!(state.pending_disconnects.len(), 1);
     }
 
@@ -6671,7 +6674,7 @@ mod tests {
     fn test_peer_disconnect_force_flush() {
         let mut state = create_empty_state();
 
-        // Add only 5 peers (well below the 100 threshold)
+        // Add only 5 peers (well below the batch threshold)
         for i in 0..5 {
             let pid = format!("peer_{}", i);
             add_peer(&mut state, &pid);
