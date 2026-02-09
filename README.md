@@ -31,14 +31,6 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
   <img src="https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_theme.webp"/>
 </p>
 
-## Themes
-
-Superseedr includes a large built-in theme library (dark, light, neon, and high-contrast palettes).
-
-- Change theme live from the settings panel (`c` -> UI theme).
-- Persisted in `settings.toml` via `ui_theme`.
-- Includes themes like `catppuccin_mocha`, `tokyo_night`, `synthwave_84`, `gruvbox_dark`, `github_light`, `bioluminescent_reef`, and more.
-
 ## Installation
 
 Download platform-specific installers from the [releases page](https://github.com/Jagalite/superseedr/releases) **(includes browser magnet link support)**:
