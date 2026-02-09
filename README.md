@@ -27,7 +27,9 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 * **Set It and Forget It:** Automatic port forwarding and dynamic listener reloading in Docker ensure your connection stays alive, even if your VPN resets.
 * **Crash-Proof Design:** Leverages Rust's memory safety guarantees to run indefinitely on low-resource servers without leaks or instability.
 
-<img src="https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_theme.webp"/>
+<p align="center">
+  <img src="https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_theme.webp"/>
+</p>
 
 ## Themes
 
