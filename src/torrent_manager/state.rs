@@ -22,7 +22,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::torrent_file::{Torrent, V2RootInfo};
-use crate::torrent_manager::block_manager::BLOCK_SIZE;
 use crate::torrent_manager::piece_manager::EffectivePiecePriority;
 use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
@@ -339,9 +338,6 @@ pub struct TorrentState {
     pub pending_disconnects: Vec<String>,
     pub pending_failures: Vec<String>,
     pub accepting_new_peers: bool,
-    pub piece_write_failures: HashMap<u32, u32>,
-    pub last_completed_pieces_snapshot: usize,
-    pub last_no_piece_progress_log: Instant,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -381,9 +377,6 @@ impl Default for TorrentState {
             pending_disconnects: Vec::with_capacity(100),
             pending_failures: Vec::with_capacity(100),
             accepting_new_peers: true,
-            piece_write_failures: HashMap::new(),
-            last_completed_pieces_snapshot: 0,
-            last_no_piece_progress_log: Instant::now(),
         }
     }
 }
@@ -567,37 +560,6 @@ impl TorrentState {
                     // Reset Peer tick counters
                     peer.bytes_downloaded_in_tick = 0;
                     peer.bytes_uploaded_in_tick = 0;
-                }
-
-                let completed_pieces = self
-                    .piece_manager
-                    .bitfield
-                    .len()
-                    .saturating_sub(self.piece_manager.pieces_remaining);
-                let made_piece_progress = completed_pieces > self.last_completed_pieces_snapshot;
-                if made_piece_progress {
-                    self.last_completed_pieces_snapshot = completed_pieces;
-                    self.last_no_piece_progress_log = self.now;
-                } else if dl_tick > 0
-                    && self.torrent_status != TorrentStatus::Done
-                    && self.now.duration_since(self.last_no_piece_progress_log)
-                        >= Duration::from_secs(15)
-                {
-                    event!(
-                        Level::INFO,
-                        dl_tick_bytes = dl_tick,
-                        connected_peers = self.peers.len(),
-                        completed_pieces = completed_pieces,
-                        total_pieces = self.piece_manager.bitfield.len(),
-                        need_queue_len = self.piece_manager.need_queue.len(),
-                        pending_piece_len = self.piece_manager.pending_queue.len(),
-                        verifying_piece_len = self.verifying_pieces.len(),
-                        pending_blocks_len = self.piece_manager.block_manager.pending_blocks.len(),
-                        v1_assemblers = self.piece_manager.block_manager.legacy_buffers.len(),
-                        bytes_downloaded = self.session_total_downloaded,
-                        "No piece progress despite incoming data"
-                    );
-                    self.last_no_piece_progress_log = self.now;
                 }
 
                 let mut effects = vec![Effect::EmitMetrics {
@@ -1064,51 +1026,11 @@ impl TorrentState {
                         self.last_activity = TorrentActivity::RequestingPieces;
                     }
 
-                    if self.now.duration_since(self.last_no_piece_progress_log)
-                        >= Duration::from_secs(5)
-                    {
-                        let sample: Vec<String> = request_batch
-                            .iter()
-                            .take(5)
-                            .map(|(p, o, l)| format!("{p}@{o}+{l}"))
-                            .collect();
-                        event!(
-                            Level::INFO,
-                            peer = %peer_id,
-                            req_count = request_batch.len(),
-                            inflight_before = peer.inflight_requests,
-                            available_slots = available_slots,
-                            need_queue_len = self.piece_manager.need_queue.len(),
-                            pending_piece_len = self.piece_manager.pending_queue.len(),
-                            verifying_piece_len = self.verifying_pieces.len(),
-                            sample = %sample.join(","),
-                            "AssignWork issued block requests"
-                        );
-                        self.last_no_piece_progress_log = self.now;
-                    }
-
                     peer.inflight_requests += request_batch.len();
                     effects.push(Effect::SendToPeer {
                         peer_id: peer_id.clone(),
                         cmd: Box::new(TorrentCommand::BulkRequest(request_batch)),
                     });
-                } else if available_slots > 0
-                    && self.now.duration_since(self.last_no_piece_progress_log)
-                        >= Duration::from_secs(5)
-                {
-                    event!(
-                        Level::INFO,
-                        peer = %peer_id,
-                        available_slots = available_slots,
-                        inflight = peer.inflight_requests,
-                        need_queue_len = self.piece_manager.need_queue.len(),
-                        pending_piece_len = self.piece_manager.pending_queue.len(),
-                        verifying_piece_len = self.verifying_pieces.len(),
-                        pending_blocks_len = self.piece_manager.block_manager.pending_blocks.len(),
-                        v1_assemblers = self.piece_manager.block_manager.legacy_buffers.len(),
-                        "AssignWork found no requestable blocks"
-                    );
-                    self.last_no_piece_progress_log = self.now;
                 }
 
                 effects
@@ -1352,14 +1274,6 @@ impl TorrentState {
                     self.piece_manager
                         .handle_block(piece_index, block_offset, &data, piece_size)
                 {
-                    event!(
-                        Level::INFO,
-                        piece = piece_index,
-                        assembled_len = complete_data.len(),
-                        piece_size = piece_size,
-                        peer = %peer_id,
-                        "Piece fully assembled; starting verification"
-                    );
                     // Mark as verifying
                     self.verifying_pieces.insert(piece_index);
 
@@ -1585,13 +1499,6 @@ impl TorrentState {
                 self.v2_pending_data.remove(&piece_index);
 
                 if valid {
-                    event!(
-                        Level::INFO,
-                        piece = piece_index,
-                        peer = %peer_id,
-                        payload_len = data.len(),
-                        "Piece verified OK"
-                    );
                     if self.piece_manager.bitfield.get(piece_index as usize)
                         == Some(&PieceStatus::Done)
                     {
@@ -1611,12 +1518,6 @@ impl TorrentState {
                         });
                     }
                 } else {
-                    event!(
-                        Level::INFO,
-                        piece = piece_index,
-                        peer = %peer_id,
-                        "Piece verification FAILED; resetting assembly and disconnecting peer"
-                    );
                     self.piece_manager.reset_piece_assembly(piece_index);
                     effects.push(Effect::DisconnectPeer { peer_id });
                 }
@@ -1650,21 +1551,8 @@ impl TorrentState {
 
                 // ACTUAL STATE CHANGE
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
-                self.piece_write_failures.remove(&piece_index);
 
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
-                event!(
-                    Level::INFO,
-                    piece = piece_index,
-                    peers_cancelled = peers_to_cancel.len(),
-                    completed = self
-                        .piece_manager
-                        .bitfield
-                        .len()
-                        .saturating_sub(self.piece_manager.pieces_remaining),
-                    total = self.piece_manager.bitfield.len(),
-                    "Piece write committed to disk"
-                );
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.pending_requests.remove(&piece_index);
@@ -1715,19 +1603,6 @@ impl TorrentState {
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
-                let failure_count = self
-                    .piece_write_failures
-                    .entry(piece_index)
-                    .and_modify(|count| *count = count.saturating_add(1))
-                    .or_insert(1);
-                event!(
-                    Level::INFO,
-                    piece = piece_index,
-                    failures = *failure_count,
-                    connected_peers = self.peers.len(),
-                    verifying = self.verifying_pieces.contains(&piece_index),
-                    "Piece write failed; requeueing piece"
-                );
                 self.piece_manager.requeue_pending_to_need(piece_index);
                 vec![Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished)]
             }
@@ -1883,15 +1758,6 @@ impl TorrentState {
                     total_len,
                     piece_overrides,
                     self.torrent_validation_status,
-                );
-                event!(
-                    Level::INFO,
-                    piece_length = torrent.info.piece_length,
-                    block_size = BLOCK_SIZE,
-                    modulo = (torrent.info.piece_length as i64).rem_euclid(BLOCK_SIZE as i64),
-                    total_pieces = num_pieces,
-                    total_len = total_len,
-                    "Metadata geometry loaded"
                 );
                 if !self.file_priorities.is_empty() {
                     let priorities = self.calculate_piece_priorities(&self.file_priorities);
