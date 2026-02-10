@@ -871,7 +871,6 @@ impl TorrentState {
 
                 let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
                 pending_pieces.sort();
-                let non_aligned_grid = self.piece_manager.block_manager.is_non_aligned_piece_grid();
 
                 for piece_index in pending_pieces {
                     if available_slots == 0 {
@@ -880,10 +879,10 @@ impl TorrentState {
                     if self.verifying_pieces.contains(&piece_index) {
                         continue;
                     }
-                    let block_addrs = self
+                    let (start, end) = self
                         .piece_manager
                         .block_manager
-                        .piece_block_addresses(piece_index);
+                        .get_block_range(piece_index);
                     let assembler_mask = self
                         .piece_manager
                         .block_manager
@@ -891,29 +890,33 @@ impl TorrentState {
                         .get(&piece_index)
                         .map(|a| a.mask.clone());
 
-                    for addr in block_addrs {
+                    for global_block_idx in start..end {
                         if available_slots == 0 {
                             break;
                         }
 
-                        let global_block_idx = self.piece_manager.block_manager.flatten_address(addr);
-                        if !non_aligned_grid
-                            && self
-                                .piece_manager
-                                .block_manager
-                                .block_bitfield
-                                .get(global_block_idx as usize)
-                                == Some(&true)
+                        if self
+                            .piece_manager
+                            .block_manager
+                            .block_bitfield
+                            .get(global_block_idx as usize)
+                            == Some(&true)
                         {
                             continue;
                         }
 
                         // Is it buffered?
+                        let local_block_idx = global_block_idx - start;
                         if let Some(mask) = &assembler_mask {
-                            if mask.get(addr.block_index as usize) == Some(&true) {
+                            if mask.get(local_block_idx as usize) == Some(&true) {
                                 continue;
                             }
                         }
+
+                        let addr = self
+                            .piece_manager
+                            .block_manager
+                            .inflate_address(global_block_idx);
 
                         let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
                             let remaining = limit.saturating_sub(addr.byte_offset);
@@ -999,10 +1002,10 @@ impl TorrentState {
                     }
 
                     // --- B. Generate Block Requests ---
-                    let block_addrs = self
+                    let (start, end) = self
                         .piece_manager
                         .block_manager
-                        .piece_block_addresses(piece_index);
+                        .get_block_range(piece_index);
                     let assembler_mask = self
                         .piece_manager
                         .block_manager
@@ -1010,28 +1013,32 @@ impl TorrentState {
                         .get(&piece_index)
                         .map(|a| a.mask.clone());
 
-                    for addr in block_addrs {
+                    for global_block_idx in start..end {
                         if available_slots == 0 {
                             break;
                         }
 
-                        let global_block_idx = self.piece_manager.block_manager.flatten_address(addr);
-                        if !non_aligned_grid
-                            && self
-                                .piece_manager
-                                .block_manager
-                                .block_bitfield
-                                .get(global_block_idx as usize)
-                                == Some(&true)
+                        if self
+                            .piece_manager
+                            .block_manager
+                            .block_bitfield
+                            .get(global_block_idx as usize)
+                            == Some(&true)
                         {
                             continue;
                         }
 
+                        let local_block_idx = global_block_idx - start;
                         if let Some(mask) = &assembler_mask {
-                            if mask.get(addr.block_index as usize) == Some(&true) {
+                            if mask.get(local_block_idx as usize) == Some(&true) {
                                 continue;
                             }
                         }
+
+                        let addr = self
+                            .piece_manager
+                            .block_manager
+                            .inflate_address(global_block_idx);
 
                         let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
                             let remaining = limit.saturating_sub(addr.byte_offset);
@@ -1680,12 +1687,16 @@ impl TorrentState {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
                             // ... cancellation construction ...
-                            let block_addrs = self
+                            let (start, end) = self
                                 .piece_manager
                                 .block_manager
-                                .piece_block_addresses(piece_index);
+                                .get_block_range(piece_index);
                             let mut batch = Vec::new();
-                            for addr in block_addrs {
+                            for global_block_idx in start..end {
+                                let addr = self
+                                    .piece_manager
+                                    .block_manager
+                                    .inflate_address(global_block_idx);
                                 batch.push((addr.piece_index, addr.byte_offset, addr.length));
                             }
                             if !batch.is_empty() {
