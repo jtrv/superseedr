@@ -4160,6 +4160,73 @@ mod tests {
     }
 
     #[test]
+    fn test_non_aligned_assign_work_not_suppressed_by_previous_piece_global_bits() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        // Mark piece 0 as complete first. On non-aligned geometry this sets a shared
+        // global boundary block bit that must not suppress piece-1 requests.
+        state.piece_manager.mark_as_complete(0);
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "boundary_peer");
+        let peer = state.peers.get_mut("boundary_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "boundary_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "boundary_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        let mut piece_1_offsets: Vec<(u32, u32)> = requests
+            .iter()
+            .filter(|(idx, _, _)| *idx == 1)
+            .map(|(_, begin, len)| (*begin, *len))
+            .collect();
+        piece_1_offsets.sort_unstable();
+
+        assert_eq!(
+            piece_1_offsets,
+            vec![(0, 16_384), (16_384, 3_616)],
+            "Piece-1 requests must not be suppressed by piece-0 global block bits"
+        );
+    }
+
+    #[test]
     fn test_upload_starts_immediately_after_validation() {
         // GIVEN: A state set up to require upload activity after validation.
         let mut state = create_empty_state();
