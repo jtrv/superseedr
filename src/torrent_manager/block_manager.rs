@@ -72,7 +72,6 @@ pub struct BlockManager {
     pub piece_lengths: HashMap<u32, u32>,
 
     pub legacy_buffers: HashMap<u32, LegacyAssembler>,
-    pub completed_pieces: HashSet<u32>,
 
     // --- GEOMETRY ---
     pub piece_length: u32,
@@ -101,7 +100,6 @@ impl BlockManager {
         self.total_length = total_length;
         self.piece_hashes_v1 = v1_hashes;
         self.piece_lengths = piece_overrides;
-        self.completed_pieces.clear();
 
         // Construct File Layout
         let mut current_offset = 0;
@@ -120,12 +118,6 @@ impl BlockManager {
 
         self.total_blocks = (total_length as f64 / BLOCK_SIZE as f64).ceil() as u32;
         self.block_bitfield = vec![validation_complete; self.total_blocks as usize];
-
-        if validation_complete {
-            for i in 0..self.total_pieces() as u32 {
-                self.completed_pieces.insert(i);
-            }
-        }
     }
 
     /// Determines what to do with an incoming block:
@@ -253,35 +245,6 @@ impl BlockManager {
         (actual_start_blk, end_blk)
     }
 
-    pub fn is_non_aligned_piece_grid(&self) -> bool {
-        self.piece_length != 0 && self.piece_length % BLOCK_SIZE != 0
-    }
-
-    pub fn piece_block_addresses(&self, piece_index: u32) -> Vec<BlockAddress> {
-        let piece_len = self.calculate_piece_size(piece_index);
-        if piece_len == 0 {
-            return Vec::new();
-        }
-
-        let block_count = self.blocks_in_piece(piece_len);
-        let mut out = Vec::with_capacity(block_count as usize);
-
-        for block_index in 0..block_count {
-            let byte_offset = block_index * BLOCK_SIZE;
-            let length = std::cmp::min(BLOCK_SIZE, piece_len.saturating_sub(byte_offset));
-            if length == 0 {
-                continue;
-            }
-            if let Some(addr) =
-                self.inflate_address_from_overlay(piece_index, byte_offset, length)
-            {
-                out.push(addr);
-            }
-        }
-
-        out
-    }
-
     fn calculate_piece_size(&self, piece_idx: u32) -> u32 {
         if let Some(&len) = self.piece_lengths.get(&piece_idx) {
             return len;
@@ -316,14 +279,6 @@ impl BlockManager {
     }
 
     pub fn is_piece_complete(&self, piece_index: u32) -> bool {
-        if self.completed_pieces.contains(&piece_index) {
-            return true;
-        }
-
-        if self.is_non_aligned_piece_grid() {
-            return false;
-        }
-
         let (start, end) = self.get_block_range(piece_index);
         for i in start..end {
             if !self
@@ -448,7 +403,6 @@ impl BlockManager {
             self.pending_blocks.remove(&global_idx);
         }
         self.legacy_buffers.remove(&piece_index);
-        self.completed_pieces.insert(piece_index);
     }
 
     pub fn revert_v1_piece_completion(&mut self, piece_index: u32) {
@@ -460,7 +414,6 @@ impl BlockManager {
         }
         // Ensure buffer is gone so we can re-download/re-verify if needed
         self.legacy_buffers.remove(&piece_index);
-        self.completed_pieces.remove(&piece_index);
     }
 
     pub fn reset_v1_buffer(&mut self, piece_index: u32) {
