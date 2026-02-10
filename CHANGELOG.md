@@ -1,5 +1,18 @@
 # Changelog
 
+## Release v0.9.39
+### 🚀 New Features
+- **Boundary-Aware Piece Scheduling**: Added a piece-local request path that correctly handles torrents where piece sizes are not aligned to 16 KiB blocks, improving reliability on edge-case torrent layouts.
+
+### ✨ Improvements
+- **Smarter Download Request Routing**: Request and cancel generation now use piece-local block tuples, making peer work assignment more consistent after resume/restart and during multi-peer scheduling.
+- **More Predictable Completion Flow**: Piece/block coordination is now cleaner in non-aligned layouts, reducing false “in-flight but no progress” behavior under heavy swarm traffic.
+
+### 🐛 Bug Fixes
+- **Non-Aligned Torrent Stalls**: Fixed a bug where downloads could appear active but stop advancing because needed boundary blocks were incorrectly suppressed.
+- **Piece Boundary Handling**: Fixed edge cases where adjacent pieces sharing a global block slot could interfere with each other’s progress.
+- **Resume Verification Consistency**: Improved restart/resume behavior so verified progress and subsequent block requests stay aligned with actual missing data.
+
 ## Release v0.9.38
 ### 🚀 New Features
 - **Richer Built-In Theme System**: Added a semantic theme engine plus multiple new themes (including Neon and Candy Land Pink) for deeper, more consistent UI personalization.
