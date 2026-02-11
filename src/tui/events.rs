@@ -939,6 +939,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                             if let Some(path) = state.cursor_path.clone() {
                                 if path.is_dir() {
+                                    // Entering a directory starts a fresh listing context.
+                                    app.app_state.is_searching = false;
+                                    app.app_state.search_query.clear();
                                     let _ =
                                         app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                             path,

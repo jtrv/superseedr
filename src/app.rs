@@ -1405,27 +1405,38 @@ impl App {
                     if let FileBrowserMode::File(extensions) = browser_mode {
                         let target_exts: Vec<String> =
                             extensions.iter().map(|e| e.to_lowercase()).collect();
-                        data.sort_by(|a, b| {
-                            let a_matches = target_exts
-                                .iter()
-                                .any(|ext| a.name.to_lowercase().ends_with(ext));
-                            let b_matches = target_exts
-                                .iter()
-                                .any(|ext| b.name.to_lowercase().ends_with(ext));
-
-                            // 1. Priority: Torrents first
-                            if a_matches != b_matches {
-                                return b_matches.cmp(&a_matches);
-                            }
-
-                            // 2. Priority: Folders second (ensures folders follow torrents directly)
-                            if a.is_dir != b.is_dir {
-                                return b.is_dir.cmp(&a.is_dir); // Changed order to put folders higher
-                            }
-
-                            // 3. Final: Sort by newest date
-                            b.payload.modified.cmp(&a.payload.modified)
+                        let has_target_files = data.iter().any(|node| {
+                            !node.is_dir
+                                && target_exts
+                                    .iter()
+                                    .any(|ext| node.name.to_lowercase().ends_with(ext))
                         });
+
+                        if !has_target_files {
+                            data.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                        } else {
+                            data.sort_by(|a, b| {
+                                let a_matches = target_exts
+                                    .iter()
+                                    .any(|ext| a.name.to_lowercase().ends_with(ext));
+                                let b_matches = target_exts
+                                    .iter()
+                                    .any(|ext| b.name.to_lowercase().ends_with(ext));
+
+                                // 1. Priority: Torrents first
+                                if a_matches != b_matches {
+                                    return b_matches.cmp(&a_matches);
+                                }
+
+                                // 2. Priority: Folders second (ensures folders follow torrents directly)
+                                if a.is_dir != b.is_dir {
+                                    return b.is_dir.cmp(&a.is_dir); // Changed order to put folders higher
+                                }
+
+                                // 3. Final: Sort by newest date
+                                b.payload.modified.cmp(&a.payload.modified)
+                            });
+                        }
                     }
 
                     // --- 2. Update Data ---
