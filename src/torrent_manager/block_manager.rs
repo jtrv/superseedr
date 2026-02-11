@@ -245,6 +245,33 @@ impl BlockManager {
         (actual_start_blk, end_blk)
     }
 
+    pub fn is_non_aligned_piece_grid(&self) -> bool {
+        self.piece_length != 0 && !self.piece_length.is_multiple_of(BLOCK_SIZE)
+    }
+
+    pub fn piece_block_addresses(&self, piece_index: u32) -> Vec<BlockAddress> {
+        let piece_len = self.calculate_piece_size(piece_index);
+        if piece_len == 0 {
+            return Vec::new();
+        }
+
+        let block_count = self.blocks_in_piece(piece_len);
+        let mut out = Vec::with_capacity(block_count as usize);
+        for block_index in 0..block_count {
+            let byte_offset = block_index * BLOCK_SIZE;
+            let length = std::cmp::min(BLOCK_SIZE, piece_len.saturating_sub(byte_offset));
+            if length == 0 {
+                continue;
+            }
+            if let Some(addr) = self.inflate_address_from_overlay(piece_index, byte_offset, length)
+            {
+                out.push(addr);
+            }
+        }
+
+        out
+    }
+
     fn calculate_piece_size(&self, piece_idx: u32) -> u32 {
         if let Some(&len) = self.piece_lengths.get(&piece_idx) {
             return len;
@@ -279,6 +306,12 @@ impl BlockManager {
     }
 
     pub fn is_piece_complete(&self, piece_index: u32) -> bool {
+        // On non-aligned piece grids, global 16KiB blocks can overlap adjacent pieces,
+        // so block-bitfield-only completion checks are ambiguous.
+        if self.is_non_aligned_piece_grid() {
+            return false;
+        }
+
         let (start, end) = self.get_block_range(piece_index);
         for i in start..end {
             if !self
@@ -577,6 +610,32 @@ mod tests {
         // INVALID: Starts one byte past the piece length
         let invalid_addr_3 = manager.inflate_address_from_overlay(0, piece_len, BLK_SIZE);
         assert!(invalid_addr_3.is_none());
+    }
+
+    #[test]
+    fn test_non_aligned_adjacent_piece_completion_independence() {
+        // This captures the boundary-aliasing risk when piece length is not block-aligned.
+        let piece_len = 20_000;
+        let total_len = 40_000;
+        let mut manager = setup_manager(piece_len, total_len);
+
+        // Mark piece 0 complete first (sets global blocks 0 and 1).
+        manager.commit_v1_piece(0);
+        assert!(
+            !manager.is_piece_complete(1),
+            "Piece 1 must not be complete after only piece 0 has been committed"
+        );
+
+        // Simulate receiving the second global block for piece 1's range.
+        let addr = manager.inflate_address(2);
+        let _ = manager.commit_verified_block(addr);
+
+        // Expected behavior: still incomplete, because the initial bytes of piece 1 were never received
+        // in piece-1-local space.
+        assert!(
+            !manager.is_piece_complete(1),
+            "Piece 1 should not be marked complete via shared global boundary blocks alone"
+        );
     }
 
     #[test]
