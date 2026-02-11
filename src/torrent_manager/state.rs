@@ -841,44 +841,14 @@ impl TorrentState {
                     if self.verifying_pieces.contains(&piece_index) {
                         continue;
                     }
-                    let (start, end) = self
+                    let block_addrs = self
                         .piece_manager
-                        .block_manager
-                        .get_block_range(piece_index);
-                    let assembler_mask = self
-                        .piece_manager
-                        .block_manager
-                        .legacy_buffers
-                        .get(&piece_index)
-                        .map(|a| a.mask.clone());
+                        .requestable_block_addresses_for_piece(piece_index);
 
-                    for global_block_idx in start..end {
+                    for addr in block_addrs {
                         if available_slots == 0 {
                             break;
                         }
-
-                        if self
-                            .piece_manager
-                            .block_manager
-                            .block_bitfield
-                            .get(global_block_idx as usize)
-                            == Some(&true)
-                        {
-                            continue;
-                        }
-
-                        // Is it buffered?
-                        let local_block_idx = global_block_idx - start;
-                        if let Some(mask) = &assembler_mask {
-                            if mask.get(local_block_idx as usize) == Some(&true) {
-                                continue;
-                            }
-                        }
-
-                        let addr = self
-                            .piece_manager
-                            .block_manager
-                            .inflate_address(global_block_idx);
 
                         let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
                             let remaining = limit.saturating_sub(addr.byte_offset);
@@ -964,43 +934,14 @@ impl TorrentState {
                     }
 
                     // --- B. Generate Block Requests ---
-                    let (start, end) = self
+                    let block_addrs = self
                         .piece_manager
-                        .block_manager
-                        .get_block_range(piece_index);
-                    let assembler_mask = self
-                        .piece_manager
-                        .block_manager
-                        .legacy_buffers
-                        .get(&piece_index)
-                        .map(|a| a.mask.clone());
+                        .requestable_block_addresses_for_piece(piece_index);
 
-                    for global_block_idx in start..end {
+                    for addr in block_addrs {
                         if available_slots == 0 {
                             break;
                         }
-
-                        if self
-                            .piece_manager
-                            .block_manager
-                            .block_bitfield
-                            .get(global_block_idx as usize)
-                            == Some(&true)
-                        {
-                            continue;
-                        }
-
-                        let local_block_idx = global_block_idx - start;
-                        if let Some(mask) = &assembler_mask {
-                            if mask.get(local_block_idx as usize) == Some(&true) {
-                                continue;
-                            }
-                        }
-
-                        let addr = self
-                            .piece_manager
-                            .block_manager
-                            .inflate_address(global_block_idx);
 
                         let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
                             let remaining = limit.saturating_sub(addr.byte_offset);
@@ -1575,18 +1516,7 @@ impl TorrentState {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
                             // ... cancellation construction ...
-                            let (start, end) = self
-                                .piece_manager
-                                .block_manager
-                                .get_block_range(piece_index);
-                            let mut batch = Vec::new();
-                            for global_block_idx in start..end {
-                                let addr = self
-                                    .piece_manager
-                                    .block_manager
-                                    .inflate_address(global_block_idx);
-                                batch.push((addr.piece_index, addr.byte_offset, addr.length));
-                            }
+                            let batch = self.piece_manager.cancel_tuples_for_piece(piece_index);
                             if !batch.is_empty() {
                                 effects.push(Effect::SendToPeer {
                                     peer_id: other_peer.clone(),
@@ -3574,6 +3504,668 @@ mod tests {
         } else {
             panic!("No request sent for partial piece");
         }
+    }
+
+    #[test]
+    fn test_assign_work_non_aligned_boundary_piece_identity() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "target_peer");
+        let peer = state.peers.get_mut("target_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        assert!(
+            !requests.is_empty(),
+            "Expected at least one boundary request"
+        );
+        assert!(
+            requests.iter().all(|(idx, _, _)| *idx == 1),
+            "All requests must target piece 1, got {:?}",
+            requests
+        );
+    }
+
+    #[test]
+    fn test_assign_work_non_aligned_boundary_offsets_for_piece() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "target_peer");
+        let peer = state.peers.get_mut("target_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        let mut piece_1_offsets: Vec<(u32, u32)> = requests
+            .iter()
+            .filter(|(idx, _, _)| *idx == 1)
+            .map(|(_, begin, len)| (*begin, *len))
+            .collect();
+        piece_1_offsets.sort_unstable();
+
+        assert_eq!(
+            piece_1_offsets,
+            vec![(0, 16_384), (16_384, 3_616)],
+            "Piece-1 requests must follow piece-local geometry exactly"
+        );
+    }
+
+    #[test]
+    fn test_incoming_block_non_aligned_updates_correct_piece_assembler() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "target_peer");
+        let peer = state.peers.get_mut("target_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        let mut saw_verify_piece_1 = false;
+        for (piece_index, block_offset, length) in requests {
+            let effects = state.update(Action::IncomingBlock {
+                peer_id: "target_peer".to_string(),
+                piece_index,
+                block_offset,
+                data: vec![0u8; length as usize],
+            });
+            saw_verify_piece_1 |= effects
+                .iter()
+                .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 1, .. }));
+        }
+
+        assert!(
+            !state
+                .piece_manager
+                .block_manager
+                .legacy_buffers
+                .contains_key(&0),
+            "Assembler for piece 0 should remain untouched while downloading piece 1"
+        );
+        // Piece 1 may either still be buffering or already have emitted verification and cleared buffer.
+        let piece_1_buffering = state
+            .piece_manager
+            .block_manager
+            .legacy_buffers
+            .contains_key(&1);
+        assert!(
+            piece_1_buffering || saw_verify_piece_1,
+            "Piece 1 must either buffer in its own assembler or reach verification"
+        );
+    }
+
+    #[test]
+    fn test_restart_resume_non_aligned_requests_only_missing_blocks() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "target_peer");
+        let peer = state.peers.get_mut("target_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        // Receive one valid piece-1 block before "restart".
+        let _ = state.update(Action::IncomingBlock {
+            peer_id: "target_peer".to_string(),
+            piece_index: 1,
+            block_offset: 0,
+            data: vec![0u8; 16_384],
+        });
+
+        // Simulate restart: session-level inflight/active state should be cleared.
+        if let Some(peer_after_restart) = state.peers.get_mut("target_peer") {
+            peer_after_restart.inflight_requests = 0;
+            peer_after_restart.active_blocks.clear();
+        }
+
+        // Re-assign after restart.
+        let effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        assert_eq!(
+            requests,
+            vec![(1, 16_384, 3_616)],
+            "Resume must request only the remaining piece-1 boundary block"
+        );
+    }
+
+    #[test]
+    fn test_non_aligned_verify_fail_requeue_clears_exact_piece_state() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.mark_as_complete(0);
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+
+        let _ = state.update(Action::PieceVerified {
+            peer_id: "target_peer".to_string(),
+            piece_index: 1,
+            valid: false,
+            data: vec![],
+        });
+
+        assert!(
+            state.piece_manager.bitfield.first() == Some(&PieceStatus::Done),
+            "Piece 0 completion state must remain unchanged"
+        );
+        assert!(
+            state.piece_manager.bitfield.get(1) == Some(&PieceStatus::Need),
+            "Piece 1 must be requeued and incomplete after verification failure"
+        );
+    }
+
+    #[test]
+    fn test_assign_work_non_aligned_no_zero_or_oversize_block_requests() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "target_peer");
+        let peer = state.peers.get_mut("target_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        assert!(!requests.is_empty(), "Expected request batch");
+        for (piece_index, begin, len) in requests {
+            assert!(len > 0, "Zero-length request is invalid");
+            assert_eq!(
+                piece_index, 1,
+                "Boundary request must remain in target piece namespace"
+            );
+            assert!(
+                begin + len <= 20_000,
+                "Request exceeds piece boundary: begin={} len={}",
+                begin,
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_aligned_full_piece_download_emits_verify_for_target_piece() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "target_peer");
+        let peer = state.peers.get_mut("target_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let mut effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        for (piece_index, block_offset, length) in requests {
+            effects = state.update(Action::IncomingBlock {
+                peer_id: "target_peer".to_string(),
+                piece_index,
+                block_offset,
+                data: vec![0u8; length as usize],
+            });
+        }
+
+        let verify_piece_1 = effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 1, .. }));
+        assert!(
+            verify_piece_1,
+            "Completing target non-aligned piece should emit VerifyPiece for piece 1"
+        );
+    }
+
+    #[test]
+    fn test_assign_work_tiny_piece_keeps_target_piece_identity() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 1_024;
+        torrent.info.length = 2_048;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            1_024,
+            2_048,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "tiny_peer");
+        let peer = state.peers.get_mut("tiny_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "tiny_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "tiny_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        assert_eq!(
+            requests,
+            vec![(1, 0, 1_024)],
+            "Tiny-piece request should stay in piece-local namespace"
+        );
+    }
+
+    #[test]
+    fn test_multi_file_non_aligned_priority_boundary_mixed_piece_not_skipped() {
+        let mut state = create_empty_state();
+        let piece_len = 20_000;
+
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = 40_000;
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: 18_000, // Entirely in piece 0
+                path: vec!["A.bin".into()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: 22_000, // Crosses piece boundary into piece 1
+                path: vec!["B.bin".into()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+
+        let mut priorities = HashMap::new();
+        priorities.insert(0, FilePriority::Skip); // Skip file A only.
+
+        let p = state.calculate_piece_priorities(&priorities);
+
+        assert_eq!(
+            p[0],
+            EffectivePiecePriority::Normal,
+            "Piece 0 spans skipped and non-skipped files and must not be skipped"
+        );
+        assert_eq!(
+            p[1],
+            EffectivePiecePriority::Normal,
+            "Piece 1 belongs to non-skipped file and must remain normal"
+        );
+    }
+
+    #[test]
+    fn test_non_aligned_choke_disconnect_requeues_without_ghost_pending() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        add_peer(&mut state, "race_peer");
+        let peer = state.peers.get_mut("race_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.pending_requests.insert(1);
+        state
+            .piece_manager
+            .mark_as_pending(1, "race_peer".to_string());
+
+        let _ = state.update(Action::PeerChoked {
+            peer_id: "race_peer".to_string(),
+        });
+        let _ = state.update(Action::PeerDisconnected {
+            peer_id: "race_peer".to_string(),
+            force: true,
+        });
+
+        assert!(
+            !state.piece_manager.pending_queue.contains_key(&1),
+            "Pending queue should be cleared for disconnected/choked peer"
+        );
+        assert!(
+            state.piece_manager.need_queue.contains(&1),
+            "Piece must be requeued after choke/disconnect race"
+        );
+        assert!(
+            !state.peers.contains_key("race_peer"),
+            "Peer should be removed after disconnect"
+        );
+    }
+
+    #[test]
+    fn test_non_aligned_assign_work_not_suppressed_by_previous_piece_global_bits() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 20_000;
+        torrent.info.length = 40_000;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            20_000,
+            40_000,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        // Mark piece 0 as complete first. On non-aligned geometry this sets a shared
+        // global boundary block bit that must not suppress piece-1 requests.
+        state.piece_manager.mark_as_complete(0);
+
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        add_peer(&mut state, "boundary_peer");
+        let peer = state.peers.get_mut("boundary_peer").unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true, true];
+        peer.am_interested = true;
+
+        state
+            .piece_manager
+            .mark_as_pending(1, "boundary_peer".to_string());
+        peer.pending_requests.insert(1);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: "boundary_peer".to_string(),
+        });
+
+        let requests: Vec<(u32, u32, u32)> = effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::SendToPeer { cmd, .. } = e {
+                    if let TorrentCommand::BulkRequest(reqs) = &**cmd {
+                        return Some(reqs.clone());
+                    }
+                }
+                None
+            })
+            .flatten()
+            .collect();
+
+        let mut piece_1_offsets: Vec<(u32, u32)> = requests
+            .iter()
+            .filter(|(idx, _, _)| *idx == 1)
+            .map(|(_, begin, len)| (*begin, *len))
+            .collect();
+        piece_1_offsets.sort_unstable();
+
+        assert_eq!(
+            piece_1_offsets,
+            vec![(0, 16_384), (16_384, 3_616)],
+            "Piece-1 requests must not be suppressed by piece-0 global block bits"
+        );
     }
 
     #[test]
@@ -8783,6 +9375,16 @@ mod integration_tests {
         ManagerCommand, TorrentManager, TorrentMetrics, TorrentParameters,
     };
 
+    fn full_bitfield(num_pieces: usize) -> Vec<u8> {
+        let mut bf = vec![0u8; num_pieces.div_ceil(8)];
+        for i in 0..num_pieces {
+            let byte_idx = i / 8;
+            let bit_idx = 7 - (i % 8);
+            bf[byte_idx] |= 1 << bit_idx;
+        }
+        bf
+    }
+
     fn create_manager_harness(
         name: &str,
         num_pieces: usize,
@@ -8978,6 +9580,8 @@ mod integration_tests {
 
                                     let mut rep = vec![6];
                                     rep.extend_from_slice(&index.to_be_bytes());
+                                    rep.extend_from_slice(&begin.to_be_bytes());
+                                    rep.extend_from_slice(&req_len.to_be_bytes());
                                     let _ = tx_events.try_send(rep);
 
                                     if upload_delay.as_millis() > 0 {
@@ -8993,6 +9597,20 @@ mod integration_tests {
                                     resp.extend_from_slice(&begin.to_be_bytes());
                                     resp.extend_from_slice(&data);
                                     let _ = wr.write_all(&resp).await;
+                                }
+                                8 => {
+                                    // Cancel
+                                    let index =
+                                        u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
+                                    let begin =
+                                        u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
+                                    let req_len =
+                                        u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
+                                    let mut rep = vec![8];
+                                    rep.extend_from_slice(&index.to_be_bytes());
+                                    rep.extend_from_slice(&begin.to_be_bytes());
+                                    rep.extend_from_slice(&req_len.to_be_bytes());
+                                    let _ = tx_events.try_send(rep);
                                 }
                                 _ => {}
                             }
@@ -9208,5 +9826,351 @@ mod integration_tests {
         let _ = std::fs::remove_dir_all(temp_dir);
 
         assert!(success);
+    }
+
+    #[tokio::test]
+    async fn test_non_aligned_piece_length_small_swarm_completes() {
+        let temp_dir = std::env::temp_dir().join("superseedr_non_aligned_20k");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 4;
+        let piece_size = 20_000;
+        let (mut manager, cmd_tx, _res) =
+            create_manager_harness("NonAligned20k", num_pieces, piece_size, temp_dir.clone());
+
+        let bf_all = full_bitfield(num_pieces);
+        spawn_mock_peer(&mut manager, bf_all, std::time::Duration::from_millis(0)).await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let expected_size = (num_pieces * piece_size) as u64;
+        let file_path = temp_dir.join("NonAligned20k");
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(12);
+        let mut success = false;
+
+        while start.elapsed() < timeout {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(
+            success,
+            "Non-aligned piece-length torrent failed to complete in bounded time"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tiny_piece_length_small_swarm_completes() {
+        let temp_dir = std::env::temp_dir().join("superseedr_tiny_piece_1k");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 8;
+        let piece_size = 1_024;
+        let (mut manager, cmd_tx, _res) =
+            create_manager_harness("TinyPiece1k", num_pieces, piece_size, temp_dir.clone());
+
+        let bf_all = full_bitfield(num_pieces);
+        spawn_mock_peer(&mut manager, bf_all, std::time::Duration::from_millis(0)).await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let expected_size = (num_pieces * piece_size) as u64;
+        let file_path = temp_dir.join("TinyPiece1k");
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(12);
+        let mut success = false;
+
+        while start.elapsed() < timeout {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(
+            success,
+            "Tiny piece-length torrent failed to complete in bounded time"
+        );
+    }
+
+    fn decode_triplet_event(msg: &[u8], expected_kind: u8) -> Option<(u32, u32, u32)> {
+        if msg.len() < 13 || msg[0] != expected_kind {
+            return None;
+        }
+        let idx = u32::from_be_bytes(msg[1..5].try_into().ok()?);
+        let begin = u32::from_be_bytes(msg[5..9].try_into().ok()?);
+        let len = u32::from_be_bytes(msg[9..13].try_into().ok()?);
+        Some((idx, begin, len))
+    }
+
+    #[tokio::test]
+    async fn test_non_aligned_request_identity_emits_piece_local_requests() {
+        let temp_dir = std::env::temp_dir().join("superseedr_req_identity_non_aligned");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 2;
+        let piece_size = 20_000;
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "ReqIdentityNonAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
+
+        let (mut rx_events, _ctrl) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        let mut reqs = Vec::new();
+
+        while start.elapsed() < timeout && reqs.len() < 4 {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx_events.recv()).await
+            {
+                if let Some(t) = decode_triplet_event(&msg, 6) {
+                    reqs.push(t);
+                }
+            }
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(!reqs.is_empty(), "Expected request tuples from peer");
+        let piece0: Vec<(u32, u32)> = reqs
+            .iter()
+            .filter(|(idx, _, _)| *idx == 0)
+            .map(|(_, begin, len)| (*begin, *len))
+            .collect();
+        let piece1: Vec<(u32, u32)> = reqs
+            .iter()
+            .filter(|(idx, _, _)| *idx == 1)
+            .map(|(_, begin, len)| (*begin, *len))
+            .collect();
+
+        assert!(
+            !piece0.is_empty() && !piece1.is_empty(),
+            "Expected requests for both pieces, got {:?}",
+            reqs
+        );
+        assert!(
+            piece0.contains(&(0, 16_384)) && piece0.contains(&(16_384, 3_616)),
+            "Piece 0 requests must be piece-local for non-aligned geometry: {:?}",
+            piece0
+        );
+        assert!(
+            piece1.contains(&(0, 16_384)) && piece1.contains(&(16_384, 3_616)),
+            "Piece 1 requests must be piece-local for non-aligned geometry: {:?}",
+            piece1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aligned_request_identity_emits_piece_local_requests() {
+        let temp_dir = std::env::temp_dir().join("superseedr_req_identity_aligned");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 2;
+        let piece_size = 16_384;
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "ReqIdentityAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
+
+        let (mut rx_events, _ctrl) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        let mut reqs = Vec::new();
+
+        while start.elapsed() < timeout && reqs.len() < 2 {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx_events.recv()).await
+            {
+                if let Some(t) = decode_triplet_event(&msg, 6) {
+                    reqs.push(t);
+                }
+            }
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(
+            reqs.contains(&(0, 0, 16_384)) && reqs.contains(&(1, 0, 16_384)),
+            "Aligned requests must remain piece-local: {:?}",
+            reqs
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_aligned_cancel_identity_emits_piece_local_cancels() {
+        let temp_dir = std::env::temp_dir().join("superseedr_cancel_identity_non_aligned");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 1;
+        let piece_size = 20_000;
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "CancelIdentityNonAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
+
+        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+        let (mut rx_slow, _ctrl_slow) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(8);
+        let mut cancels = Vec::new();
+
+        while start.elapsed() < timeout {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(250), rx_slow.recv()).await
+            {
+                if let Some(t) = decode_triplet_event(&msg, 8) {
+                    cancels.push(t);
+                    if cancels.len() >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(!cancels.is_empty(), "Expected at least one cancel tuple");
+        assert!(
+            cancels.iter().all(|(idx, _, _)| *idx == 0),
+            "Cancels must stay in piece-local namespace for non-aligned case: {:?}",
+            cancels
+        );
+        assert!(
+            cancels.contains(&(0, 0, 16_384)) || cancels.contains(&(0, 16_384, 3_616)),
+            "Expected non-aligned piece-local cancel tuples, got {:?}",
+            cancels
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aligned_cancel_identity_emits_piece_local_cancels() {
+        let temp_dir = std::env::temp_dir().join("superseedr_cancel_identity_aligned");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 1;
+        let piece_size = 16_384;
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "CancelIdentityAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
+
+        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+        let (mut rx_slow, _ctrl_slow) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(8);
+        let mut cancels = Vec::new();
+
+        while start.elapsed() < timeout {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(250), rx_slow.recv()).await
+            {
+                if let Some(t) = decode_triplet_event(&msg, 8) {
+                    cancels.push(t);
+                    break;
+                }
+            }
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(
+            cancels.contains(&(0, 0, 16_384)),
+            "Aligned cancel must use exact piece-local tuple: {:?}",
+            cancels
+        );
     }
 }
