@@ -1,14 +1,24 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata};
+use crate::app::{
+    AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata, FilePriority,
+    TorrentPreviewPayload,
+};
 use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_file_browser_layout;
-use crate::app::TorrentPreviewPayload;
 use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
+
+pub struct DownloadConfirmPayload {
+    pub base_path: PathBuf,
+    pub container_name_to_use: Option<String>,
+    pub file_priorities: HashMap<usize, FilePriority>,
+}
 
 pub fn handle_search_interceptor(
     key_code: KeyCode,
@@ -357,6 +367,45 @@ pub fn selected_torrent_file_for_confirm(
     None
 }
 
+pub fn build_download_confirm_payload(
+    state: &TreeViewState,
+    browser_mode: &FileBrowserMode,
+) -> Option<DownloadConfirmPayload> {
+    if let FileBrowserMode::DownloadLocSelection {
+        container_name,
+        use_container,
+        preview_tree,
+        ..
+    } = browser_mode
+    {
+        let base_path = state.current_path.clone();
+        let container_name_to_use = if *use_container {
+            Some(container_name.clone())
+        } else {
+            Some(String::new())
+        };
+
+        let mut file_priorities = HashMap::new();
+        for node in preview_tree {
+            node.collect_priorities(&mut file_priorities);
+        }
+
+        return Some(DownloadConfirmPayload {
+            base_path,
+            container_name_to_use,
+            file_priorities,
+        });
+    }
+    None
+}
+
+pub fn pending_link_info_hash(pending_torrent_link: &str) -> Option<Vec<u8>> {
+    if pending_torrent_link.is_empty() {
+        return None;
+    }
+    crate::app::parse_hybrid_hashes(pending_torrent_link).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,5 +563,10 @@ mod tests {
         };
         let out = confirm_config_path_selection(&state, &mode);
         assert!(matches!(out, Some(AppMode::Config { .. })));
+    }
+
+    #[test]
+    fn pending_link_hash_is_none_for_empty() {
+        assert!(pending_link_info_hash("").is_none());
     }
 }

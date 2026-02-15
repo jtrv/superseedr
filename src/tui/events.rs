@@ -203,9 +203,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         match key.code {
                             KeyCode::Esc => {
                                 if !app.app_state.pending_torrent_link.is_empty() {
-                                    if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(
-                                        &app.app_state.pending_torrent_link,
-                                    ) {
+                                    if let Some(info_hash) =
+                                        browser::pending_link_info_hash(&app.app_state.pending_torrent_link)
+                                    {
                                         // 1. Grab reference to channel
                                         if let Some(manager_tx) =
                                             app.torrent_manager_command_txs.get(&info_hash)
@@ -300,44 +300,37 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             } else {
                                 match browser_mode {
                                     FileBrowserMode::DownloadLocSelection {
-                                    container_name,
-                                    use_container,
-                                    preview_tree,
                                     ..
                                     } => {
-                                    let base_path = state.current_path.clone();
-                                    let container_name_to_use = if *use_container {
-                                        Some(container_name.clone())
-                                    } else {
-                                        Some(String::new())
+                                    let Some(payload) =
+                                        browser::build_download_confirm_payload(state, browser_mode)
+                                    else {
+                                        app.app_state.is_searching = false;
+                                        app.app_state.search_query.clear();
+                                        return;
                                     };
-
-                                    let mut file_priorities = HashMap::new();
-                                    for node in preview_tree {
-                                        node.collect_priorities(&mut file_priorities);
-                                    }
 
                                     if let Some(pending_path) =
                                         app.app_state.pending_torrent_path.take()
                                     {
                                         app.add_torrent_from_file(
                                             pending_path,
-                                            Some(base_path),
+                                            Some(payload.base_path.clone()),
                                             false,
                                             TorrentControlState::Running,
-                                            file_priorities,
-                                            container_name_to_use.clone(),
+                                            payload.file_priorities.clone(),
+                                            payload.container_name_to_use.clone(),
                                         )
                                         .await;
                                     } else if !app.app_state.pending_torrent_link.is_empty() {
                                         app.add_magnet_torrent(
                                             "Fetching name...".to_string(),
                                             app.app_state.pending_torrent_link.clone(),
-                                            Some(base_path),
+                                            Some(payload.base_path),
                                             false,
                                             TorrentControlState::Running,
-                                            file_priorities,
-                                            container_name_to_use,
+                                            payload.file_priorities,
+                                            payload.container_name_to_use,
                                         )
                                         .await;
                                         app.app_state.pending_torrent_link.clear();
@@ -383,9 +376,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
                                 if !app.app_state.pending_torrent_link.is_empty() {
                                     // 1. Calculate the hash to find the entry
-                                    if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(
-                                        &app.app_state.pending_torrent_link,
-                                    ) {
+                                    if let Some(info_hash) =
+                                        browser::pending_link_info_hash(&app.app_state.pending_torrent_link)
+                                    {
                                         // 2. Shut down the manager
                                         if let Some(manager_tx) =
                                             app.torrent_manager_command_txs.remove(&info_hash)
