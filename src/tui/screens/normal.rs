@@ -29,6 +29,7 @@ use crate::tui::layout::common::{PeerColumnId, SmartCol};
 use crate::tui::layout::normal::calculate_layout;
 use crate::tui::layout::normal::LayoutContext;
 use crate::tui::layout::normal::LayoutPlan;
+use crate::tui::layout::normal::DEFAULT_SIDEBAR_PERCENT;
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::TreeViewState;
 use rand::rngs::StdRng;
@@ -246,7 +247,8 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             }
         }
         UiAction::SortBySelectedColumn => {
-            let layout_ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
+            let layout_ctx =
+                LayoutContext::new(app_state.screen_area, app_state, DEFAULT_SIDEBAR_PERCENT);
             let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
             let (_, visible_torrent_columns) =
                 compute_visible_torrent_columns(app_state, layout_plan.list.width);
@@ -3114,7 +3116,7 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
 
-    let layout_ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
+    let layout_ctx = LayoutContext::new(app_state.screen_area, app_state, DEFAULT_SIDEBAR_PERCENT);
     let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
     let (_, visible_torrent_columns) =
         compute_visible_torrent_columns(app_state, layout_plan.list.width);
