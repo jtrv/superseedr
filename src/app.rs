@@ -394,11 +394,7 @@ pub enum AppMode {
     PowerSaving,
     DeleteConfirm,
     Config,
-    FileBrowser {
-        state: TreeViewState,
-        data: Vec<RawNode<FileMetadata>>,
-        browser_mode: FileBrowserMode,
-    },
+    FileBrowser,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -505,6 +501,7 @@ pub struct UiState {
     pub search_query: String,
     pub config: ConfigUiState,
     pub delete_confirm: DeleteConfirmUiState,
+    pub file_browser: FileBrowserUiState,
 }
 
 pub struct ConfigUiState {
@@ -529,6 +526,13 @@ impl Default for ConfigUiState {
 pub struct DeleteConfirmUiState {
     pub info_hash: Vec<u8>,
     pub with_files: bool,
+}
+
+#[derive(Default)]
+pub struct FileBrowserUiState {
+    pub state: TreeViewState,
+    pub data: Vec<RawNode<FileMetadata>>,
+    pub browser_mode: FileBrowserMode,
 }
 
 #[derive(Default)]
@@ -1404,18 +1408,18 @@ impl App {
                 let highlight_clone = highlight_path.clone();
 
                 // 1. Update or Initialize the UI state immediately
-                if let AppMode::FileBrowser { state, .. } = &mut self.app_state.mode {
+                if matches!(self.app_state.mode, AppMode::FileBrowser) {
                     // If already in browser, just update the path we are viewing
-                    state.current_path = path.clone();
+                    self.app_state.ui.file_browser.state.current_path = path.clone();
+                    self.app_state.ui.file_browser.browser_mode = browser_mode;
                 } else {
                     // Otherwise, initialize the mode
                     let mut tree_state = crate::tui::tree::TreeViewState::new();
                     tree_state.current_path = path.clone();
-                    self.app_state.mode = AppMode::FileBrowser {
-                        state: tree_state,
-                        data: Vec::new(),
-                        browser_mode,
-                    };
+                    self.app_state.ui.file_browser.state = tree_state;
+                    self.app_state.ui.file_browser.data = Vec::new();
+                    self.app_state.ui.file_browser.browser_mode = browser_mode;
+                    self.app_state.mode = AppMode::FileBrowser;
                 }
 
                 // 2. Spawn the background crawl
@@ -1441,12 +1445,10 @@ impl App {
                 mut data,
                 highlight_path,
             } => {
-                if let AppMode::FileBrowser {
-                    state,
-                    data: existing_data,
-                    browser_mode,
-                } = &mut self.app_state.mode
-                {
+                if matches!(self.app_state.mode, AppMode::FileBrowser) {
+                    let state = &mut self.app_state.ui.file_browser.state;
+                    let existing_data = &mut self.app_state.ui.file_browser.data;
+                    let browser_mode = &mut self.app_state.ui.file_browser.browser_mode;
                     // --- 1. Apply Dynamic Sorting ---
                     if let FileBrowserMode::File(extensions) = browser_mode {
                         let target_exts: Vec<String> =
@@ -1627,18 +1629,14 @@ impl App {
                 self.app_state.ui.needs_redraw = true;
             }
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
-                if let AppMode::FileBrowser {
-                    browser_mode:
-                        FileBrowserMode::DownloadLocSelection {
-                            preview_tree,
-                            preview_state,
-                            container_name,
-                            original_name_backup,
-                            use_container,
-                            ..
-                        },
+                if let FileBrowserMode::DownloadLocSelection {
+                    preview_tree,
+                    preview_state,
+                    container_name,
+                    original_name_backup,
+                    use_container,
                     ..
-                } = &mut self.app_state.mode
+                } = &mut self.app_state.ui.file_browser.browser_mode
                 {
                     // 1. REDUNDANCY GUARD: Check if metadata was already processed
                     // If the tree is already populated, ignore subsequent peer metadata arrivals

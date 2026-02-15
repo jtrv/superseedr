@@ -53,12 +53,14 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
-        AppMode::FileBrowser {
-            state,
-            data,
-            browser_mode,
-        } => {
-            browser::draw(f, &screen, state, data, browser_mode);
+        AppMode::FileBrowser => {
+            browser::draw(
+                f,
+                &screen,
+                &app_state.ui.file_browser.state,
+                &app_state.ui.file_browser.data,
+                &app_state.ui.file_browser.browser_mode,
+            );
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
