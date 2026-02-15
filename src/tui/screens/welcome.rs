@@ -6,8 +6,8 @@ use ratatui::{prelude::*, widgets::*};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{AppMode, AppState};
-use crate::config::Settings;
 use crate::theme::{blend_colors, color_to_rgb, ThemeContext};
+use crate::tui::screen_context::ScreenContext;
 
 const WELCOME_LICENSE_LABEL: &str = "GNU General Public License v3.0";
 
@@ -41,7 +41,9 @@ const LOGO_SMALL: &str = r#"
  \/___/  \/___/ 
 "#;
 
-pub fn draw(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
+pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
+    let settings = screen.settings;
+    let ctx = screen.theme;
     let area = f.area();
 
     draw_background_dust(f, area, ctx);

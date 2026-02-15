@@ -23,7 +23,7 @@ use crate::tui::events;
 use crate::tui::tree;
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
-use crate::tui::view::draw;
+use crate::tui::view::{compute_effects_activity_speed_multiplier, draw};
 
 use crate::config::get_watch_path;
 use crate::storage::build_fs_tree;
@@ -48,7 +48,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "dht")]
 use mainline::{async_dht::AsyncDht, Dht};
@@ -851,8 +851,9 @@ impl App {
                     next_draw_time = Instant::now() + current_target_framerate;
                     self.drain_latest_torrent_metrics();
                     if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui_needs_redraw) {
+                        self.tick_ui_effects_clock();
                         terminal.draw(|f| {
-                            draw(f, &mut self.app_state, &self.client_configs);
+                            draw(f, &self.app_state, &self.client_configs);
                         })?;
                         self.app_state.ui_needs_redraw = false;
                     }
@@ -897,6 +898,25 @@ impl App {
         } else {
             true
         }
+    }
+
+    fn tick_ui_effects_clock(&mut self) {
+        let frame_wall_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let activity_speed_multiplier =
+            compute_effects_activity_speed_multiplier(&self.app_state, &self.client_configs);
+
+        if self.app_state.effects_last_wall_time <= 0.0 {
+            self.app_state.effects_last_wall_time = frame_wall_time;
+        }
+
+        let frame_dt =
+            (frame_wall_time - self.app_state.effects_last_wall_time).clamp(0.0, 0.25);
+        self.app_state.effects_last_wall_time = frame_wall_time;
+        self.app_state.effects_speed_multiplier = activity_speed_multiplier;
+        self.app_state.effects_phase_time += frame_dt * activity_speed_multiplier;
     }
 
     fn startup_crossterm_event_listener(&mut self) {
@@ -979,8 +999,9 @@ impl App {
         loop {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
+            self.tick_ui_effects_clock();
             let _ = terminal.draw(|f| {
-                draw(f, &mut self.app_state, &self.client_configs);
+                draw(f, &self.app_state, &self.client_configs);
             });
 
             tokio::select! {

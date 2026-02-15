@@ -7,8 +7,7 @@ use ratatui::{prelude::*, widgets::*};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{AppMode, AppState};
-use crate::config::Settings;
-use crate::theme::ThemeContext;
+use crate::tui::screen_context::ScreenContext;
 use crate::tui::formatters::{centered_rect, format_limit_bps, format_speed};
 use crate::tui::view::calculate_player_stats;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
@@ -23,7 +22,10 @@ pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
     }
 }
 
-pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings, ctx: &ThemeContext) {
+pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
+    let app_state = screen.ui;
+    let settings = screen.settings;
+    let ctx = screen.theme;
     const LEVEL_GAUGE_WIDTH: usize = 16;
     const TRANQUIL_MESSAGES: &[&str] = &[
         "Quietly seeding...",

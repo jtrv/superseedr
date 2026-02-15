@@ -5,6 +5,7 @@ use crate::app::{AppMode, AppState};
 use crate::config::get_app_paths;
 use crate::theme::ThemeContext;
 use crate::tui::formatters::{centered_rect, truncate_with_ellipsis};
+use crate::tui::screen_context::ScreenContext;
 use crate::tui::view::calculate_player_stats;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
@@ -56,7 +57,10 @@ pub fn handle_key(key: KeyEvent, app_state: &mut AppState) -> HelpKeyResult {
     HelpKeyResult::Passthrough
 }
 
-pub fn draw(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
+pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
+    let app_state = screen.ui;
+    let ctx = screen.theme;
+
     let (settings_path_str, log_path_str) = if let Some((config_dir, data_dir)) = get_app_paths() {
         (
             config_dir

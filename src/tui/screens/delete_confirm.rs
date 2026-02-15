@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{App, AppMode, AppState, TorrentControlState};
-use crate::theme::ThemeContext;
+use crate::app::{App, AppMode, TorrentControlState};
+use crate::tui::screen_context::ScreenContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{centered_rect, sanitize_text};
 use ratatui::layout::{Alignment, Constraint, Layout};
@@ -10,7 +10,10 @@ use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode};
 
-pub fn draw(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
+pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
+    let app_state = screen.ui;
+    let ctx = screen.theme;
+
     let AppMode::DeleteConfirm {
         info_hash,
         with_files,

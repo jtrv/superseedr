@@ -4,6 +4,7 @@
 pub mod events;
 pub mod formatters;
 pub mod layout;
+pub mod screen_context;
 pub mod screens;
 pub mod tree;
 pub mod view;
