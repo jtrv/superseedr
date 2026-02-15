@@ -20,8 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) use crate::tui::screens::normal::handle_navigation;
-
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if let CrosstermEvent::Resize(w, h) = &event {
         app.app_state.screen_area = Rect::new(0, 0, *w, *h);
@@ -48,32 +46,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     }
 
     if let CrosstermEvent::Key(key) = event {
-        if matches!(app.app_state.mode, AppMode::Normal)
-            && app.app_state.is_searching
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Esc => {
-                    app.app_state.is_searching = false;
-                    app.app_state.search_query.clear();
-                    app.sort_and_filter_torrent_list();
-                    app.app_state.selected_torrent_index = 0;
-                }
-                KeyCode::Enter => {
-                    app.app_state.is_searching = false;
-                }
-                KeyCode::Backspace => {
-                    app.app_state.search_query.pop();
-                    app.sort_and_filter_torrent_list();
-                    app.app_state.selected_torrent_index = 0;
-                }
-                KeyCode::Char(c) => {
-                    app.app_state.search_query.push(c);
-                    app.sort_and_filter_torrent_list();
-                    app.app_state.selected_torrent_index = 0;
-                }
-                _ => {} // Ignore other keys like Up/Down while typing
-            }
+        if key.kind == KeyEventKind::Press && normal::handle_search_key(key, app) {
             app.app_state.ui_needs_redraw = true;
             return;
         }
@@ -265,7 +238,7 @@ mod tests {
         app_state.selected_torrent_index = 0;
         app_state.selected_header = SelectedHeader::Torrent(0);
 
-        handle_navigation(&mut app_state, KeyCode::Down);
+        normal::handle_navigation(&mut app_state, KeyCode::Down);
 
         assert_eq!(app_state.selected_torrent_index, 1);
         assert_eq!(app_state.selected_peer_index, 0); // Should reset
@@ -277,7 +250,7 @@ mod tests {
         app_state.selected_torrent_index = 1;
         app_state.selected_header = SelectedHeader::Torrent(0);
 
-        handle_navigation(&mut app_state, KeyCode::Up);
+        normal::handle_navigation(&mut app_state, KeyCode::Up);
 
         assert_eq!(app_state.selected_torrent_index, 0);
         assert_eq!(app_state.selected_peer_index, 0); // Should reset
@@ -290,7 +263,7 @@ mod tests {
         app_state.selected_peer_index = 0;
         app_state.selected_header = SelectedHeader::Peer(0);
 
-        handle_navigation(&mut app_state, KeyCode::Down);
+        normal::handle_navigation(&mut app_state, KeyCode::Down);
 
         assert_eq!(app_state.selected_torrent_index, 0); // Stays on same torrent
         assert_eq!(app_state.selected_peer_index, 1); // Moves down peer list
@@ -302,7 +275,7 @@ mod tests {
         app_state.selected_torrent_index = 0; // "hash_a" has peers
         app_state.selected_header = SelectedHeader::Torrent(99);
 
-        handle_navigation(&mut app_state, KeyCode::Right);
+        normal::handle_navigation(&mut app_state, KeyCode::Right);
 
         assert_eq!(app_state.selected_header, SelectedHeader::Peer(0));
     }
@@ -313,7 +286,7 @@ mod tests {
         app_state.selected_torrent_index = 1; // "hash_b" has 0 peers
         app_state.selected_header = SelectedHeader::Torrent(99);
 
-        handle_navigation(&mut app_state, KeyCode::Right);
+        normal::handle_navigation(&mut app_state, KeyCode::Right);
 
         assert_eq!(app_state.selected_header, SelectedHeader::Torrent(0));
     }
@@ -324,7 +297,7 @@ mod tests {
         app_state.selected_torrent_index = 0;
         app_state.selected_header = SelectedHeader::Peer(0);
 
-        handle_navigation(&mut app_state, KeyCode::Left);
+        normal::handle_navigation(&mut app_state, KeyCode::Left);
 
         assert_eq!(app_state.selected_header, SelectedHeader::Torrent(0));
     }
@@ -336,7 +309,7 @@ mod tests {
         app_state.selected_peer_index = 1;
         app_state.selected_header = SelectedHeader::Peer(0);
 
-        handle_navigation(&mut app_state, KeyCode::Up);
+        normal::handle_navigation(&mut app_state, KeyCode::Up);
 
         assert_eq!(app_state.selected_torrent_index, 0); // Stays on same torrent
         assert_eq!(app_state.selected_peer_index, 0); // Moves up peer list
@@ -348,7 +321,7 @@ mod tests {
         app_state.selected_torrent_index = 0; // At the top
         app_state.selected_header = SelectedHeader::Torrent(0);
 
-        handle_navigation(&mut app_state, KeyCode::Up);
+        normal::handle_navigation(&mut app_state, KeyCode::Up);
 
         // Should stay at 0, thanks to saturating_sub
         assert_eq!(app_state.selected_torrent_index, 0);
@@ -360,7 +333,7 @@ mod tests {
         app_state.selected_torrent_index = 1; // At the bottom (index 1 of 2)
         app_state.selected_header = SelectedHeader::Torrent(0);
 
-        handle_navigation(&mut app_state, KeyCode::Down);
+        normal::handle_navigation(&mut app_state, KeyCode::Down);
 
         // Should stay at 1, as it's the last index
         assert_eq!(app_state.selected_torrent_index, 1);
@@ -373,7 +346,7 @@ mod tests {
         app_state.selected_peer_index = 0; // At the top
         app_state.selected_header = SelectedHeader::Peer(0);
 
-        handle_navigation(&mut app_state, KeyCode::Up);
+        normal::handle_navigation(&mut app_state, KeyCode::Up);
 
         // Should stay at 0
         assert_eq!(app_state.selected_peer_index, 0);
@@ -386,7 +359,7 @@ mod tests {
         app_state.selected_peer_index = 1; // At the bottom (index 1 of 2)
         app_state.selected_header = SelectedHeader::Peer(0);
 
-        handle_navigation(&mut app_state, KeyCode::Down);
+        normal::handle_navigation(&mut app_state, KeyCode::Down);
 
         // Should stay at 1
         assert_eq!(app_state.selected_peer_index, 1);
@@ -409,7 +382,7 @@ mod tests {
             torrent.smoothed_upload_speed_bps = 0;
         }
 
-        handle_navigation(&mut app_state, KeyCode::Right);
+        normal::handle_navigation(&mut app_state, KeyCode::Right);
 
         assert_eq!(app_state.selected_header, SelectedHeader::Peer(0));
     }

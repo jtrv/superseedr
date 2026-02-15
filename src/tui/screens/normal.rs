@@ -2861,6 +2861,37 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     }
 }
 
+pub fn handle_search_key(key: ratatui::crossterm::event::KeyEvent, app: &mut App) -> bool {
+    if !matches!(app.app_state.mode, AppMode::Normal) || !app.app_state.is_searching {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.app_state.is_searching = false;
+            app.app_state.search_query.clear();
+            app.sort_and_filter_torrent_list();
+            app.app_state.selected_torrent_index = 0;
+        }
+        KeyCode::Enter => {
+            app.app_state.is_searching = false;
+        }
+        KeyCode::Backspace => {
+            app.app_state.search_query.pop();
+            app.sort_and_filter_torrent_list();
+            app.app_state.selected_torrent_index = 0;
+        }
+        KeyCode::Char(c) => {
+            app.app_state.search_query.push(c);
+            app.sort_and_filter_torrent_list();
+            app.app_state.selected_torrent_index = 0;
+        }
+        _ => {}
+    }
+
+    true
+}
+
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     match event {
         CrosstermEvent::Key(key) => {
