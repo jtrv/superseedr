@@ -3,6 +3,7 @@
 
 use ratatui::{prelude::*, widgets::*};
 
+use crate::tui::screen_context::ScreenContext;
 use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
 
 use crate::app::{AppMode, AppState};
@@ -12,40 +13,26 @@ use crate::tui::layout::{calculate_layout, compute_smart_table_layout, LayoutCon
 
 use crate::config::Settings;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
+pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
 
-    let frame_wall_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    let activity_speed_multiplier = compute_effects_activity_speed_multiplier(app_state, settings);
-    if app_state.effects_last_wall_time <= 0.0 {
-        app_state.effects_last_wall_time = frame_wall_time;
-    }
-    let frame_dt = (frame_wall_time - app_state.effects_last_wall_time).clamp(0.0, 0.25);
-    app_state.effects_last_wall_time = frame_wall_time;
-    app_state.effects_speed_multiplier = activity_speed_multiplier;
-    app_state.effects_phase_time += frame_dt * activity_speed_multiplier;
-
     let ctx = ThemeContext::new(app_state.theme, app_state.effects_phase_time);
+    let screen = ScreenContext::new(app_state, settings, &ctx);
 
     if app_state.show_help {
-        help::draw(f, app_state, &ctx);
+        help::draw(f, &screen);
         apply_theme_effects_to_frame(f, &ctx);
         return;
     }
 
     match &app_state.mode {
         AppMode::Welcome => {
-            welcome::draw(f, settings, &ctx);
+            welcome::draw(f, &screen);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::PowerSaving => {
-            power::draw(f, app_state, settings, &ctx);
+            power::draw(f, &screen);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
@@ -55,12 +42,12 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
             items,
             editing,
         } => {
-            config::draw(f, settings_edit, *selected_index, items, editing, &ctx);
+            config::draw(f, &screen, settings_edit, *selected_index, items, editing);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::DeleteConfirm { .. } => {
-            delete_confirm::draw(f, app_state, &ctx);
+            delete_confirm::draw(f, &screen);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
@@ -69,7 +56,7 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
             data,
             browser_mode,
         } => {
-            browser::draw(f, app_state, state, data, browser_mode, &ctx);
+            browser::draw(f, &screen, state, data, browser_mode);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
@@ -79,30 +66,11 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
     let layout_ctx = LayoutContext::new(area, app_state, 35);
     let plan = calculate_layout(area, &layout_ctx);
 
-    normal::draw_torrent_list(f, app_state, plan.list, &ctx);
-    normal::draw_footer(f, app_state, settings, plan.footer, &ctx);
-    normal::draw_details_panel(f, app_state, plan.details, &ctx);
-    normal::draw_peers_table(f, app_state, plan.peers, &ctx);
+    normal::draw(f, &screen, &plan);
 
-    if let Some(r) = plan.chart {
-        normal::draw_network_chart(f, app_state, r, &ctx);
-    }
-    if let Some(r) = plan.sparklines {
-        normal::draw_torrent_sparklines(f, app_state, r, &ctx);
-    }
-    if let Some(r) = plan.peer_stream {
-        normal::draw_peer_stream(f, app_state, r, &ctx);
-    }
-    if let Some(r) = plan.block_stream {
-        normal::draw_vertical_block_stream(f, app_state, r, &ctx);
-    }
-    if let Some(r) = plan.stats {
-        normal::draw_stats_panel(f, app_state, settings, r, &ctx);
-    }
-
-    if let Some(msg) = plan.warning_message {
+    if let Some(msg) = &plan.warning_message {
         f.render_widget(
-            Paragraph::new(msg).style(
+            Paragraph::new(msg.as_str()).style(
                 Style::default()
                     .fg(ctx.state_error())
                     .bg(ctx.theme.semantic.surface0),
@@ -111,16 +79,16 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
         );
     }
     if let Some(error_text) = &app_state.system_error {
-        normal::draw_status_error_popup(f, error_text, &ctx);
+        normal::draw_status_error_popup(f, error_text, screen.theme);
     }
     if app_state.should_quit {
-        normal::draw_shutdown_screen(f, app_state, &ctx);
+        normal::draw_shutdown_screen(f, app_state, screen.theme);
     }
 
     apply_theme_effects_to_frame(f, &ctx);
 }
 
-fn compute_effects_activity_speed_multiplier(app_state: &AppState, settings: &Settings) -> f64 {
+pub(crate) fn compute_effects_activity_speed_multiplier(app_state: &AppState, settings: &Settings) -> f64 {
     let dl_bps = app_state.avg_download_history.last().copied().unwrap_or(0) as f64;
     let ul_bps = app_state.avg_upload_history.last().copied().unwrap_or(0) as f64;
 

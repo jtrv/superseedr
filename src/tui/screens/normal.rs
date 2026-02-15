@@ -22,8 +22,10 @@ use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
+use crate::tui::layout::LayoutPlan;
 use crate::tui::layout::LayoutContext;
 use crate::tui::layout::{PeerColumnId, SmartCol};
+use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::TreeViewState;
 use crate::app::torrent_completion_percent;
 use crate::app::PeerInfo;
@@ -52,6 +54,33 @@ use tracing::{event as tracing_event, Level};
 static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SECONDS_HISTORY_MAX: usize = 3600;
 const MINUTES_HISTORY_MAX: usize = 48 * 60;
+
+pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
+    let app_state = screen.app.state;
+    let settings = screen.settings;
+    let ctx = screen.theme;
+
+    draw_torrent_list(f, app_state, plan.list, ctx);
+    draw_footer(f, app_state, settings, plan.footer, ctx);
+    draw_details_panel(f, app_state, plan.details, ctx);
+    draw_peers_table(f, app_state, plan.peers, ctx);
+
+    if let Some(r) = plan.chart {
+        draw_network_chart(f, app_state, r, ctx);
+    }
+    if let Some(r) = plan.sparklines {
+        draw_torrent_sparklines(f, app_state, r, ctx);
+    }
+    if let Some(r) = plan.peer_stream {
+        draw_peer_stream(f, app_state, r, ctx);
+    }
+    if let Some(r) = plan.block_stream {
+        draw_vertical_block_stream(f, app_state, r, ctx);
+    }
+    if let Some(r) = plan.stats {
+        draw_stats_panel(f, app_state, settings, r, ctx);
+    }
+}
 
 pub fn draw_status_error_popup(f: &mut Frame, error_text: &str, ctx: &ThemeContext) {
     let popup_width_percent: u16 = 50;

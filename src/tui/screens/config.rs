@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::app::{AppCommand, ConfigItem, FileBrowserMode};
 use crate::config::Settings;
 use crate::token_bucket::TokenBucket;
-use crate::theme::ThemeContext;
 use crate::tui::formatters::{format_limit_bps, path_to_string};
+use crate::tui::screen_context::ScreenContext;
 use directories::UserDirs;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::prelude::{Frame, Line, Span, Style};
@@ -22,12 +22,14 @@ pub enum ConfigOutcome {
 
 pub fn draw(
     f: &mut Frame,
+    screen: &ScreenContext<'_>,
     settings: &Settings,
     selected_index: usize,
     items: &[ConfigItem],
     editing: &Option<(ConfigItem, String)>,
-    ctx: &ThemeContext,
 ) {
+    let ctx = screen.theme;
+
     let area = crate::tui::formatters::centered_rect(80, 60, f.area());
     f.render_widget(Clear, f.area());
     let block = Block::default()

@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{
-    App, AppCommand, AppMode, AppState, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata,
+    App, AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata,
     FilePriority, TorrentControlState, TorrentDisplayState, TorrentPreviewPayload,
 };
 use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{centered_rect, format_bytes, truncate_with_ellipsis};
 use crate::tui::layout::calculate_file_browser_layout;
+use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -31,12 +32,14 @@ pub struct DownloadConfirmPayload {
 
 pub fn draw(
     f: &mut Frame,
-    app_state: &AppState,
+    screen: &ScreenContext<'_>,
     state: &TreeViewState,
     data: &[RawNode<FileMetadata>],
     browser_mode: &FileBrowserMode,
-    ctx: &ThemeContext,
 ) {
+    let app_state = screen.ui;
+    let ctx = screen.theme;
+
     let has_preview_content = has_preview_content(
         browser_mode,
         app_state.pending_torrent_path.is_some(),
