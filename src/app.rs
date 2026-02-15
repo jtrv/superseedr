@@ -535,6 +535,8 @@ pub struct FileBrowserUiState {
     pub state: TreeViewState,
     pub data: Vec<RawNode<FileMetadata>>,
     pub browser_mode: FileBrowserMode,
+    pub is_searching: bool,
+    pub search_query: String,
 }
 
 #[derive(Default)]
