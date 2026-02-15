@@ -5,11 +5,8 @@ use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
 use crate::tui::formatters::*;
-use crate::tui::layout::compute_visible_torrent_columns;
-use crate::tui::layout::{get_torrent_columns, ColumnId};
 use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
 
-use crate::app::torrent_completion_percent;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 use crate::app::{AppMode, AppState, SelectedHeader, TorrentControlState};
@@ -94,7 +91,7 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
     let layout_ctx = LayoutContext::new(area, app_state, 35);
     let plan = calculate_layout(area, &layout_ctx);
 
-    draw_torrent_list(f, app_state, plan.list, &ctx);
+    normal::draw_torrent_list(f, app_state, plan.list, &ctx);
     normal::draw_footer(f, app_state, settings, plan.footer, &ctx);
     draw_details_panel(f, app_state, plan.details, &ctx);
     draw_peers_table(f, app_state, plan.peers, &ctx);
@@ -175,216 +172,6 @@ fn apply_theme_effects_to_frame(f: &mut Frame, ctx: &ThemeContext) {
                 }
             }
         }
-    }
-}
-
-fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
-    let mut table_state = TableState::default();
-    if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
-        table_state.select(Some(app_state.selected_torrent_index));
-    }
-
-    let all_cols = get_torrent_columns();
-    let (constraints, visible_indices) = compute_visible_torrent_columns(app_state, area.width);
-
-    let (sort_col, sort_dir) = app_state.torrent_sort;
-    let header_cells: Vec<Cell> = visible_indices
-        .iter()
-        .enumerate()
-        .map(|(visual_idx, &real_idx)| {
-            let def = &all_cols[real_idx];
-            let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
-            let is_sorting = def.sort_enum == Some(sort_col);
-
-            let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
-            if is_sorting {
-                style = style.fg(ctx.state_selected());
-            }
-            style = ctx.apply(style);
-
-            let mut spans = vec![];
-            let mut text_span = Span::styled(def.header, style);
-            if is_selected {
-                text_span = text_span.underlined().bold();
-            }
-            spans.push(text_span);
-
-            if is_sorting {
-                let arrow = if sort_dir == SortDirection::Ascending {
-                    " ▲"
-                } else {
-                    " ▼"
-                };
-                spans.push(Span::styled(arrow, style));
-            }
-            Cell::from(Line::from(spans))
-        })
-        .collect();
-    let header = Row::new(header_cells).height(1);
-
-    let rows =
-        app_state
-            .torrent_list_order
-            .iter()
-            .enumerate()
-            .map(|(i, info_hash)| match app_state.torrents.get(info_hash) {
-                Some(torrent) => {
-                    let state = &torrent.latest_state;
-                    let is_selected = i == app_state.selected_torrent_index;
-
-                    let mut row_style = match state.torrent_control_state {
-                        TorrentControlState::Running => {
-                            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
-                        }
-                        TorrentControlState::Paused => {
-                            ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
-                        }
-                        TorrentControlState::Deleting => {
-                            ctx.apply(Style::default().fg(ctx.state_error()))
-                        }
-                    };
-                    row_style = ctx.apply(row_style);
-
-                    if is_selected {
-                        let is_safe_ascii = state.torrent_name.is_ascii();
-                        if is_safe_ascii {
-                            row_style = row_style.add_modifier(Modifier::BOLD);
-                        }
-                    }
-
-                    let cells: Vec<Cell> = visible_indices
-                        .iter()
-                        .map(|&real_idx| {
-                            let def = &all_cols[real_idx];
-                            match def.id {
-                                ColumnId::Status => {
-                                    let display_pct = torrent_completion_percent(state);
-                                    Cell::from(format!("{:.1}%", display_pct))
-                                }
-                                ColumnId::Name => {
-                                    let name = if app_state.anonymize_torrent_names {
-                                        format!("Torrent {}", i + 1)
-                                    } else {
-                                        sanitize_text(&state.torrent_name)
-                                    };
-                                    let mut c = Cell::from(name);
-                                    if is_selected {
-                                        let s = ctx.apply(
-                                            ctx.apply(Style::default().fg(ctx.state_warning())),
-                                        );
-                                        c = c.style(s);
-                                    }
-                                    c
-                                }
-                                ColumnId::DownSpeed => {
-                                    Cell::from(format_speed(torrent.smoothed_download_speed_bps))
-                                        .style(ctx.apply(speed_to_style(
-                                            ctx,
-                                            torrent.smoothed_download_speed_bps,
-                                        )))
-                                }
-                                ColumnId::UpSpeed => {
-                                    Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
-                                        .style(ctx.apply(speed_to_style(
-                                            ctx,
-                                            torrent.smoothed_upload_speed_bps,
-                                        )))
-                                }
-                            }
-                        })
-                        .collect();
-
-                    Row::new(cells).style(row_style)
-                }
-                None => Row::new(vec![Cell::from("Error retrieving data")]),
-            });
-
-    let border_style = if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
-        ctx.apply(Style::default().fg(ctx.state_selected()))
-    } else {
-        ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))
-    };
-
-    let mut title_spans = Vec::new();
-    if app_state.is_searching {
-        title_spans.push(Span::raw("Search: /"));
-        title_spans.push(Span::styled(
-            &app_state.search_query,
-            ctx.apply(Style::default().fg(ctx.state_warning())),
-        ));
-    } else if !app_state.search_query.is_empty() {
-        title_spans.push(Span::styled(
-            format!("[{}] ", app_state.search_query),
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.theme.semantic.subtext1)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ));
-    }
-
-    if !app_state.is_searching {
-        if let Some(info_hash) = app_state
-            .torrent_list_order
-            .get(app_state.selected_torrent_index)
-        {
-            if let Some(torrent) = app_state.torrents.get(info_hash) {
-                let path_cow;
-                let text_to_show = if app_state.anonymize_torrent_names {
-                    "/path/to/torrent/file"
-                } else {
-                    path_cow = torrent
-                        .latest_state
-                        .download_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy())
-                        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
-                    &sanitize_text(&path_cow)
-                };
-
-                let avail_width = area.width.saturating_sub(10) as usize;
-                let display_name = truncate_with_ellipsis(text_to_show, avail_width);
-
-                title_spans.push(Span::styled(
-                    display_name,
-                    ctx.apply(Style::default().fg(ctx.state_warning())),
-                ));
-            }
-        }
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Line::from(title_spans));
-
-    let inner_area = block.inner(area);
-    let table = Table::new(rows, constraints).header(header).block(block);
-    f.render_stateful_widget(table, area, &mut table_state);
-
-    if app_state.torrent_list_order.is_empty() {
-        let empty_msg = vec![
-            Line::from(Span::styled(
-                "No Torrents",
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.theme.semantic.surface2)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )),
-            Line::from(Span::styled(
-                "Press [a] to add a file or [v] to paste a magnet link",
-                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
-            )),
-        ];
-
-        let center_y = inner_area.y + (inner_area.height / 2).saturating_sub(1);
-        let text_area = Rect::new(inner_area.x, center_y, inner_area.width, 2);
-
-        f.render_widget(
-            Paragraph::new(empty_msg).alignment(Alignment::Center),
-            text_area,
-        );
     }
 }
 
