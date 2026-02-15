@@ -135,6 +135,7 @@ This plan is incremental, parity-driven, and includes manual testing after each 
   - Normal screen has initial `UiAction`/`UiEffect`/`ReduceResult` scaffold.
   - Reducer path currently handles all normal-screen hotkeys except platform clipboard paste.
   - Reducer unit tests cover search start, error clear, navigation, anonymize toggle, power-saving transition, quit flag, graph mode cycling, delete-confirm/config/open-browser actions, data-rate actions, theme actions, pause/resume toggles, and sort-by-selected-column behavior.
+  - Config screen now has `ConfigAction` + reducer + effect execution for key handling, with reducer tests for navigation, commit, and save/exit.
 
 ### Steps
 1. Add `UiAction`, `UiEffect`, `ReduceResult`.

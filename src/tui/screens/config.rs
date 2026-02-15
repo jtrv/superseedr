@@ -20,6 +20,227 @@ pub enum ConfigOutcome {
     ToNormal,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigAction {
+    SaveAndExit,
+    StartEditOrBrowse,
+    MoveUp,
+    MoveDown,
+    ResetSelected,
+    IncreaseSelected,
+    DecreaseSelected,
+    EditInsert(char),
+    EditBackspace,
+    EditCancel,
+    EditCommit,
+}
+
+pub enum ConfigEffect {
+    AppCommand(AppCommand),
+    SetDownloadRate(u64),
+    SetUploadRate(u64),
+}
+
+pub struct ConfigReduceResult {
+    pub outcome: ConfigOutcome,
+    pub effects: Vec<ConfigEffect>,
+}
+
+impl Default for ConfigReduceResult {
+    fn default() -> Self {
+        Self {
+            outcome: ConfigOutcome::Stay,
+            effects: Vec::new(),
+        }
+    }
+}
+
+fn map_key_to_config_action(
+    key_code: KeyCode,
+    editing: &Option<(ConfigItem, String)>,
+) -> Option<ConfigAction> {
+    if editing.is_some() {
+        return match key_code {
+            KeyCode::Char(c) if c.is_ascii_digit() => Some(ConfigAction::EditInsert(c)),
+            KeyCode::Backspace => Some(ConfigAction::EditBackspace),
+            KeyCode::Esc => Some(ConfigAction::EditCancel),
+            KeyCode::Enter => Some(ConfigAction::EditCommit),
+            _ => None,
+        };
+    }
+
+    match key_code {
+        KeyCode::Esc | KeyCode::Char('Q') => Some(ConfigAction::SaveAndExit),
+        KeyCode::Enter => Some(ConfigAction::StartEditOrBrowse),
+        KeyCode::Up | KeyCode::Char('k') => Some(ConfigAction::MoveUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(ConfigAction::MoveDown),
+        KeyCode::Char('r') => Some(ConfigAction::ResetSelected),
+        KeyCode::Right | KeyCode::Char('l') => Some(ConfigAction::IncreaseSelected),
+        KeyCode::Left | KeyCode::Char('h') => Some(ConfigAction::DecreaseSelected),
+        _ => None,
+    }
+}
+
+pub fn reduce_config_action(
+    action: ConfigAction,
+    settings_edit: &mut Box<Settings>,
+    selected_index: &mut usize,
+    items: &mut [ConfigItem],
+    editing: &mut Option<(ConfigItem, String)>,
+) -> ConfigReduceResult {
+    let mut result = ConfigReduceResult::default();
+    match action {
+        ConfigAction::SaveAndExit => {
+            result.outcome = ConfigOutcome::ToNormal;
+            result
+                .effects
+                .push(ConfigEffect::AppCommand(AppCommand::UpdateConfig(
+                    *settings_edit.clone(),
+                )));
+        }
+        ConfigAction::StartEditOrBrowse => {
+            let selected_item = items[*selected_index];
+            match selected_item {
+                ConfigItem::GlobalDownloadLimit
+                | ConfigItem::GlobalUploadLimit
+                | ConfigItem::ClientPort => {
+                    *editing = Some((selected_item, String::new()));
+                }
+                ConfigItem::DefaultDownloadFolder | ConfigItem::WatchFolder => {
+                    let initial_path = if selected_item == ConfigItem::WatchFolder {
+                        settings_edit.watch_folder.clone()
+                    } else {
+                        settings_edit.default_download_folder.clone()
+                    }
+                    .unwrap_or_else(|| {
+                        UserDirs::new()
+                            .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    });
+
+                    result
+                        .effects
+                        .push(ConfigEffect::AppCommand(AppCommand::FetchFileTree {
+                            path: initial_path,
+                            browser_mode: FileBrowserMode::ConfigPathSelection {
+                                target_item: selected_item,
+                                current_settings: settings_edit.clone(),
+                                selected_index: *selected_index,
+                                items: items.to_vec(),
+                            },
+                            highlight_path: None,
+                        }));
+                }
+            }
+        }
+        ConfigAction::MoveUp => {
+            *selected_index = selected_index.saturating_sub(1);
+        }
+        ConfigAction::MoveDown => {
+            if *selected_index < items.len().saturating_sub(1) {
+                *selected_index += 1;
+            }
+        }
+        ConfigAction::ResetSelected => {
+            let default_settings = Settings::default();
+            let selected_item = items[*selected_index];
+            match selected_item {
+                ConfigItem::ClientPort => {
+                    settings_edit.client_port = default_settings.client_port;
+                }
+                ConfigItem::DefaultDownloadFolder => {
+                    settings_edit.default_download_folder = default_settings.default_download_folder;
+                }
+                ConfigItem::WatchFolder => {
+                    settings_edit.watch_folder = default_settings.watch_folder;
+                }
+                ConfigItem::GlobalDownloadLimit => {
+                    settings_edit.global_download_limit_bps =
+                        default_settings.global_download_limit_bps;
+                }
+                ConfigItem::GlobalUploadLimit => {
+                    settings_edit.global_upload_limit_bps = default_settings.global_upload_limit_bps;
+                }
+            }
+        }
+        ConfigAction::IncreaseSelected => {
+            let item = items[*selected_index];
+            let increment = 10_000 * 8;
+            match item {
+                ConfigItem::GlobalDownloadLimit => {
+                    let new_rate = settings_edit.global_download_limit_bps.saturating_add(increment);
+                    settings_edit.global_download_limit_bps = new_rate;
+                    result.effects.push(ConfigEffect::SetDownloadRate(new_rate));
+                }
+                ConfigItem::GlobalUploadLimit => {
+                    let new_rate = settings_edit.global_upload_limit_bps.saturating_add(increment);
+                    settings_edit.global_upload_limit_bps = new_rate;
+                    result.effects.push(ConfigEffect::SetUploadRate(new_rate));
+                }
+                _ => {}
+            }
+        }
+        ConfigAction::DecreaseSelected => {
+            let item = items[*selected_index];
+            let decrement = 10_000 * 8;
+            match item {
+                ConfigItem::GlobalDownloadLimit => {
+                    let new_rate = settings_edit.global_download_limit_bps.saturating_sub(decrement);
+                    settings_edit.global_download_limit_bps = new_rate;
+                    result.effects.push(ConfigEffect::SetDownloadRate(new_rate));
+                }
+                ConfigItem::GlobalUploadLimit => {
+                    let new_rate = settings_edit.global_upload_limit_bps.saturating_sub(decrement);
+                    settings_edit.global_upload_limit_bps = new_rate;
+                    result.effects.push(ConfigEffect::SetUploadRate(new_rate));
+                }
+                _ => {}
+            }
+        }
+        ConfigAction::EditInsert(c) => {
+            if let Some((_item, buffer)) = editing {
+                buffer.push(c);
+            }
+        }
+        ConfigAction::EditBackspace => {
+            if let Some((_item, buffer)) = editing {
+                buffer.pop();
+            }
+        }
+        ConfigAction::EditCancel => {
+            *editing = None;
+        }
+        ConfigAction::EditCommit => {
+            if let Some((item, buffer)) = editing {
+                match item {
+                    ConfigItem::ClientPort => {
+                        if let Ok(new_port) = buffer.parse::<u16>() {
+                            if new_port > 0 {
+                                settings_edit.client_port = new_port;
+                            }
+                        }
+                    }
+                    ConfigItem::GlobalDownloadLimit => {
+                        if let Ok(new_rate) = buffer.parse::<u64>() {
+                            settings_edit.global_download_limit_bps = new_rate;
+                            result.effects.push(ConfigEffect::SetDownloadRate(new_rate));
+                        }
+                    }
+                    ConfigItem::GlobalUploadLimit => {
+                        if let Ok(new_rate) = buffer.parse::<u64>() {
+                            settings_edit.global_upload_limit_bps = new_rate;
+                            result.effects.push(ConfigEffect::SetUploadRate(new_rate));
+                        }
+                    }
+                    _ => {}
+                }
+                *editing = None;
+            }
+        }
+    }
+    result
+}
+
 pub fn draw(
     f: &mut Frame,
     screen: &ScreenContext<'_>,
@@ -166,184 +387,110 @@ pub fn handle_event(
     global_dl_bucket: &Arc<TokenBucket>,
     global_ul_bucket: &Arc<TokenBucket>,
 ) -> ConfigOutcome {
-    if let Some((item, buffer)) = editing {
-        if let CrosstermEvent::Key(key) = event {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char(c) => {
-                        if c.is_ascii_digit() {
-                            buffer.push(c);
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        buffer.pop();
-                    }
-                    KeyCode::Esc => *editing = None,
-                    KeyCode::Enter => {
-                        match item {
-                            ConfigItem::ClientPort => {
-                                if let Ok(new_port) = buffer.parse::<u16>() {
-                                    if new_port > 0 {
-                                        settings_edit.client_port = new_port;
-                                    }
-                                }
-                            }
-                            ConfigItem::GlobalDownloadLimit => {
-                                if let Ok(new_rate) = buffer.parse::<u64>() {
-                                    settings_edit.global_download_limit_bps = new_rate;
-                                    let bucket = global_dl_bucket.clone();
-                                    tokio::spawn(async move {
-                                        bucket.set_rate(new_rate as f64);
-                                    });
-                                }
-                            }
-                            ConfigItem::GlobalUploadLimit => {
-                                if let Ok(new_rate) = buffer.parse::<u64>() {
-                                    settings_edit.global_upload_limit_bps = new_rate;
-                                    let bucket = global_ul_bucket.clone();
-                                    tokio::spawn(async move {
-                                        bucket.set_rate(new_rate as f64);
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                        *editing = None;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        return ConfigOutcome::Stay;
-    }
-
     if let CrosstermEvent::Key(key) = event {
-        if key.kind == KeyEventKind::Press {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('Q') => {
-                    let _ = app_command_tx.try_send(AppCommand::UpdateConfig(*settings_edit.clone()));
-                    return ConfigOutcome::ToNormal;
-                }
-                KeyCode::Enter => {
-                    let selected_item = items[*selected_index];
-                    match selected_item {
-                        ConfigItem::GlobalDownloadLimit
-                        | ConfigItem::GlobalUploadLimit
-                        | ConfigItem::ClientPort => {
-                            *editing = Some((selected_item, String::new()));
-                        }
-                        ConfigItem::DefaultDownloadFolder | ConfigItem::WatchFolder => {
-                            let initial_path = if selected_item == ConfigItem::WatchFolder {
-                                settings_edit.watch_folder.clone()
-                            } else {
-                                settings_edit.default_download_folder.clone()
-                            }
-                            .unwrap_or_else(|| {
-                                UserDirs::new()
-                                    .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            });
-
-                            let _ = app_command_tx.try_send(AppCommand::FetchFileTree {
-                                path: initial_path,
-                                browser_mode: FileBrowserMode::ConfigPathSelection {
-                                    target_item: selected_item,
-                                    current_settings: settings_edit.clone(),
-                                    selected_index: *selected_index,
-                                    items: items.to_vec(),
-                                },
-                                highlight_path: None,
-                            });
-                        }
+        if key.kind != KeyEventKind::Press {
+            return ConfigOutcome::Stay;
+        }
+        if let Some(action) = map_key_to_config_action(key.code, editing) {
+            let reduced = reduce_config_action(action, settings_edit, selected_index, items, editing);
+            for effect in reduced.effects {
+                match effect {
+                    ConfigEffect::AppCommand(command) => {
+                        let _ = app_command_tx.try_send(command);
+                    }
+                    ConfigEffect::SetDownloadRate(new_rate) => {
+                        let bucket = global_dl_bucket.clone();
+                        tokio::spawn(async move {
+                            bucket.set_rate(new_rate as f64);
+                        });
+                    }
+                    ConfigEffect::SetUploadRate(new_rate) => {
+                        let bucket = global_ul_bucket.clone();
+                        tokio::spawn(async move {
+                            bucket.set_rate(new_rate as f64);
+                        });
                     }
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *selected_index = selected_index.saturating_sub(1)
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if *selected_index < items.len() - 1 {
-                        *selected_index += 1;
-                    }
-                }
-                KeyCode::Char('r') => {
-                    let default_settings = Settings::default();
-                    let selected_item = items[*selected_index];
-                    match selected_item {
-                        ConfigItem::ClientPort => {
-                            settings_edit.client_port = default_settings.client_port;
-                        }
-                        ConfigItem::DefaultDownloadFolder => {
-                            settings_edit.default_download_folder =
-                                default_settings.default_download_folder;
-                        }
-                        ConfigItem::WatchFolder => {
-                            settings_edit.watch_folder = default_settings.watch_folder;
-                        }
-                        ConfigItem::GlobalDownloadLimit => {
-                            settings_edit.global_download_limit_bps =
-                                default_settings.global_download_limit_bps;
-                        }
-                        ConfigItem::GlobalUploadLimit => {
-                            settings_edit.global_upload_limit_bps =
-                                default_settings.global_upload_limit_bps;
-                        }
-                    }
-                }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    let item = items[*selected_index];
-                    let increment = 10_000 * 8;
-                    match item {
-                        ConfigItem::GlobalDownloadLimit => {
-                            let new_rate =
-                                settings_edit.global_download_limit_bps.saturating_add(increment);
-                            settings_edit.global_download_limit_bps = new_rate;
-                            let bucket = global_dl_bucket.clone();
-                            tokio::spawn(async move {
-                                bucket.set_rate(new_rate as f64);
-                            });
-                        }
-                        ConfigItem::GlobalUploadLimit => {
-                            let new_rate =
-                                settings_edit.global_upload_limit_bps.saturating_add(increment);
-                            settings_edit.global_upload_limit_bps = new_rate;
-                            let bucket = global_ul_bucket.clone();
-                            tokio::spawn(async move {
-                                bucket.set_rate(new_rate as f64);
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Left | KeyCode::Char('h') => {
-                    let item = items[*selected_index];
-                    let decrement = 10_000 * 8;
-                    match item {
-                        ConfigItem::ClientPort => {}
-                        ConfigItem::GlobalDownloadLimit => {
-                            let new_rate =
-                                settings_edit.global_download_limit_bps.saturating_sub(decrement);
-                            settings_edit.global_download_limit_bps = new_rate;
-                            let bucket = global_dl_bucket.clone();
-                            tokio::spawn(async move {
-                                bucket.set_rate(new_rate as f64);
-                            });
-                        }
-                        ConfigItem::GlobalUploadLimit => {
-                            let new_rate =
-                                settings_edit.global_upload_limit_bps.saturating_sub(decrement);
-                            settings_edit.global_upload_limit_bps = new_rate;
-                            let bucket = global_ul_bucket.clone();
-                            tokio::spawn(async move {
-                                bucket.set_rate(new_rate as f64);
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
             }
+            return reduced.outcome;
         }
     }
 
     ConfigOutcome::Stay
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_items() -> Vec<ConfigItem> {
+        vec![
+            ConfigItem::ClientPort,
+            ConfigItem::DefaultDownloadFolder,
+            ConfigItem::WatchFolder,
+            ConfigItem::GlobalDownloadLimit,
+            ConfigItem::GlobalUploadLimit,
+        ]
+    }
+
+    #[test]
+    fn reducer_move_down_is_clamped() {
+        let mut settings = Box::new(Settings::default());
+        let mut idx = 0usize;
+        let mut items = config_items();
+        let mut editing = None;
+
+        for _ in 0..10 {
+            let _ = reduce_config_action(
+                ConfigAction::MoveDown,
+                &mut settings,
+                &mut idx,
+                items.as_mut_slice(),
+                &mut editing,
+            );
+        }
+
+        assert_eq!(idx, items.len() - 1);
+    }
+
+    #[test]
+    fn reducer_edit_commit_updates_download_limit_and_emits_effect() {
+        let mut settings = Box::new(Settings::default());
+        let mut idx = 3usize;
+        let mut items = config_items();
+        let mut editing = Some((ConfigItem::GlobalDownloadLimit, "123".to_string()));
+
+        let out = reduce_config_action(
+            ConfigAction::EditCommit,
+            &mut settings,
+            &mut idx,
+            items.as_mut_slice(),
+            &mut editing,
+        );
+
+        assert_eq!(settings.global_download_limit_bps, 123);
+        assert_eq!(editing, None);
+        assert_eq!(out.effects.len(), 1);
+        assert!(matches!(out.effects[0], ConfigEffect::SetDownloadRate(123)));
+    }
+
+    #[test]
+    fn reducer_save_and_exit_emits_update_config_command() {
+        let mut settings = Box::new(Settings::default());
+        let mut idx = 0usize;
+        let mut items = config_items();
+        let mut editing = None;
+
+        let out = reduce_config_action(
+            ConfigAction::SaveAndExit,
+            &mut settings,
+            &mut idx,
+            items.as_mut_slice(),
+            &mut editing,
+        );
+
+        assert!(matches!(out.outcome, ConfigOutcome::ToNormal));
+        assert_eq!(out.effects.len(), 1);
+        assert!(matches!(out.effects[0], ConfigEffect::AppCommand(AppCommand::UpdateConfig(_))));
+    }
 }
