@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::sort_and_filter_torrent_list_state;
+use crate::app::torrent_completion_percent;
 use crate::app::AppCommand;
 use crate::app::BrowserPane;
 use crate::app::FileBrowserMode;
-use crate::app::{App, AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::app::GraphDisplayMode;
+use crate::app::PeerInfo;
+use crate::app::{App, AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::config::Settings;
 use crate::config::SortDirection;
 use crate::theme::ThemeContext;
@@ -23,13 +25,11 @@ use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
-use crate::tui::layout::LayoutPlan;
 use crate::tui::layout::LayoutContext;
+use crate::tui::layout::LayoutPlan;
 use crate::tui::layout::{PeerColumnId, SmartCol};
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::TreeViewState;
-use crate::app::torrent_completion_percent;
-use crate::app::PeerInfo;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -45,8 +45,7 @@ use ratatui::prelude::{
     Stylize,
 };
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Gauge, LineGauge, Padding, Paragraph, Row, Table, TableState,
-    Wrap,
+    Block, Borders, Cell, Clear, Gauge, LineGauge, Padding, Paragraph, Row, Table, TableState, Wrap,
 };
 use strum::IntoEnumIterator;
 use throbber_widgets_tui::Throbber;
@@ -172,24 +171,26 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
-        UiAction::OpenConfig => {
-            ReduceResult {
-                redraw: true,
-                effects: vec![UiEffect::OpenConfigScreen],
-            }
-        }
+        UiAction::OpenConfig => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::OpenConfigScreen],
+        },
         UiAction::DataRateSlower => {
             app_state.data_rate = app_state.data_rate.next_slower();
             ReduceResult {
                 redraw: true,
-                effects: vec![UiEffect::BroadcastManagerDataRate(app_state.data_rate.as_ms())],
+                effects: vec![UiEffect::BroadcastManagerDataRate(
+                    app_state.data_rate.as_ms(),
+                )],
             }
         }
         UiAction::DataRateFaster => {
             app_state.data_rate = app_state.data_rate.next_faster();
             ReduceResult {
                 redraw: true,
-                effects: vec![UiEffect::BroadcastManagerDataRate(app_state.data_rate.as_ms())],
+                effects: vec![UiEffect::BroadcastManagerDataRate(
+                    app_state.data_rate.as_ms(),
+                )],
             }
         }
         UiAction::ThemePrev => ReduceResult {
@@ -588,11 +589,7 @@ pub fn draw_footer(
 
     let footer_layout = ratatui::layout::Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            left_constraint,
-            Constraint::Min(0),
-            right_constraint,
-        ])
+        .constraints([left_constraint, Constraint::Min(0), right_constraint])
         .split(footer_chunk);
 
     let client_id_chunk = footer_layout[0];
@@ -670,15 +667,17 @@ pub fn draw_footer(
                 Line::from(vec![
                     Span::styled(
                         "super",
-                        ctx.apply(speed_to_style(ctx, current_dl_speed).add_modifier(
-                            ratatui::prelude::Modifier::BOLD,
-                        )),
+                        ctx.apply(
+                            speed_to_style(ctx, current_dl_speed)
+                                .add_modifier(ratatui::prelude::Modifier::BOLD),
+                        ),
                     ),
                     Span::styled(
                         "seedr",
-                        ctx.apply(speed_to_style(ctx, current_ul_speed).add_modifier(
-                            ratatui::prelude::Modifier::BOLD,
-                        )),
+                        ctx.apply(
+                            speed_to_style(ctx, current_ul_speed)
+                                .add_modifier(ratatui::prelude::Modifier::BOLD),
+                        ),
                     ),
                     Span::styled(
                         format!(" v{}", APP_VERSION),
@@ -770,8 +769,14 @@ pub fn draw_footer(
             3 + manual_min_width
         };
         if used_width + separator_width + candidate_width + required_for_manual <= max_width {
-            let _ =
-                try_push_footer_command(&mut spans, &mut used_width, max_width, key, suffix, key_style);
+            let _ = try_push_footer_command(
+                &mut spans,
+                &mut used_width,
+                max_width,
+                key,
+                suffix,
+                key_style,
+            );
         }
     };
 
@@ -914,8 +919,8 @@ pub fn draw_footer(
     ])
     .alignment(Alignment::Right);
 
-    let status_paragraph =
-        Paragraph::new(footer_status).style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
+    let status_paragraph = Paragraph::new(footer_status)
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(status_paragraph, status_chunk);
 }
 
@@ -1384,7 +1389,12 @@ pub fn draw_details_panel(
     }
 }
 
-pub fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect, ctx: &ThemeContext) {
+pub fn draw_network_chart(
+    f: &mut Frame,
+    app_state: &AppState,
+    chart_chunk: Rect,
+    ctx: &ThemeContext,
+) {
     if chart_chunk.width < 5 || chart_chunk.height < 5 {
         return;
     }
@@ -2461,7 +2471,12 @@ fn render_sparkles<'a>(
     }
 }
 
-pub fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+pub fn draw_torrent_sparklines(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
     let torrent = app_state
         .torrent_list_order
         .get(app_state.ui.selected_torrent_index)
@@ -2623,7 +2638,12 @@ pub fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect, 
     }
 }
 
-pub fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx: &ThemeContext) {
+pub fn draw_peers_table(
+    f: &mut Frame,
+    app_state: &AppState,
+    peers_chunk: Rect,
+    ctx: &ThemeContext,
+) {
     if peers_chunk.height < 2 || peers_chunk.width < 2 {
         return;
     }
@@ -3100,7 +3120,8 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                 app_state.ui.selected_peer_index = 0;
             }
             SelectedHeader::Peer(_) => {
-                app_state.ui.selected_peer_index = app_state.ui.selected_peer_index.saturating_sub(1);
+                app_state.ui.selected_peer_index =
+                    app_state.ui.selected_peer_index.saturating_sub(1);
             }
         },
         KeyCode::Down | KeyCode::Char('j') => match app_state.ui.selected_header {
@@ -3262,125 +3283,149 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     match event {
-        CrosstermEvent::Key(key) => {
-            if key.kind == KeyEventKind::Press {
-                if let Some(action) = map_key_to_ui_action(key.code) {
-                    let result = reduce_ui_action(&mut app.app_state, action);
-                    if result.redraw {
-                        app.app_state.ui.needs_redraw = true;
-                    }
-                    for effect in result.effects {
-                        match effect {
-                            UiEffect::OpenAddTorrentFileBrowser => {
-                                let initial_path = app.get_initial_source_path();
-                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                    path: initial_path,
-                                    browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
-                                    highlight_path: None,
-                                });
-                            }
-                            UiEffect::OpenConfigScreen => {
-                                app.app_state.ui.config.settings_edit =
-                                    Box::new(app.client_configs.clone());
-                                app.app_state.ui.config.selected_index = 0;
-                                app.app_state.ui.config.items = ConfigItem::iter().collect::<Vec<_>>();
-                                app.app_state.ui.config.editing = None;
-                                app.app_state.mode = AppMode::Config;
-                            }
-                            UiEffect::BroadcastManagerDataRate(new_rate) => {
-                                for manager_tx in app.torrent_manager_command_txs.values() {
-                                    let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
-                                }
-                            }
-                            UiEffect::ApplyThemePrev => {
-                                let themes = crate::theme::ThemeName::sorted_for_ui();
-                                let current_idx = themes
-                                    .iter()
-                                    .position(|&t| t == app.client_configs.ui_theme)
-                                    .unwrap_or(0);
-                                let new_idx = if current_idx == 0 {
-                                    themes.len() - 1
-                                } else {
-                                    current_idx - 1
-                                };
-                                app.client_configs.ui_theme = themes[new_idx];
-                                app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
-                                let _ = app
-                                    .app_command_tx
-                                    .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
-                            }
-                            UiEffect::ApplyThemeNext => {
-                                let themes = crate::theme::ThemeName::sorted_for_ui();
-                                let current_idx = themes
-                                    .iter()
-                                    .position(|&t| t == app.client_configs.ui_theme)
-                                    .unwrap_or(0);
-                                let new_idx = (current_idx + 1) % themes.len();
-                                app.client_configs.ui_theme = themes[new_idx];
-                                app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
-                                let _ = app
-                                    .app_command_tx
-                                    .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
-                            }
-                            UiEffect::SendPause(info_hash) => {
-                                if let Some(torrent_manager_command_tx) =
-                                    app.torrent_manager_command_txs.get(&info_hash)
-                                {
-                                    let torrent_manager_command_tx_clone =
-                                        torrent_manager_command_tx.clone();
-                                    tokio::spawn(async move {
-                                        let _ = torrent_manager_command_tx_clone
-                                            .send(crate::torrent_manager::ManagerCommand::Pause)
-                                            .await;
-                                    });
-                                }
-                            }
-                            UiEffect::SendResume(info_hash) => {
-                                if let Some(torrent_manager_command_tx) =
-                                    app.torrent_manager_command_txs.get(&info_hash)
-                                {
-                                    let torrent_manager_command_tx_clone =
-                                        torrent_manager_command_tx.clone();
-                                    tokio::spawn(async move {
-                                        let _ = torrent_manager_command_tx_clone
-                                            .send(crate::torrent_manager::ManagerCommand::Resume)
-                                            .await;
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    return;
-                }
-
-                match key.code {
-                    #[cfg(windows)]
-                    KeyCode::Char('v') => match ClipboardContext::new() {
-                        Ok(mut ctx) => match ctx.get_contents() {
-                            Ok(text) => {
-                                handle_pasted_text(app, text.trim()).await;
-                            }
-                            Err(e) => {
-                                tracing_event!(Level::ERROR, "Clipboard read error: {}", e);
-                                app.app_state.system_error = Some(format!("Clipboard read error: {}", e));
-                            }
-                        },
-                        Err(e) => {
-                            tracing_event!(Level::ERROR, "Clipboard context error: {}", e);
-                            app.app_state.system_error =
-                                Some(format!("Clipboard initialization error: {}", e));
-                        }
-                    },
-                    _ => {}
-                }
-            }
+        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            let _ = handle_key_press(key.code, app).await;
         }
         #[cfg(not(windows))]
         CrosstermEvent::Paste(pasted_text) => {
             handle_pasted_text(app, pasted_text.trim()).await;
         }
         _ => {}
+    };
+}
+
+async fn handle_key_press(key_code: KeyCode, app: &mut App) -> bool {
+    if handle_reducer_key(key_code, app) {
+        return true;
     }
+
+    #[cfg(windows)]
+    if handle_windows_clipboard_key(key_code, app).await {
+        return true;
+    }
+
+    false
+}
+
+fn handle_reducer_key(key_code: KeyCode, app: &mut App) -> bool {
+    let Some(action) = map_key_to_ui_action(key_code) else {
+        return false;
+    };
+
+    let result = reduce_ui_action(&mut app.app_state, action);
+    if result.redraw {
+        app.app_state.ui.needs_redraw = true;
+    }
+    execute_ui_effects(app, result.effects);
+    true
+}
+
+fn execute_ui_effects(app: &mut App, effects: Vec<UiEffect>) {
+    for effect in effects {
+        execute_ui_effect(app, effect);
+    }
+}
+
+fn execute_ui_effect(app: &mut App, effect: UiEffect) {
+    match effect {
+        UiEffect::OpenAddTorrentFileBrowser => {
+            let initial_path = app.get_initial_source_path();
+            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                path: initial_path,
+                browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
+                highlight_path: None,
+            });
+        }
+        UiEffect::OpenConfigScreen => {
+            app.app_state.ui.config.settings_edit = Box::new(app.client_configs.clone());
+            app.app_state.ui.config.selected_index = 0;
+            app.app_state.ui.config.items = ConfigItem::iter().collect::<Vec<_>>();
+            app.app_state.ui.config.editing = None;
+            app.app_state.mode = AppMode::Config;
+        }
+        UiEffect::BroadcastManagerDataRate(new_rate) => {
+            for manager_tx in app.torrent_manager_command_txs.values() {
+                let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
+            }
+        }
+        UiEffect::ApplyThemePrev => {
+            let themes = crate::theme::ThemeName::sorted_for_ui();
+            let current_idx = themes
+                .iter()
+                .position(|&t| t == app.client_configs.ui_theme)
+                .unwrap_or(0);
+            let new_idx = if current_idx == 0 {
+                themes.len() - 1
+            } else {
+                current_idx - 1
+            };
+            app.client_configs.ui_theme = themes[new_idx];
+            app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+            let _ = app
+                .app_command_tx
+                .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
+        }
+        UiEffect::ApplyThemeNext => {
+            let themes = crate::theme::ThemeName::sorted_for_ui();
+            let current_idx = themes
+                .iter()
+                .position(|&t| t == app.client_configs.ui_theme)
+                .unwrap_or(0);
+            let new_idx = (current_idx + 1) % themes.len();
+            app.client_configs.ui_theme = themes[new_idx];
+            app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+            let _ = app
+                .app_command_tx
+                .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
+        }
+        UiEffect::SendPause(info_hash) => {
+            if let Some(torrent_manager_command_tx) =
+                app.torrent_manager_command_txs.get(&info_hash)
+            {
+                let torrent_manager_command_tx_clone = torrent_manager_command_tx.clone();
+                tokio::spawn(async move {
+                    let _ = torrent_manager_command_tx_clone
+                        .send(crate::torrent_manager::ManagerCommand::Pause)
+                        .await;
+                });
+            }
+        }
+        UiEffect::SendResume(info_hash) => {
+            if let Some(torrent_manager_command_tx) =
+                app.torrent_manager_command_txs.get(&info_hash)
+            {
+                let torrent_manager_command_tx_clone = torrent_manager_command_tx.clone();
+                tokio::spawn(async move {
+                    let _ = torrent_manager_command_tx_clone
+                        .send(crate::torrent_manager::ManagerCommand::Resume)
+                        .await;
+                });
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn handle_windows_clipboard_key(key_code: KeyCode, app: &mut App) -> bool {
+    match key_code {
+        KeyCode::Char('v') => match ClipboardContext::new() {
+            Ok(mut ctx) => match ctx.get_contents() {
+                Ok(text) => {
+                    handle_pasted_text(app, text.trim()).await;
+                }
+                Err(e) => {
+                    tracing_event!(Level::ERROR, "Clipboard read error: {}", e);
+                    app.app_state.system_error = Some(format!("Clipboard read error: {}", e));
+                }
+            },
+            Err(e) => {
+                tracing_event!(Level::ERROR, "Clipboard context error: {}", e);
+                app.app_state.system_error = Some(format!("Clipboard initialization error: {}", e));
+            }
+        },
+        _ => return false,
+    }
+    true
 }
 
 #[cfg(test)]
@@ -3573,7 +3618,9 @@ mod tests {
         assert_eq!(app_state.data_rate.as_ms(), DataRate::RateHalf.as_ms());
         assert_eq!(
             slower.effects,
-            vec![UiEffect::BroadcastManagerDataRate(DataRate::RateHalf.as_ms())]
+            vec![UiEffect::BroadcastManagerDataRate(
+                DataRate::RateHalf.as_ms()
+            )]
         );
 
         let faster = reduce_ui_action(&mut app_state, UiAction::DataRateFaster);
