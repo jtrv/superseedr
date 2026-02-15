@@ -10,7 +10,8 @@ use crate::app::{AppMode, AppState};
 use crate::theme::ThemeContext;
 
 use crate::tui::effects::apply_theme_effects_to_frame;
-use crate::tui::layout::{calculate_layout, compute_smart_table_layout, LayoutContext, SmartCol};
+use crate::tui::layout::common::{compute_smart_table_layout, SmartCol};
+use crate::tui::layout::normal::{calculate_layout, LayoutContext};
 
 use crate::config::Settings;
 
@@ -147,7 +148,7 @@ pub(crate) fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::layout::MIN_SIDEBAR_WIDTH;
+    use crate::tui::layout::normal::MIN_SIDEBAR_WIDTH;
     use ratatui::layout::Rect;
 
     /// Helper to create a LayoutContext manually since we don't want to mock AppState.

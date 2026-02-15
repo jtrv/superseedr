@@ -204,9 +204,20 @@ This plan is incremental, parity-driven, and includes manual testing after each 
 
 ## Phase 6: Layout and Theme/Effects Cleanup + Boundary Hardening
 ### Status
-- Not started for layout/theme extraction.
-- Partial boundary hardening complete:
-  - `events.rs` and screen `handle_event` entrypoints are now thin staged dispatchers in `normal` and `browser`.
+- Completed.
+- Layout and effects are now separated by concern:
+  - `src/tui/layout/browser.rs` owns browser layout planning.
+  - `src/tui/layout/normal.rs` owns normal-screen layout planning.
+  - `src/tui/layout/common.rs` holds shared table/column layout helpers.
+  - `src/tui/effects.rs` owns theme post-processing and effect-activity speed helpers.
+- Boundary hardening updates:
+  - `events.rs` remains staged (resize -> debounce -> global hooks -> mode dispatch).
+  - `normal` and `browser` screen handlers remain thin staged dispatchers.
+  - `view.rs` is now a thin draw dispatcher that calls layout planners/effects modules.
+- Architecture docs updated in `src/tui/README.md` with invariants and extension guide.
+
+### Implementation Checkpoints (2026-02-15)
+- `9f3688c` `tui: split layout planners and extract theme effects module`
 
 ### Steps
 1. Split layout into `tui/layout/common.rs` + per-screen planners.

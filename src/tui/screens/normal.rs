@@ -19,16 +19,16 @@ use crate::tui::formatters::{
     format_speed, format_time, generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text,
     speed_to_style, truncate_with_ellipsis,
 };
-use crate::tui::layout::calculate_layout;
-use crate::tui::layout::compute_smart_table_layout;
-use crate::tui::layout::compute_visible_peer_columns;
-use crate::tui::layout::compute_visible_torrent_columns;
-use crate::tui::layout::get_peer_columns;
-use crate::tui::layout::get_torrent_columns;
-use crate::tui::layout::ColumnId;
-use crate::tui::layout::LayoutContext;
-use crate::tui::layout::LayoutPlan;
-use crate::tui::layout::{PeerColumnId, SmartCol};
+use crate::tui::layout::common::compute_smart_table_layout;
+use crate::tui::layout::common::compute_visible_peer_columns;
+use crate::tui::layout::common::compute_visible_torrent_columns;
+use crate::tui::layout::common::get_peer_columns;
+use crate::tui::layout::common::get_torrent_columns;
+use crate::tui::layout::common::ColumnId;
+use crate::tui::layout::common::{PeerColumnId, SmartCol};
+use crate::tui::layout::normal::calculate_layout;
+use crate::tui::layout::normal::LayoutContext;
+use crate::tui::layout::normal::LayoutPlan;
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::TreeViewState;
 use rand::rngs::StdRng;
