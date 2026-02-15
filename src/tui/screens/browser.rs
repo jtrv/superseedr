@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{BrowserPane, FileBrowserMode, FileMetadata};
+use crate::app::{AppCommand, BrowserPane, FileBrowserMode, FileMetadata};
 use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_file_browser_layout;
 use crate::app::TorrentPreviewPayload;
 use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
+use tokio::sync::mpsc;
 
 pub fn handle_search_interceptor(
     key_code: KeyCode,
@@ -238,6 +239,61 @@ pub fn build_filter(browser_mode: &FileBrowserMode, search_query: &str) -> TreeF
     }
 }
 
+pub fn handle_filesystem_navigation(
+    key_code: KeyCode,
+    state: &mut TreeViewState,
+    data: &[RawNode<FileMetadata>],
+    browser_mode: &FileBrowserMode,
+    is_searching: &mut bool,
+    search_query: &mut String,
+    list_height: usize,
+    app_command_tx: &mpsc::Sender<AppCommand>,
+) -> bool {
+    let filter = build_filter(browser_mode, search_query);
+
+    match key_code {
+        KeyCode::Char('/') => {
+            *is_searching = true;
+            search_query.clear();
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            TreeMathHelper::apply_action(state, data, TreeAction::Up, filter, list_height);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            TreeMathHelper::apply_action(state, data, TreeAction::Down, filter, list_height);
+            true
+        }
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            if let Some(path) = state.cursor_path.clone() {
+                if path.is_dir() {
+                    *is_searching = false;
+                    search_query.clear();
+                    let _ = app_command_tx.try_send(AppCommand::FetchFileTree {
+                        path,
+                        browser_mode: browser_mode.clone(),
+                        highlight_path: None,
+                    });
+                }
+            }
+            true
+        }
+        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('u') => {
+            let child_to_highlight = state.current_path.clone();
+            if let Some(parent) = state.current_path.parent() {
+                let _ = app_command_tx.try_send(AppCommand::FetchFileTree {
+                    path: parent.to_path_buf(),
+                    browser_mode: browser_mode.clone(),
+                    highlight_path: Some(child_to_highlight),
+                });
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +412,28 @@ mod tests {
             &mut tree,
             10
         ));
+    }
+
+    #[test]
+    fn filesystem_navigation_starts_search() {
+        let mut state = TreeViewState::default();
+        let data: Vec<RawNode<FileMetadata>> = vec![];
+        let mode = FileBrowserMode::Directory;
+        let (tx, _rx) = mpsc::channel(1);
+        let mut is_searching = false;
+        let mut query = String::from("abc");
+        let consumed = handle_filesystem_navigation(
+            KeyCode::Char('/'),
+            &mut state,
+            &data,
+            &mode,
+            &mut is_searching,
+            &mut query,
+            5,
+            &tx,
+        );
+        assert!(consumed);
+        assert!(is_searching);
+        assert!(query.is_empty());
     }
 }

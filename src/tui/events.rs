@@ -15,7 +15,6 @@ use crate::tui::layout::LayoutContext;
 use crate::tui::screens::{browser, config, delete_confirm, normal, power, welcome};
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
-use crate::tui::tree::{TreeAction, TreeMathHelper};
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::prelude::Rect;
@@ -282,60 +281,18 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         app.app_state.is_searching,
                         &focused_pane,
                     );
-                    let filter = browser::build_filter(browser_mode, &app.app_state.search_query);
-
                     match key.code {
-                        KeyCode::Char('/') => {
-                            app.app_state.is_searching = true;
-                            app.app_state.search_query.clear();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            TreeMathHelper::apply_action(
+                        key_code
+                            if browser::handle_filesystem_navigation(
+                                key_code,
                                 state,
                                 data,
-                                TreeAction::Up,
-                                filter,
+                                browser_mode,
+                                &mut app.app_state.is_searching,
+                                &mut app.app_state.search_query,
                                 list_height,
-                            );
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            TreeMathHelper::apply_action(
-                                state,
-                                data,
-                                TreeAction::Down,
-                                filter,
-                                list_height,
-                            );
-                        }
-                        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                            if let Some(path) = state.cursor_path.clone() {
-                                if path.is_dir() {
-                                    // Entering a directory starts a fresh listing context.
-                                    app.app_state.is_searching = false;
-                                    app.app_state.search_query.clear();
-                                    let _ =
-                                        app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                            path,
-                                            browser_mode: browser_mode.clone(),
-                                            highlight_path: None,
-                                        });
-                                }
-                            }
-                        }
-                        KeyCode::Backspace
-                        | KeyCode::Left
-                        | KeyCode::Char('h')
-                        | KeyCode::Char('u') => {
-                            let child_to_highlight = state.current_path.clone();
-                            if let Some(parent) = state.current_path.parent() {
-                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                    path: parent.to_path_buf(),
-                                    browser_mode: browser_mode.clone(),
-                                    highlight_path: Some(child_to_highlight),
-                                });
-                            }
-                        }
-
+                                &app.app_command_tx,
+                            ) => {}
                         KeyCode::Char('Y') => {
                             match browser_mode {
                                 FileBrowserMode::ConfigPathSelection {
