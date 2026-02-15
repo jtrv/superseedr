@@ -1896,6 +1896,269 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     f.render_widget(chart, area);
 }
 
+pub fn draw_vertical_block_stream(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    if area.width < 2 {
+        return;
+    }
+    let selected_torrent = app_state
+        .torrent_list_order
+        .get(app_state.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash));
+
+    const UP_TRIANGLE: &str = "▲";
+    const DOWN_TRIANGLE: &str = "▼";
+    const SEPARATOR: &str = "·";
+
+    let color_inflow = ctx.theme.scale.stream.inflow;
+    let color_outflow = ctx.theme.scale.stream.outflow;
+    let color_border = ctx.theme.semantic.border;
+    let color_empty = ctx.theme.semantic.surface0;
+
+    let (total_in, total_out) = if let Some(t) = selected_torrent {
+        let in_sum: u64 = t.latest_state.blocks_in_history.iter().sum();
+        let out_sum: u64 = t.latest_state.blocks_out_history.iter().sum();
+        (in_sum, out_sum)
+    } else {
+        (0, 0)
+    };
+
+    let title_str = "Blocks";
+    let title_len = title_str.len();
+    let total_ops = total_in + total_out;
+
+    let title_spans: Vec<Span> = if total_ops == 0 {
+        vec![Span::styled(
+            title_str,
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+        )]
+    } else {
+        let blue_ratio = total_in as f64 / total_ops as f64;
+        let blue_chars = (blue_ratio * title_len as f64).round() as usize;
+        let (blue_part, green_part) = title_str.split_at(blue_chars.min(title_len));
+        let mut spans = Vec::new();
+        if !blue_part.is_empty() {
+            spans.push(Span::styled(
+                blue_part,
+                ctx.apply(Style::default().fg(color_inflow)),
+            ));
+        }
+        if !green_part.is_empty() {
+            spans.push(Span::styled(
+                green_part,
+                ctx.apply(Style::default().fg(color_outflow)),
+            ));
+        }
+        spans
+    };
+    let block = Block::default()
+        .title(Line::from(title_spans))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(color_border)));
+
+    let Some(torrent) = selected_torrent else {
+        f.render_widget(block, area);
+        return;
+    };
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let history_len = inner_area.height as usize;
+    let content_width = inner_area.width as usize;
+
+    if history_len == 0 || content_width == 0 {
+        return;
+    }
+
+    let in_history = &torrent.latest_state.blocks_in_history;
+    let out_history = &torrent.latest_state.blocks_out_history;
+
+    let in_slice = &in_history[in_history.len().saturating_sub(history_len)..];
+    let out_slice = &out_history[out_history.len().saturating_sub(history_len)..];
+
+    let slice_len = in_slice.len();
+    let mut lines: Vec<Line> = Vec::with_capacity(history_len);
+    let frame_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    for i in 0..history_len {
+        let mut spans = Vec::new();
+        let dl_slice_index = slice_len.saturating_sub(1).saturating_sub(i);
+        let raw_blocks_in = if i < slice_len {
+            *in_slice.get(dl_slice_index).unwrap_or(&0)
+        } else {
+            0
+        };
+        let upload_padding = history_len.saturating_sub(slice_len);
+        let ul_slice_index = i.saturating_sub(upload_padding);
+        let raw_blocks_out = if i >= upload_padding {
+            *out_slice.get(ul_slice_index).unwrap_or(&0)
+        } else {
+            0
+        };
+
+        let total_raw = raw_blocks_in + raw_blocks_out;
+        let mut blocks_in: u64;
+        let mut blocks_out: u64;
+
+        if total_raw > content_width as u64 {
+            blocks_in =
+                (raw_blocks_in as f64 / total_raw as f64 * content_width as f64).round() as u64;
+            blocks_out =
+                (raw_blocks_out as f64 / total_raw as f64 * content_width as f64).round() as u64;
+            if raw_blocks_in > 0 && blocks_in == 0 {
+                blocks_in = 1;
+            }
+            if raw_blocks_out > 0 && blocks_out == 0 {
+                blocks_out = 1;
+            }
+
+            let total_drawn = blocks_in + blocks_out;
+            if total_drawn > content_width as u64 {
+                let overfill = total_drawn - content_width as u64;
+                if raw_blocks_in > raw_blocks_out {
+                    blocks_in = blocks_in.saturating_sub(overfill);
+                } else {
+                    blocks_out = blocks_out.saturating_sub(overfill);
+                }
+            } else if total_drawn < content_width as u64 {
+                let remainder = (content_width as u64) - total_drawn;
+                if raw_blocks_in > raw_blocks_out {
+                    blocks_in += remainder;
+                } else {
+                    blocks_out += remainder;
+                }
+            }
+        } else {
+            blocks_in = raw_blocks_in;
+            blocks_out = raw_blocks_out;
+        }
+
+        let total_blocks = (blocks_in + blocks_out) as usize;
+        if total_blocks == 0 {
+            let padding = " ".repeat(content_width.saturating_sub(1) / 2);
+            let trailing_padding = content_width
+                .saturating_sub(1)
+                .saturating_sub(padding.len());
+            spans.push(Span::raw(padding));
+            spans.push(Span::styled(
+                SEPARATOR,
+                ctx.apply(Style::default().fg(color_empty)),
+            ));
+            spans.push(Span::raw(" ".repeat(trailing_padding)));
+        } else {
+            let padding = (content_width.saturating_sub(total_blocks)) / 2;
+            let trailing_padding = content_width
+                .saturating_sub(total_blocks)
+                .saturating_sub(padding);
+
+            let (
+                larger_stream_count,
+                smaller_stream_count,
+                larger_symbol,
+                smaller_symbol,
+                larger_color,
+                smaller_color,
+                larger_seed_salt,
+                smaller_seed_salt,
+            ) = if blocks_in >= blocks_out {
+                (
+                    blocks_in,
+                    blocks_out,
+                    DOWN_TRIANGLE,
+                    UP_TRIANGLE,
+                    color_inflow,
+                    color_outflow,
+                    dl_slice_index as u64,
+                    (ul_slice_index as u64) ^ 0xABCDEF,
+                )
+            } else {
+                (
+                    blocks_out,
+                    blocks_in,
+                    UP_TRIANGLE,
+                    DOWN_TRIANGLE,
+                    color_outflow,
+                    color_inflow,
+                    (ul_slice_index as u64) ^ 0xABCDEF,
+                    dl_slice_index as u64,
+                )
+            };
+
+            let mut order_rng = StdRng::seed_from_u64(
+                (dl_slice_index as u64) ^ (ul_slice_index as u64) ^ 0xDEADBEEF,
+            );
+            let total_scaled_blocks_f64 = (larger_stream_count + smaller_stream_count) as f64;
+            let ratio_smaller = smaller_stream_count as f64 / total_scaled_blocks_f64;
+            let smaller_first: bool = order_rng.random_bool(1.0 - ratio_smaller);
+
+            spans.push(Span::raw(" ".repeat(padding)));
+            if smaller_first {
+                render_sparkles(
+                    &mut spans,
+                    smaller_symbol,
+                    smaller_stream_count,
+                    smaller_color,
+                    frame_seed ^ smaller_seed_salt,
+                );
+                render_sparkles(
+                    &mut spans,
+                    larger_symbol,
+                    larger_stream_count,
+                    larger_color,
+                    frame_seed ^ larger_seed_salt,
+                );
+            } else {
+                render_sparkles(
+                    &mut spans,
+                    larger_symbol,
+                    larger_stream_count,
+                    larger_color,
+                    frame_seed ^ larger_seed_salt,
+                );
+                render_sparkles(
+                    &mut spans,
+                    smaller_symbol,
+                    smaller_stream_count,
+                    smaller_color,
+                    frame_seed ^ smaller_seed_salt,
+                );
+            }
+            spans.push(Span::raw(" ".repeat(trailing_padding)));
+        }
+        lines.push(Line::from(spans));
+    }
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, inner_area);
+}
+
+fn render_sparkles<'a>(
+    spans: &mut Vec<Span<'a>>,
+    symbol: &'a str,
+    count: u64,
+    color: Color,
+    seed: u64,
+) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    for _ in 0..count {
+        let is_bold: bool = rng.random();
+        let mut style = Style::default().fg(color);
+        style = if is_bold {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style.add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(symbol, style));
+    }
+}
+
 pub fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx: &ThemeContext) {
     if peers_chunk.height < 2 || peers_chunk.width < 2 {
         return;
