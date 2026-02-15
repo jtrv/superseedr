@@ -69,21 +69,15 @@ fn handle_global_key_hooks(event: &CrosstermEvent, app: &mut App) -> bool {
             app.app_state.ui.needs_redraw = true;
             return true;
         }
-
-        if let help::HelpKeyResult::Consumed { redraw } = help::handle_key(*key, &mut app.app_state)
-        {
-            if redraw {
-                app.app_state.ui.needs_redraw = true;
-            }
-            return true;
-        }
     }
     false
 }
 
 async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
     match app.app_state.mode {
-        AppMode::Help => {}
+        AppMode::Help => {
+            help::handle_event(event, &mut app.app_state);
+        }
         AppMode::Welcome => {
             welcome::handle_event(event, &mut app.app_state);
         }

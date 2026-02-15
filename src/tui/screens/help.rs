@@ -7,58 +7,37 @@ use crate::theme::ThemeContext;
 use crate::tui::formatters::{centered_rect, truncate_with_ellipsis};
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::view::calculate_player_stats;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
 
-pub enum HelpKeyResult {
-    Passthrough,
-    Consumed { redraw: bool },
-}
-
 #[cfg(windows)]
-pub fn handle_key(key: KeyEvent, app_state: &mut AppState) -> HelpKeyResult {
-    if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press {
-        match app_state.mode {
-            AppMode::Normal => {
-                app_state.mode = AppMode::Help;
-                return HelpKeyResult::Consumed { redraw: true };
-            }
-            AppMode::Help => {
-                app_state.mode = AppMode::Normal;
-                return HelpKeyResult::Consumed { redraw: true };
-            }
-            _ => {}
+pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
+    if !matches!(app_state.mode, AppMode::Help) {
+        return;
+    }
+
+    if let CrosstermEvent::Key(key) = event {
+        if key.kind == KeyEventKind::Press
+            && (key.code == KeyCode::Esc || key.code == KeyCode::Char('m'))
+        {
+            app_state.mode = AppMode::Normal;
         }
     }
-
-    if matches!(app_state.mode, AppMode::Help) {
-        return HelpKeyResult::Consumed { redraw: false };
-    }
-
-    HelpKeyResult::Passthrough
 }
 
 #[cfg(not(windows))]
-pub fn handle_key(key: KeyEvent, app_state: &mut AppState) -> HelpKeyResult {
-    if matches!(app_state.mode, AppMode::Help) {
-        if key.code == KeyCode::Esc
+pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
+    if !matches!(app_state.mode, AppMode::Help) {
+        return;
+    }
+
+    if let CrosstermEvent::Key(key) = event {
+        if (key.code == KeyCode::Esc && key.kind == KeyEventKind::Press)
             || (key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Release)
         {
             app_state.mode = AppMode::Normal;
-            return HelpKeyResult::Consumed { redraw: true };
         }
-        return HelpKeyResult::Consumed { redraw: false };
     }
-
-    if key.code == KeyCode::Char('m')
-        && key.kind == KeyEventKind::Press
-        && matches!(app_state.mode, AppMode::Normal)
-    {
-        app_state.mode = AppMode::Help;
-        return HelpKeyResult::Consumed { redraw: true };
-    }
-
-    HelpKeyResult::Passthrough
 }
 
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
