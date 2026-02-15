@@ -52,7 +52,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
     }
 
-    if matches!(app.app_state.mode, AppMode::FileBrowser { .. }) {
+    if matches!(app.app_state.mode, AppMode::FileBrowser) {
         browser::handle_event(event, app).await;
         app.app_state.ui.needs_redraw = true;
         return;
@@ -84,7 +84,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 app.app_state.mode = AppMode::Normal;
             }
         }
-        AppMode::FileBrowser { .. } => {}
+        AppMode::FileBrowser => {}
     }
     app.app_state.ui.needs_redraw = true;
 }

@@ -652,14 +652,13 @@ fn draw_torrent_preview_panel(
 }
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
-    let AppMode::FileBrowser {
-        state,
-        data,
-        browser_mode,
-    } = &mut app.app_state.mode
-    else {
+    if !matches!(app.app_state.mode, AppMode::FileBrowser) {
         return;
-    };
+    }
+
+    let state = &mut app.app_state.ui.file_browser.state;
+    let data = &mut app.app_state.ui.file_browser.data;
+    let browser_mode = &mut app.app_state.ui.file_browser.browser_mode;
 
     if let CrosstermEvent::Key(key) = event {
         if key.kind == KeyEventKind::Press {

@@ -582,7 +582,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
             ],
         ),
-        AppMode::FileBrowser { .. } => (
+        AppMode::FileBrowser => (
             " Help / File Browser ",
             vec![
                 Row::new(vec![
