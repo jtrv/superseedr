@@ -664,118 +664,167 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         return;
     }
 
-    let state = &mut app.app_state.ui.file_browser.state;
-    let data = &mut app.app_state.ui.file_browser.data;
-    let browser_mode = &mut app.app_state.ui.file_browser.browser_mode;
-
     if let CrosstermEvent::Key(key) = event {
         if key.kind == KeyEventKind::Press {
-            if let Some(action) =
-                map_search_key_to_browser_action(key.code, app.app_state.ui.is_searching)
-            {
-                let reduced = reduce_browser_action(
-                    action,
-                    &mut app.app_state.ui.is_searching,
-                    &mut app.app_state.ui.search_query,
-                );
-                if reduced.redraw {
-                    app.app_state.ui.needs_redraw = true;
-                }
+            if handle_browser_search_key(key.code, app) {
                 return;
             }
 
-            if let Some(action) = map_download_key_to_action(key.code, browser_mode) {
-                let reduced = reduce_browser_download_action(action, browser_mode);
-                if reduced.consumed {
-                    return;
-                }
+            if handle_browser_download_key(key.code, app).await {
+                return;
             }
 
-            if let FileBrowserMode::DownloadLocSelection {
-                use_container,
-                focused_pane,
-                preview_tree,
-                preview_state,
-                ..
-            } = browser_mode
-            {
-                if key.code == KeyCode::Esc {
-                    let reduced = reduce_browser_dialog_action(
-                        BrowserDialogAction::CancelDownloadSelection,
-                        state,
-                        browser_mode,
-                        !app.app_state.pending_torrent_link.is_empty(),
-                    );
-                    execute_browser_dialog_effects(app, reduced.effects).await;
-                    return;
-                }
-
-                if let BrowserPane::TorrentPreview = focused_pane {
-                    let list_height = calculate_preview_list_height(
-                        app.app_state.screen_area,
-                        app.app_state.ui.is_searching,
-                        focused_pane,
-                        *use_container,
-                    );
-                    let reduced = reduce_browser_preview_action(
-                        map_preview_key_to_action(key.code),
-                        preview_state,
-                        preview_tree,
-                        list_height,
-                    );
-                    if reduced.consumed {
-                        return;
-                    }
-                }
-            }
-
-            let has_preview_content = has_preview_content(
-                browser_mode,
-                app.app_state.pending_torrent_path.is_some(),
-                !app.app_state.pending_torrent_link.is_empty(),
-                state.cursor_path.as_ref(),
-            );
-            let focused_pane = focused_pane(browser_mode);
-            let list_height = calculate_list_height(
-                app.app_state.screen_area,
-                has_preview_content,
-                app.app_state.ui.is_searching,
-                &focused_pane,
-            );
-            match key.code {
-                key_code
-                    if handle_filesystem_navigation(
-                        key_code,
-                        state,
-                        data,
-                        browser_mode,
-                        &mut app.app_state.ui.is_searching,
-                        &mut app.app_state.ui.search_query,
-                        list_height,
-                        &app.app_command_tx,
-                    ) => {}
-                KeyCode::Char('Y') => {
-                    let reduced = reduce_browser_dialog_action(
-                        BrowserDialogAction::ConfirmSelection,
-                        state,
-                        browser_mode,
-                        !app.app_state.pending_torrent_link.is_empty(),
-                    );
-                    execute_browser_dialog_effects(app, reduced.effects).await;
-                }
-                KeyCode::Esc => {
-                    let reduced = reduce_browser_dialog_action(
-                        BrowserDialogAction::Escape,
-                        state,
-                        browser_mode,
-                        !app.app_state.pending_torrent_link.is_empty(),
-                    );
-                    execute_browser_dialog_effects(app, reduced.effects).await;
-                }
-                _ => {}
-            }
+            let _ = handle_browser_common_key(key.code, app).await;
         }
     }
+}
+
+fn handle_browser_search_key(key_code: KeyCode, app: &mut App) -> bool {
+    if let Some(action) = map_search_key_to_browser_action(key_code, app.app_state.ui.is_searching)
+    {
+        let reduced = reduce_browser_action(
+            action,
+            &mut app.app_state.ui.is_searching,
+            &mut app.app_state.ui.search_query,
+        );
+        if reduced.redraw {
+            app.app_state.ui.needs_redraw = true;
+        }
+        return true;
+    }
+    false
+}
+
+async fn handle_browser_download_key(key_code: KeyCode, app: &mut App) -> bool {
+    let consumed_download_input = {
+        let browser_mode = &mut app.app_state.ui.file_browser.browser_mode;
+        if let Some(action) = map_download_key_to_action(key_code, browser_mode) {
+            reduce_browser_download_action(action, browser_mode).consumed
+        } else {
+            false
+        }
+    };
+    if consumed_download_input {
+        return true;
+    }
+
+    if !matches!(
+        app.app_state.ui.file_browser.browser_mode,
+        FileBrowserMode::DownloadLocSelection { .. }
+    ) {
+        return false;
+    }
+
+    if key_code == KeyCode::Esc {
+        let reduced = {
+            let file_browser = &app.app_state.ui.file_browser;
+            reduce_browser_dialog_action(
+                BrowserDialogAction::CancelDownloadSelection,
+                &file_browser.state,
+                &file_browser.browser_mode,
+                !app.app_state.pending_torrent_link.is_empty(),
+            )
+        };
+        execute_browser_dialog_effects(app, reduced.effects).await;
+        return true;
+    }
+
+    let screen_area = app.app_state.screen_area;
+    let is_searching = app.app_state.ui.is_searching;
+    let consumed_preview_input = {
+        let browser_mode = &mut app.app_state.ui.file_browser.browser_mode;
+        if let FileBrowserMode::DownloadLocSelection {
+            use_container,
+            focused_pane,
+            preview_tree,
+            preview_state,
+            ..
+        } = browser_mode
+        {
+            if matches!(focused_pane, BrowserPane::TorrentPreview) {
+                let list_height = calculate_preview_list_height(
+                    screen_area,
+                    is_searching,
+                    focused_pane,
+                    *use_container,
+                );
+                reduce_browser_preview_action(
+                    map_preview_key_to_action(key_code),
+                    preview_state,
+                    preview_tree,
+                    list_height,
+                )
+                .consumed
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if consumed_preview_input {
+        return true;
+    }
+
+    false
+}
+
+async fn handle_browser_common_key(key_code: KeyCode, app: &mut App) -> bool {
+    let list_height = {
+        let file_browser = &app.app_state.ui.file_browser;
+        let has_preview = has_preview_content(
+            &file_browser.browser_mode,
+            app.app_state.pending_torrent_path.is_some(),
+            !app.app_state.pending_torrent_link.is_empty(),
+            file_browser.state.cursor_path.as_ref(),
+        );
+        let pane = focused_pane(&file_browser.browser_mode);
+        calculate_list_height(
+            app.app_state.screen_area,
+            has_preview,
+            app.app_state.ui.is_searching,
+            &pane,
+        )
+    };
+
+    let consumed_filesystem = {
+        let ui = &mut app.app_state.ui;
+        let file_browser = &mut ui.file_browser;
+        handle_filesystem_navigation(
+            key_code,
+            &mut file_browser.state,
+            &file_browser.data,
+            &file_browser.browser_mode,
+            &mut ui.is_searching,
+            &mut ui.search_query,
+            list_height,
+            &app.app_command_tx,
+        )
+    };
+    if consumed_filesystem {
+        return true;
+    }
+
+    let dialog_action = match key_code {
+        KeyCode::Char('Y') => Some(BrowserDialogAction::ConfirmSelection),
+        KeyCode::Esc => Some(BrowserDialogAction::Escape),
+        _ => None,
+    };
+    let Some(dialog_action) = dialog_action else {
+        return false;
+    };
+
+    let reduced = {
+        let file_browser = &app.app_state.ui.file_browser;
+        reduce_browser_dialog_action(
+            dialog_action,
+            &file_browser.state,
+            &file_browser.browser_mode,
+            !app.app_state.pending_torrent_link.is_empty(),
+        )
+    };
+    execute_browser_dialog_effects(app, reduced.effects).await;
+    true
 }
 
 pub enum ConfirmDecision {
