@@ -131,6 +131,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
     }
 
+    if matches!(app.app_state.mode, AppMode::FileBrowser { .. }) {
+        browser::handle_event(event, app).await;
+        app.app_state.ui_needs_redraw = true;
+        return;
+    }
+
     match &mut app.app_state.mode {
         AppMode::Welcome => {
             welcome::handle_event(event, &mut app.app_state);
@@ -157,156 +163,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             }
         }
 
-        AppMode::FileBrowser {
-            state,
-            data,
-            browser_mode,
-        } => {
-            if let CrosstermEvent::Key(key) = event {
-                if key.kind == KeyEventKind::Press {
-                    // 1. Search Interceptor
-                    if browser::handle_search_interceptor(
-                        key.code,
-                        &mut app.app_state.is_searching,
-                        &mut app.app_state.search_query,
-                    ) {
-                        app.app_state.ui_needs_redraw = true;
-                        return; // INTERCEPTED
-                    }
-
-                    if browser::handle_download_name_edit_guard(key.code, browser_mode) {
-                        app.app_state.ui_needs_redraw = true;
-                        return; // INTERCEPTED
-                    }
-                    if browser::handle_download_shortcuts(key.code, browser_mode) {
-                        app.app_state.ui_needs_redraw = true;
-                        return;
-                    }
-
-                    // 2. Mode-Specific Guard (Download Selection)
-                    if let FileBrowserMode::DownloadLocSelection {
-                        use_container,
-                        focused_pane,
-                        preview_tree,
-                        preview_state,
-                        ..
-                    } = browser_mode
-                    {
-                        // Global Actions (within Download Selection)
-                        match key.code {
-                            KeyCode::Esc => {
-                                if !app.app_state.pending_torrent_link.is_empty() {
-                                    browser::cleanup_pending_link_on_escape(
-                                        &app.app_state.pending_torrent_link,
-                                        &mut app.torrent_manager_command_txs,
-                                        &mut app.app_state.torrents,
-                                        &mut app.app_state.torrent_list_order,
-                                        true,
-                                    );
-                                }
-
-                                app.app_state.mode = AppMode::Normal;
-                                app.app_state.pending_torrent_path = None;
-                                app.app_state.pending_torrent_link.clear();
-                                app.app_state.ui_needs_redraw = true;
-                                return;
-                            }
-                            _ => {}
-                        }
-
-                        // Pane-Specific Navigation (Intercepting tree keys if focused on preview)
-                        if let BrowserPane::TorrentPreview = focused_pane {
-                            if let Some(list_height) = browser::calculate_preview_list_height(
-                                app.app_state.screen_area,
-                                app.app_state.is_searching,
-                                focused_pane,
-                                *use_container,
-                            ) {
-                                if !browser::apply_preview_navigation(
-                                    key.code,
-                                    preview_state,
-                                    preview_tree,
-                                    list_height,
-                                ) && key.code == KeyCode::Char(' ')
-                                {
-                                    if let Some(t) = &preview_state.cursor_path {
-                                        browser::apply_priority_cycle(preview_tree, t);
-                                    }
-                                }
-                            }
-                            app.app_state.ui_needs_redraw = true;
-                            // If focused on TorrentPreview, we don't want FileSystem navigation to trigger
-                            // except for confirming the whole thing via SHIFT+Y.
-                            if key.code != KeyCode::Char('Y') {
-                                return;
-                            }
-                        }
-                    }
-
-                    let has_preview_content = browser::has_preview_content(
-                        browser_mode,
-                        app.app_state.pending_torrent_path.is_some(),
-                        !app.app_state.pending_torrent_link.is_empty(),
-                        state.cursor_path.as_ref(),
-                    );
-                    let focused_pane = browser::focused_pane(browser_mode);
-                    let list_height = browser::calculate_list_height(
-                        app.app_state.screen_area,
-                        has_preview_content,
-                        app.app_state.is_searching,
-                        &focused_pane,
-                    );
-                    match key.code {
-                        key_code
-                            if browser::handle_filesystem_navigation(
-                                key_code,
-                                state,
-                                data,
-                                browser_mode,
-                                &mut app.app_state.is_searching,
-                                &mut app.app_state.search_query,
-                                list_height,
-                                &app.app_command_tx,
-                            ) => {}
-                        KeyCode::Char('Y') => {
-                            let decision = browser::resolve_confirm_decision(state, browser_mode);
-                            browser::execute_confirm_decision(app, decision).await;
-                            app.app_state.is_searching = false;
-                            app.app_state.search_query.clear();
-                        }
-
-                        KeyCode::Esc => {
-                            if let Some(mode) = browser::escape_to_config_mode(browser_mode) {
-                                app.app_state.mode = mode;
-                                app.app_state.ui_needs_redraw = true;
-                                return;
-                            }
-
-                            if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
-                                if !app.app_state.pending_torrent_link.is_empty() {
-                                    browser::cleanup_pending_link_on_escape(
-                                        &app.app_state.pending_torrent_link,
-                                        &mut app.torrent_manager_command_txs,
-                                        &mut app.app_state.torrents,
-                                        &mut app.app_state.torrent_list_order,
-                                        false,
-                                    );
-                                }
-                            }
-
-                            app.app_state.is_searching = false;
-                            app.app_state.search_query.clear();
-                            app.app_state.mode = AppMode::Normal;
-                            app.app_state.pending_torrent_path = None;
-                            app.app_state.pending_torrent_link.clear();
-                            app.app_state.ui_needs_redraw = true;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
         AppMode::DeleteConfirm {
             info_hash,
             with_files,
@@ -317,6 +173,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 app.app_state.mode = AppMode::Normal;
             }
         }
+        AppMode::FileBrowser { .. } => {}
     }
     app.app_state.ui_needs_redraw = true;
 }
