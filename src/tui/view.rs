@@ -1,13 +1,11 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
 use crate::tui::formatters::*;
 use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
 
-use crate::app::GraphDisplayMode;
 use crate::app::{AppMode, AppState};
 use crate::theme::ThemeContext;
 
@@ -19,9 +17,6 @@ use throbber_widgets_tui::Throbber;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-pub const SECONDS_HISTORY_MAX: usize = 3600;
-pub const MINUTES_HISTORY_MAX: usize = 48 * 60;
 
 pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
     let area = f.area();
@@ -94,7 +89,7 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
     normal::draw_peers_table(f, app_state, plan.peers, &ctx);
 
     if let Some(r) = plan.chart {
-        draw_network_chart(f, app_state, r, &ctx);
+        normal::draw_network_chart(f, app_state, r, &ctx);
     }
     if let Some(r) = plan.sparklines {
         draw_torrent_sparklines(f, app_state, r, &ctx);
@@ -170,223 +165,6 @@ fn apply_theme_effects_to_frame(f: &mut Frame, ctx: &ThemeContext) {
             }
         }
     }
-}
-
-fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect, ctx: &ThemeContext) {
-    if chart_chunk.width < 5 || chart_chunk.height < 5 {
-        return;
-    }
-
-    let smooth_data = |data: &[u64], alpha: f64| -> Vec<u64> {
-        if data.is_empty() {
-            return Vec::new();
-        }
-        let mut smoothed_data = Vec::with_capacity(data.len());
-        let mut last_ema = data[0] as f64;
-        smoothed_data.push(last_ema as u64);
-        for &value in data.iter().skip(1) {
-            let current_ema = (value as f64 * alpha) + (last_ema * (1.0 - alpha));
-            smoothed_data.push(current_ema as u64);
-            last_ema = current_ema;
-        }
-        smoothed_data
-    };
-
-    let (
-        dl_history_source,
-        ul_history_source,
-        backoff_history_source_ms,
-        time_window_points,
-        _time_unit_secs,
-    ) = match app_state.graph_mode {
-        GraphDisplayMode::ThreeHours
-        | GraphDisplayMode::TwelveHours
-        | GraphDisplayMode::TwentyFourHours => (
-            &app_state.minute_avg_dl_history,
-            &app_state.minute_avg_ul_history,
-            &app_state.minute_disk_backoff_history_ms,
-            MINUTES_HISTORY_MAX,
-            60,
-        ),
-        _ => {
-            let points = app_state.graph_mode.as_seconds().min(SECONDS_HISTORY_MAX);
-            (
-                &app_state.avg_download_history,
-                &app_state.avg_upload_history,
-                &app_state.disk_backoff_history_ms,
-                points,
-                1,
-            )
-        }
-    };
-
-    let dl_len = dl_history_source.len();
-    let ul_len = ul_history_source.len();
-    let backoff_len = backoff_history_source_ms.len();
-
-    let available_points = dl_len.min(ul_len).min(backoff_len);
-    let points_to_show = time_window_points.min(available_points);
-
-    let dl_history_slice = &dl_history_source[dl_len.saturating_sub(points_to_show)..];
-    let ul_history_slice = &ul_history_source[ul_len.saturating_sub(points_to_show)..];
-
-    let skip_count = backoff_len.saturating_sub(points_to_show);
-    let backoff_history_relevant_ms: Vec<u64> = backoff_history_source_ms
-        .iter()
-        .skip(skip_count)
-        .copied()
-        .collect();
-
-    let stable_max_speed = dl_history_slice
-        .iter()
-        .chain(ul_history_slice.iter())
-        .max()
-        .copied()
-        .unwrap_or(10_000);
-    let nice_max_speed = calculate_nice_upper_bound(stable_max_speed);
-
-    let smoothing_period = 5.0;
-    let alpha = 2.0 / (smoothing_period + 1.0);
-    let smoothed_dl_data = smooth_data(dl_history_slice, alpha);
-    let smoothed_ul_data = smooth_data(ul_history_slice, alpha);
-
-    let dl_data: Vec<(f64, f64)> = smoothed_dl_data
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (i as f64, s as f64))
-        .collect();
-    let ul_data: Vec<(f64, f64)> = smoothed_ul_data
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (i as f64, s as f64))
-        .collect();
-
-    let backoff_marker_data: Vec<(f64, f64)> = backoff_history_relevant_ms
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &ms)| {
-            if ms > 0 {
-                let y_val = smoothed_dl_data.get(i).copied().unwrap_or(0) as f64;
-                Some((i as f64, y_val))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let backoff_dataset = Dataset::default()
-        .name("File Limits")
-        .marker(Marker::Braille)
-        .graph_type(GraphType::Scatter)
-        .style(
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.state_error())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .data(&backoff_marker_data);
-
-    let datasets = vec![
-        Dataset::default()
-            .name("Download")
-            .marker(Marker::Braille)
-            .style(
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.state_info())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .data(&dl_data),
-        Dataset::default()
-            .name("Upload")
-            .marker(Marker::Braille)
-            .style(
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.state_success())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .data(&ul_data),
-        backoff_dataset,
-    ];
-
-    let y_speed_axis_labels = vec![
-        Span::raw("0"),
-        Span::styled(
-            format_speed(nice_max_speed / 2),
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-        ),
-        Span::styled(
-            format_speed(nice_max_speed),
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-        ),
-    ];
-    let x_labels = generate_x_axis_labels(ctx, app_state.graph_mode);
-
-    let all_modes = [
-        GraphDisplayMode::OneMinute,
-        GraphDisplayMode::FiveMinutes,
-        GraphDisplayMode::TenMinutes,
-        GraphDisplayMode::ThirtyMinutes,
-        GraphDisplayMode::OneHour,
-        GraphDisplayMode::ThreeHours,
-        GraphDisplayMode::TwelveHours,
-        GraphDisplayMode::TwentyFourHours,
-    ];
-    let mut title_spans: Vec<Span> = vec![Span::styled(
-        "Network Activity ",
-        ctx.apply(Style::default().fg(ctx.accent_peach())),
-    )];
-    for (i, &mode) in all_modes.iter().enumerate() {
-        let is_active = mode == app_state.graph_mode;
-        let mode_str = mode.to_string();
-
-        let style = if is_active {
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.state_warning())
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            ctx.apply(Style::default().fg(ctx.theme.semantic.surface0))
-        };
-
-        title_spans.push(Span::styled(mode_str, style));
-
-        if i < all_modes.len().saturating_sub(1) {
-            title_spans.push(Span::styled(
-                " ",
-                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
-            ));
-        }
-    }
-    let chart_title = Line::from(title_spans);
-
-    let chart = Chart::new(datasets)
-        .block(
-            Block::default()
-                .title(chart_title)
-                .borders(Borders::ALL)
-                .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-        )
-        .x_axis(
-            Axis::default()
-                .style(ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)))
-                .bounds([0.0, points_to_show.saturating_sub(1) as f64])
-                .labels(x_labels),
-        )
-        .y_axis(
-            Axis::default()
-                .style(ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)))
-                .bounds([0.0, nice_max_speed as f64])
-                .labels(y_speed_axis_labels),
-        )
-        .legend_position(Some(LegendPosition::TopRight));
-
-    f.render_widget(chart, chart_chunk);
 }
 
 fn draw_stats_panel(
