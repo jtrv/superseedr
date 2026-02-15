@@ -6,13 +6,152 @@ use std::sync::Arc;
 use crate::app::{AppCommand, ConfigItem, FileBrowserMode};
 use crate::config::Settings;
 use crate::token_bucket::TokenBucket;
+use crate::theme::ThemeContext;
+use crate::tui::formatters::{format_limit_bps, path_to_string};
 use directories::UserDirs;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::prelude::{Frame, Line, Span, Style};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use tokio::sync::mpsc;
 
 pub enum ConfigOutcome {
     Stay,
     ToNormal,
+}
+
+pub fn draw(
+    f: &mut Frame,
+    settings: &Settings,
+    selected_index: usize,
+    items: &[ConfigItem],
+    editing: &Option<(ConfigItem, String)>,
+    ctx: &ThemeContext,
+) {
+    let area = crate::tui::formatters::centered_rect(80, 60, f.area());
+    f.render_widget(Clear, f.area());
+    let block = Block::default()
+        .title(Span::styled(
+            "Config",
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(2)])
+        .split(inner_area);
+    let settings_area = chunks[0];
+    let footer_area = chunks[1];
+    let rows_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            items
+                .iter()
+                .map(|_| Constraint::Length(1))
+                .collect::<Vec<_>>(),
+        )
+        .split(settings_area);
+
+    for (i, item) in items.iter().enumerate() {
+        let (name_str, value_str) = match item {
+            ConfigItem::ClientPort => ("Listen Port", settings.client_port.to_string()),
+            ConfigItem::DefaultDownloadFolder => (
+                "Default Download Folder",
+                path_to_string(settings.default_download_folder.as_deref()),
+            ),
+            ConfigItem::WatchFolder => (
+                "Torrent Watch Folder",
+                path_to_string(settings.watch_folder.as_deref()),
+            ),
+            ConfigItem::GlobalDownloadLimit => (
+                "Global DL Limit",
+                format_limit_bps(settings.global_download_limit_bps),
+            ),
+            ConfigItem::GlobalUploadLimit => (
+                "Global UL Limit",
+                format_limit_bps(settings.global_upload_limit_bps),
+            ),
+        };
+
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(rows_layout[i]);
+        let is_highlighted = if let Some((edited_item, _)) = editing {
+            *edited_item == *item
+        } else {
+            i == selected_index
+        };
+        let row_style = if is_highlighted {
+            ctx.apply(Style::default().fg(ctx.state_warning()))
+        } else {
+            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
+        };
+        let name_with_selector = if is_highlighted {
+            format!("▶ {}", name_str)
+        } else {
+            format!("  {}", name_str)
+        };
+
+        let name_p = Paragraph::new(name_with_selector).style(row_style);
+        f.render_widget(name_p, columns[0]);
+
+        if let Some((_edited_item, buffer)) = editing {
+            if is_highlighted {
+                let edit_p = Paragraph::new(buffer.as_str()).style(row_style.fg(ctx.state_warning()));
+                f.set_cursor_position((columns[1].x + buffer.len() as u16, columns[1].y));
+                f.render_widget(edit_p, columns[1]);
+            } else {
+                let value_p = Paragraph::new(value_str).style(row_style);
+                f.render_widget(value_p, columns[1]);
+            }
+        } else {
+            let value_p = Paragraph::new(value_str).style(row_style);
+            f.render_widget(value_p, columns[1]);
+        }
+    }
+
+    let help_text = if editing.is_some() {
+        Line::from(vec![
+            Span::styled(
+                "[Enter]",
+                ctx.apply(Style::default().fg(ctx.state_success())),
+            ),
+            Span::raw(" to confirm, "),
+            Span::styled("[Esc]", ctx.apply(Style::default().fg(ctx.state_error()))),
+            Span::raw(" to cancel."),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("Use "),
+            Span::styled(
+                "↑/↓/k/j",
+                ctx.apply(Style::default().fg(ctx.state_warning())),
+            ),
+            Span::raw(" to navigate. "),
+            Span::styled(
+                "[Enter]",
+                ctx.apply(Style::default().fg(ctx.state_warning())),
+            ),
+            Span::raw(" to edit. "),
+            Span::styled("[r]", ctx.apply(Style::default().fg(ctx.state_warning()))),
+            Span::raw("eset to default. "),
+            Span::styled(
+                "[Esc]|[Q]",
+                ctx.apply(Style::default().fg(ctx.state_success())),
+            ),
+            Span::raw(" to Save & Exit, "),
+        ])
+    };
+
+    let footer_paragraph = Paragraph::new(help_text)
+        .alignment(Alignment::Center)
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
+    f.render_widget(footer_paragraph, footer_area);
 }
 
 pub fn handle_event(
