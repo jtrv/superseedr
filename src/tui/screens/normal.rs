@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::sort_and_filter_torrent_list_state;
 use crate::app::AppCommand;
 use crate::app::BrowserPane;
 use crate::app::FileBrowserMode;
@@ -73,6 +74,7 @@ pub enum UiAction {
     ThemePrev,
     ThemeNext,
     TogglePauseSelected,
+    SortBySelectedColumn,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -231,6 +233,64 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
+        UiAction::SortBySelectedColumn => {
+            let layout_ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
+            let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
+            let (_, visible_torrent_columns) =
+                compute_visible_torrent_columns(app_state, layout_plan.list.width);
+            let (_, visible_peer_columns) = compute_visible_peer_columns(layout_plan.peers.width);
+
+            match app_state.ui.selected_header {
+                SelectedHeader::Torrent(i) => {
+                    let cols = get_torrent_columns();
+                    if let Some(def) = visible_torrent_columns
+                        .get(i)
+                        .and_then(|&real_idx| cols.get(real_idx))
+                    {
+                        if let Some(column) = def.sort_enum {
+                            if app_state.torrent_sort.0 == column {
+                                app_state.torrent_sort.1 =
+                                    if app_state.torrent_sort.1 == SortDirection::Ascending {
+                                        SortDirection::Descending
+                                    } else {
+                                        SortDirection::Ascending
+                                    };
+                            } else {
+                                app_state.torrent_sort.0 = column;
+                                app_state.torrent_sort.1 = SortDirection::Descending;
+                            }
+                            sort_and_filter_torrent_list_state(app_state);
+                        }
+                    }
+                }
+                SelectedHeader::Peer(i) => {
+                    let cols = get_peer_columns();
+                    if let Some(def) = visible_peer_columns
+                        .get(i)
+                        .and_then(|&real_idx| cols.get(real_idx))
+                    {
+                        if let Some(column) = def.sort_enum {
+                            if app_state.peer_sort.0 == column {
+                                app_state.peer_sort.1 =
+                                    if app_state.peer_sort.1 == SortDirection::Ascending {
+                                        SortDirection::Descending
+                                    } else {
+                                        SortDirection::Ascending
+                                    };
+                            } else {
+                                app_state.peer_sort.0 = column;
+                                app_state.peer_sort.1 = SortDirection::Descending;
+                            }
+                        }
+                    }
+                }
+            };
+
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
     }
 }
 
@@ -252,6 +312,7 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('<') => Some(UiAction::ThemePrev),
         KeyCode::Char('>') => Some(UiAction::ThemeNext),
         KeyCode::Char('p') => Some(UiAction::TogglePauseSelected),
+        KeyCode::Char('s') => Some(UiAction::SortBySelectedColumn),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -3293,59 +3354,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
 
                 match key.code {
-                    KeyCode::Char('s') => {
-                        let layout_ctx = LayoutContext::new(app.app_state.screen_area, &app.app_state, 35);
-                        let layout_plan = calculate_layout(app.app_state.screen_area, &layout_ctx);
-                        let (_, visible_torrent_columns) =
-                            compute_visible_torrent_columns(&app.app_state, layout_plan.list.width);
-                        let (_, visible_peer_columns) =
-                            compute_visible_peer_columns(layout_plan.peers.width);
-                        match app.app_state.ui.selected_header {
-                            SelectedHeader::Torrent(i) => {
-                                let cols = get_torrent_columns();
-
-                                if let Some(def) =
-                                    visible_torrent_columns.get(i).and_then(|&real_idx| cols.get(real_idx))
-                                {
-                                    if let Some(column) = def.sort_enum {
-                                        if app.app_state.torrent_sort.0 == column {
-                                            app.app_state.torrent_sort.1 =
-                                                if app.app_state.torrent_sort.1 == SortDirection::Ascending {
-                                                    SortDirection::Descending
-                                                } else {
-                                                    SortDirection::Ascending
-                                                };
-                                        } else {
-                                            app.app_state.torrent_sort.0 = column;
-                                            app.app_state.torrent_sort.1 = SortDirection::Descending;
-                                        }
-                                        app.sort_and_filter_torrent_list();
-                                    }
-                                }
-                            }
-                            SelectedHeader::Peer(i) => {
-                                let cols = get_peer_columns();
-
-                                if let Some(def) =
-                                    visible_peer_columns.get(i).and_then(|&real_idx| cols.get(real_idx))
-                                {
-                                    if let Some(column) = def.sort_enum {
-                                        if app.app_state.peer_sort.0 == column {
-                                            app.app_state.peer_sort.1 =
-                                                if app.app_state.peer_sort.1 == SortDirection::Ascending {
-                                                    SortDirection::Descending
-                                                } else {
-                                                    SortDirection::Ascending
-                                                };
-                                        } else {
-                                            app.app_state.peer_sort.0 = column;
-                                            app.app_state.peer_sort.1 = SortDirection::Descending;
-                                        }
-                                    }
-                                }
-                            }
-                        };
-                    }
                     #[cfg(windows)]
                     KeyCode::Char('v') => match ClipboardContext::new() {
                         Ok(mut ctx) => match ctx.get_contents() {
@@ -3382,6 +3390,7 @@ mod tests {
         AppState, DataRate, PeerInfo, SelectedHeader, TorrentControlState, TorrentDisplayState,
         TorrentMetrics,
     };
+    use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
         let mut metrics = TorrentMetrics::default();
@@ -3619,5 +3628,45 @@ mod tests {
                 .torrent_control_state,
             TorrentControlState::Running
         );
+    }
+
+    #[test]
+    fn reducer_sort_by_selected_column_updates_torrent_sort() {
+        let mut app_state = create_test_app_state();
+        app_state.screen_area = Rect::new(0, 0, 220, 80);
+        app_state.ui.selected_header = SelectedHeader::Torrent(1);
+        app_state.torrent_sort = (TorrentSortColumn::Down, SortDirection::Descending);
+
+        if let Some(t) = app_state.torrents.get_mut("hash_a".as_bytes()) {
+            t.latest_state.number_of_pieces_total = 10;
+            t.latest_state.number_of_pieces_completed = 5;
+            t.smoothed_download_speed_bps = 100;
+            t.smoothed_upload_speed_bps = 50;
+        }
+        if let Some(t) = app_state.torrents.get_mut("hash_b".as_bytes()) {
+            t.latest_state.number_of_pieces_total = 10;
+            t.latest_state.number_of_pieces_completed = 10;
+            t.smoothed_download_speed_bps = 200;
+            t.smoothed_upload_speed_bps = 100;
+        }
+
+        let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
+
+        assert_eq!(app_state.torrent_sort.0, TorrentSortColumn::Name);
+        assert_eq!(app_state.torrent_sort.1, SortDirection::Descending);
+    }
+
+    #[test]
+    fn reducer_sort_by_selected_column_updates_peer_sort() {
+        let mut app_state = create_test_app_state();
+        app_state.screen_area = Rect::new(0, 0, 220, 80);
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Peer(0);
+        app_state.peer_sort = (PeerSortColumn::Address, SortDirection::Ascending);
+
+        let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
+
+        assert_eq!(app_state.peer_sort.0, PeerSortColumn::Flags);
+        assert_eq!(app_state.peer_sort.1, SortDirection::Descending);
     }
 }
