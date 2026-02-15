@@ -11,7 +11,7 @@ use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::LayoutContext;
-use crate::tui::screens::{browser, config, delete_confirm, normal, power, welcome};
+use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
 use crate::tui::tree::TreeViewState;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
@@ -81,53 +81,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             return;
         }
 
-        #[cfg(windows)]
+        if let help::HelpKeyResult::Consumed { redraw } = help::handle_key(key, &mut app.app_state)
         {
-            let mut help_key_handled = false;
-            // On Windows, we only get Press, so we just toggle
-            if key.code == KeyCode::Char('m')
-                && key.kind == KeyEventKind::Press
-                && matches!(app.app_state.mode, AppMode::Normal)
-            {
-                app.app_state.show_help = !app.app_state.show_help;
-                help_key_handled = true;
-            }
-
-            if help_key_handled {
+            if redraw {
                 app.app_state.ui_needs_redraw = true;
-                return;
             }
-
-            // If help is shown, consume all other key presses
-            if app.app_state.show_help {
-                return;
-            }
-        }
-
-        #[cfg(not(windows))]
-        {
-            let mut help_key_handled = false;
-            if app.app_state.show_help {
-                if key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('m')
-                        && key.kind == KeyEventKind::Release
-                        && matches!(app.app_state.mode, AppMode::Normal))
-                {
-                    app.app_state.show_help = false;
-                    help_key_handled = true;
-                }
-            } else if key.code == KeyCode::Char('m')
-                && key.kind == KeyEventKind::Press
-                && matches!(app.app_state.mode, AppMode::Normal)
-            {
-                app.app_state.show_help = true;
-                help_key_handled = true;
-            }
-
-            if help_key_handled {
-                app.app_state.ui_needs_redraw = true;
-                return;
-            }
+            return;
         }
     }
 

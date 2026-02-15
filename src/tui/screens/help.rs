@@ -6,7 +6,55 @@ use crate::config::get_app_paths;
 use crate::theme::ThemeContext;
 use crate::tui::formatters::{centered_rect, truncate_with_ellipsis};
 use crate::tui::view::calculate_player_stats;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
+
+pub enum HelpKeyResult {
+    Passthrough,
+    Consumed { redraw: bool },
+}
+
+#[cfg(windows)]
+pub fn handle_key(key: KeyEvent, app_state: &mut AppState) -> HelpKeyResult {
+    if key.code == KeyCode::Char('m')
+        && key.kind == KeyEventKind::Press
+        && matches!(app_state.mode, AppMode::Normal)
+    {
+        app_state.show_help = !app_state.show_help;
+        return HelpKeyResult::Consumed { redraw: true };
+    }
+
+    if app_state.show_help {
+        return HelpKeyResult::Consumed { redraw: false };
+    }
+
+    HelpKeyResult::Passthrough
+}
+
+#[cfg(not(windows))]
+pub fn handle_key(key: KeyEvent, app_state: &mut AppState) -> HelpKeyResult {
+    if app_state.show_help {
+        if key.code == KeyCode::Esc
+            || (key.code == KeyCode::Char('m')
+                && key.kind == KeyEventKind::Release
+                && matches!(app_state.mode, AppMode::Normal))
+        {
+            app_state.show_help = false;
+            return HelpKeyResult::Consumed { redraw: true };
+        }
+        return HelpKeyResult::Consumed { redraw: false };
+    }
+
+    if key.code == KeyCode::Char('m')
+        && key.kind == KeyEventKind::Press
+        && matches!(app_state.mode, AppMode::Normal)
+    {
+        app_state.show_help = true;
+        return HelpKeyResult::Consumed { redraw: true };
+    }
+
+    HelpKeyResult::Passthrough
+}
 
 pub fn draw(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
     let (settings_path_str, log_path_str) = if let Some((config_dir, data_dir)) = get_app_paths() {
@@ -562,4 +610,3 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
     f.render_widget(Clear, area);
     f.render_widget(help_table, area);
 }
-
