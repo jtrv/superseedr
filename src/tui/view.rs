@@ -7,12 +7,12 @@ use ratatui::{prelude::*, symbols, widgets::*};
 use crate::tui::formatters::*;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::{get_torrent_columns, ColumnId};
-use crate::tui::screens::{browser, power, welcome};
+use crate::tui::screens::{browser, config, delete_confirm, power, welcome};
 
 use crate::app::torrent_completion_percent;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
-use crate::app::{AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{AppMode, AppState, SelectedHeader, TorrentControlState};
 use crate::theme::ThemeContext;
 
 use crate::tui::layout::get_peer_columns;
@@ -73,12 +73,12 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
             items,
             editing,
         } => {
-            draw_config_screen(f, settings_edit, *selected_index, items, editing, &ctx);
+            config::draw(f, settings_edit, *selected_index, items, editing, &ctx);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::DeleteConfirm { .. } => {
-            draw_delete_confirm_dialog(f, app_state, &ctx);
+            delete_confirm::draw(f, app_state, &ctx);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
@@ -2356,128 +2356,6 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect, ctx:
     }
 }
 
-fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
-    if let AppMode::DeleteConfirm {
-        info_hash,
-        with_files,
-    } = &app_state.mode
-    {
-        if let Some(torrent_to_delete) = app_state.torrents.get(info_hash) {
-            let terminal_area = f.area();
-
-            // Adaptive scaling: use more screen percentage on smaller windows
-            let rect_width = if terminal_area.width < 60 { 90 } else { 50 };
-            let rect_height = if terminal_area.height < 20 { 95 } else { 18 };
-
-            let area = centered_rect(rect_width, rect_height, terminal_area);
-            f.render_widget(Clear, area);
-
-            // Adaptive padding: remove vertical padding if space is tight
-            let vert_padding = if area.height < 10 { 0 } else { 1 };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(ctx.apply(Style::default().fg(ctx.state_error())))
-                .padding(Padding::new(2, 2, vert_padding, vert_padding));
-
-            let inner_area = block.inner(area);
-            f.render_widget(block, area);
-
-            // Use Min(0) for the middle chunk to allow it to collapse on small screens
-            let chunks = Layout::vertical([
-                Constraint::Length(2), // Torrent Name & Path
-                Constraint::Min(0),    // Warning Body (Collapses if needed)
-                Constraint::Length(1), // Spacer
-                Constraint::Length(1), // Keybinds (Pinned footer)
-            ])
-            .split(inner_area);
-
-            // 1. Torrent Identity
-            let name = sanitize_text(&torrent_to_delete.latest_state.torrent_name);
-            let path = torrent_to_delete
-                .latest_state
-                .download_path
-                .as_ref()
-                .map(|p| sanitize_text(&p.to_string_lossy()))
-                .unwrap_or_else(|| "Unknown Path".to_string());
-
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(
-                        name,
-                        ctx.apply(Style::default().fg(ctx.state_warning()).bold().underlined()),
-                    )),
-                    Line::from(Span::styled(
-                        path,
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
-                    )),
-                ])
-                .alignment(Alignment::Center),
-                chunks[0],
-            );
-
-            // 2. Warning Body (Only render if there is enough height)
-            if chunks[1].height > 0 {
-                let body = if *with_files {
-                    vec![
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            "⚠️ PERMANENT TORRENT FILES DELETION ON ⚠️",
-                            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
-                        )),
-                        Line::from(vec![
-                            Span::raw("All local data for this torrent will be "),
-                            Span::styled(
-                                "ERASED",
-                                ctx.apply(
-                                    Style::default().fg(ctx.state_error()).bold().underlined(),
-                                ),
-                            ),
-                        ]),
-                    ]
-                } else {
-                    vec![
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            "Safe Removal (Files Kept)",
-                            ctx.apply(Style::default().fg(ctx.state_success())),
-                        )),
-                        Line::from(vec![
-                            Span::raw("Use "),
-                            Span::styled(
-                                "[D]",
-                                ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
-                            ),
-                            Span::raw(" to remove files..."),
-                        ]),
-                    ]
-                };
-                f.render_widget(
-                    Paragraph::new(body)
-                        .alignment(Alignment::Center)
-                        .wrap(Wrap { trim: true }),
-                    chunks[1],
-                );
-            }
-
-            // 3. Action Buttons (Footer)
-            let actions = Line::from(vec![
-                Span::styled(
-                    "[Enter]",
-                    ctx.apply(Style::default().fg(ctx.state_success()).bold()),
-                ),
-                Span::raw(" Confirm  "),
-                Span::styled("[Esc]", ctx.apply(Style::default().fg(ctx.state_error()))),
-                Span::raw(" Cancel"),
-            ]);
-
-            f.render_widget(
-                Paragraph::new(actions).alignment(Alignment::Center),
-                chunks[3],
-            );
-        }
-    }
-}
-
 fn draw_status_error_popup(f: &mut Frame, error_text: &str, ctx: &ThemeContext) {
     let popup_width_percent: u16 = 50;
     let popup_height: u16 = 8;
@@ -3123,141 +3001,6 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
 
     f.render_widget(Clear, area);
     f.render_widget(help_table, area);
-}
-
-fn draw_config_screen(
-    f: &mut Frame,
-    settings: &Settings,
-    selected_index: usize,
-    items: &[ConfigItem],
-    editing: &Option<(ConfigItem, String)>,
-    ctx: &ThemeContext,
-) {
-    let area = centered_rect(80, 60, f.area());
-    f.render_widget(Clear, f.area());
-    let block = Block::default()
-        .title(Span::styled(
-            "Config",
-            ctx.apply(Style::default().fg(ctx.state_selected())),
-        ))
-        .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(2)])
-        .split(inner_area);
-    let settings_area = chunks[0];
-    let footer_area = chunks[1];
-    let rows_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            items
-                .iter()
-                .map(|_| Constraint::Length(1))
-                .collect::<Vec<_>>(),
-        )
-        .split(settings_area);
-
-    for (i, item) in items.iter().enumerate() {
-        let (name_str, value_str) = match item {
-            ConfigItem::ClientPort => ("Listen Port", settings.client_port.to_string()),
-            ConfigItem::DefaultDownloadFolder => (
-                "Default Download Folder",
-                path_to_string(settings.default_download_folder.as_deref()),
-            ),
-            ConfigItem::WatchFolder => (
-                "Torrent Watch Folder",
-                path_to_string(settings.watch_folder.as_deref()),
-            ),
-            ConfigItem::GlobalDownloadLimit => (
-                "Global DL Limit",
-                format_limit_bps(settings.global_download_limit_bps),
-            ),
-            ConfigItem::GlobalUploadLimit => (
-                "Global UL Limit",
-                format_limit_bps(settings.global_upload_limit_bps),
-            ),
-        };
-
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(rows_layout[i]);
-        let is_highlighted = if let Some((edited_item, _)) = editing {
-            *edited_item == *item
-        } else {
-            i == selected_index
-        };
-        let row_style = if is_highlighted {
-            ctx.apply(Style::default().fg(ctx.state_warning()))
-        } else {
-            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
-        };
-        let name_with_selector = if is_highlighted {
-            format!("▶ {}", name_str)
-        } else {
-            format!("  {}", name_str)
-        };
-
-        let name_p = Paragraph::new(name_with_selector).style(row_style);
-        f.render_widget(name_p, columns[0]);
-
-        if let Some((_edited_item, buffer)) = editing {
-            if is_highlighted {
-                let edit_p =
-                    Paragraph::new(buffer.as_str()).style(row_style.fg(ctx.state_warning()));
-                f.set_cursor_position((columns[1].x + buffer.len() as u16, columns[1].y));
-                f.render_widget(edit_p, columns[1]);
-            } else {
-                let value_p = Paragraph::new(value_str).style(row_style);
-                f.render_widget(value_p, columns[1]);
-            }
-        } else {
-            let value_p = Paragraph::new(value_str).style(row_style);
-            f.render_widget(value_p, columns[1]);
-        }
-    }
-
-    let help_text = if editing.is_some() {
-        Line::from(vec![
-            Span::styled(
-                "[Enter]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
-            ),
-            Span::raw(" to confirm, "),
-            Span::styled("[Esc]", ctx.apply(Style::default().fg(ctx.state_error()))),
-            Span::raw(" to cancel."),
-        ])
-    } else {
-        Line::from(vec![
-            Span::raw("Use "),
-            Span::styled(
-                "↑/↓/k/j",
-                ctx.apply(Style::default().fg(ctx.state_warning())),
-            ),
-            Span::raw(" to navigate. "),
-            Span::styled(
-                "[Enter]",
-                ctx.apply(Style::default().fg(ctx.state_warning())),
-            ),
-            Span::raw(" to edit. "),
-            Span::styled("[r]", ctx.apply(Style::default().fg(ctx.state_warning()))),
-            Span::raw("eset to default. "),
-            Span::styled(
-                "[Esc]|[Q]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
-            ),
-            Span::raw(" to Save & Exit, "),
-        ])
-    };
-
-    let footer_paragraph = Paragraph::new(help_text)
-        .alignment(Alignment::Center)
-        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
-    f.render_widget(footer_paragraph, footer_area);
 }
 
 fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx: &ThemeContext) {
