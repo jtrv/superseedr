@@ -67,11 +67,13 @@ pub enum UiAction {
     GraphPrev,
     OpenAddTorrentBrowser,
     OpenDeleteConfirm { with_files: bool },
+    OpenConfig,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEffect {
     OpenAddTorrentFileBrowser,
+    OpenConfigScreen,
 }
 
 #[derive(Default)]
@@ -158,6 +160,12 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
+        UiAction::OpenConfig => {
+            ReduceResult {
+                redraw: true,
+                effects: vec![UiEffect::OpenConfigScreen],
+            }
+        }
     }
 }
 
@@ -173,6 +181,7 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('a') => Some(UiAction::OpenAddTorrentBrowser),
         KeyCode::Char('d') => Some(UiAction::OpenDeleteConfirm { with_files: false }),
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
+        KeyCode::Char('c') => Some(UiAction::OpenConfig),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -3139,19 +3148,20 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     highlight_path: None,
                                 });
                             }
+                            UiEffect::OpenConfigScreen => {
+                                app.app_state.ui.config.settings_edit =
+                                    Box::new(app.client_configs.clone());
+                                app.app_state.ui.config.selected_index = 0;
+                                app.app_state.ui.config.items = ConfigItem::iter().collect::<Vec<_>>();
+                                app.app_state.ui.config.editing = None;
+                                app.app_state.mode = AppMode::Config;
+                            }
                         }
                     }
                     return;
                 }
 
                 match key.code {
-                    KeyCode::Char('c') => {
-                        app.app_state.ui.config.settings_edit = Box::new(app.client_configs.clone());
-                        app.app_state.ui.config.selected_index = 0;
-                        app.app_state.ui.config.items = ConfigItem::iter().collect::<Vec<_>>();
-                        app.app_state.ui.config.editing = None;
-                        app.app_state.mode = AppMode::Config;
-                    }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
                         app.app_state.data_rate = app.app_state.data_rate.next_slower();
                         let new_rate = app.app_state.data_rate.as_ms();
@@ -3475,5 +3485,15 @@ mod tests {
 
         assert!(result.redraw);
         assert!(matches!(app_state.mode, AppMode::Normal));
+    }
+
+    #[test]
+    fn reducer_open_config_emits_effect() {
+        let mut app_state = AppState::default();
+
+        let result = reduce_ui_action(&mut app_state, UiAction::OpenConfig);
+
+        assert!(result.redraw);
+        assert_eq!(result.effects, vec![UiEffect::OpenConfigScreen]);
     }
 }
