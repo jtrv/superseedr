@@ -61,7 +61,7 @@ pub fn draw(
     let layout = calculate_file_browser_layout(
         area,
         has_preview_content,
-        app_state.ui.is_searching,
+        app_state.ui.file_browser.is_searching,
         &focused_pane,
     );
 
@@ -105,7 +105,7 @@ pub fn draw(
                 "/",
                 ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
             ),
-            Span::raw(&app_state.ui.search_query),
+            Span::raw(&app_state.ui.file_browser.search_query),
             Span::styled(
                 "_",
                 ctx.apply(
@@ -203,7 +203,7 @@ pub fn draw(
 
     let inner_height = layout.list.height.saturating_sub(2) as usize;
     let list_width = layout.list.width.saturating_sub(2) as usize;
-    let filter = build_filter(browser_mode, &app_state.ui.search_query);
+    let filter = build_filter(browser_mode, &app_state.ui.file_browser.search_query);
 
     let abs_path = state.current_path.to_string_lossy();
     let item_count = data.len();
@@ -680,12 +680,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 }
 
 fn handle_browser_search_key(key_code: KeyCode, app: &mut App) -> bool {
-    if let Some(action) = map_search_key_to_browser_action(key_code, app.app_state.ui.is_searching)
+    if let Some(action) = map_search_key_to_browser_action(key_code, app.app_state.ui.file_browser.is_searching)
     {
         let reduced = reduce_browser_action(
             action,
-            &mut app.app_state.ui.is_searching,
-            &mut app.app_state.ui.search_query,
+            &mut app.app_state.ui.file_browser.is_searching,
+            &mut app.app_state.ui.file_browser.search_query,
         );
         if reduced.redraw {
             app.app_state.ui.needs_redraw = true;
@@ -730,7 +730,7 @@ async fn handle_browser_download_key(key_code: KeyCode, app: &mut App) -> bool {
     }
 
     let screen_area = app.app_state.screen_area;
-    let is_searching = app.app_state.ui.is_searching;
+    let is_searching = app.app_state.ui.file_browser.is_searching;
     let consumed_preview_input = {
         let browser_mode = &mut app.app_state.ui.file_browser.browser_mode;
         if let FileBrowserMode::DownloadLocSelection {
@@ -782,21 +782,20 @@ async fn handle_browser_common_key(key_code: KeyCode, app: &mut App) -> bool {
         calculate_list_height(
             app.app_state.screen_area,
             has_preview,
-            app.app_state.ui.is_searching,
+            app.app_state.ui.file_browser.is_searching,
             &pane,
         )
     };
 
     let consumed_filesystem = {
-        let ui = &mut app.app_state.ui;
-        let file_browser = &mut ui.file_browser;
+        let file_browser = &mut app.app_state.ui.file_browser;
         handle_filesystem_navigation(
             key_code,
             &mut file_browser.state,
             &file_browser.data,
             &file_browser.browser_mode,
-            &mut ui.is_searching,
-            &mut ui.search_query,
+            &mut file_browser.is_searching,
+            &mut file_browser.search_query,
             list_height,
             &app.app_command_tx,
         )
@@ -1470,8 +1469,8 @@ pub async fn execute_browser_dialog_effects(app: &mut App, effects: Vec<BrowserD
                 app.app_state.pending_torrent_link.clear();
             }
             BrowserDialogEffect::ClearSearch => {
-                app.app_state.ui.is_searching = false;
-                app.app_state.ui.search_query.clear();
+                app.app_state.ui.file_browser.is_searching = false;
+                app.app_state.ui.file_browser.search_query.clear();
             }
         }
     }
