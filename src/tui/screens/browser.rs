@@ -998,19 +998,6 @@ pub fn reduce_filesystem_navigation_action(
     result
 }
 
-pub fn handle_search_interceptor(
-    key_code: KeyCode,
-    is_searching: &mut bool,
-    search_query: &mut String,
-) -> bool {
-    if let Some(action) = map_search_key_to_browser_action(key_code, *is_searching) {
-        let reduced = reduce_browser_action(action, is_searching, search_query);
-        reduced.consumed
-    } else {
-        false
-    }
-}
-
 fn map_download_name_edit_key_to_action(key_code: KeyCode) -> BrowserDownloadEditAction {
     match key_code {
         KeyCode::Enter => BrowserDownloadEditAction::Commit,
@@ -1177,66 +1164,6 @@ pub fn reduce_browser_download_action(
     }
 
     BrowserDownloadReduceResult { consumed: false }
-}
-
-pub fn handle_download_name_edit_guard(
-    key_code: KeyCode,
-    browser_mode: &mut FileBrowserMode,
-) -> bool {
-    if let FileBrowserMode::DownloadLocSelection {
-        container_name,
-        is_editing_name,
-        cursor_pos,
-        original_name_backup,
-        ..
-    } = browser_mode
-    {
-        if !*is_editing_name {
-            return false;
-        }
-
-        let action = map_download_name_edit_key_to_action(key_code);
-        let reduced = reduce_download_name_edit_action(
-            action,
-            container_name,
-            is_editing_name,
-            cursor_pos,
-            original_name_backup,
-        );
-        return reduced.consumed;
-    }
-
-    false
-}
-
-pub fn handle_download_shortcuts(key_code: KeyCode, browser_mode: &mut FileBrowserMode) -> bool {
-    if let FileBrowserMode::DownloadLocSelection {
-        container_name,
-        use_container,
-        is_editing_name,
-        focused_pane,
-        cursor_pos,
-        original_name_backup,
-        ..
-    } = browser_mode
-    {
-        if let Some(action) = map_download_shortcut_key_to_action(key_code, *use_container) {
-            let reduced = reduce_download_shortcut_action(
-                action,
-                container_name,
-                use_container,
-                is_editing_name,
-                focused_pane,
-                cursor_pos,
-                original_name_backup,
-            );
-            reduced.consumed
-        } else {
-            false
-        }
-    } else {
-        false
-    }
 }
 
 pub fn has_preview_content(
@@ -1755,11 +1682,13 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn search_interceptor_clears_on_escape() {
+    fn search_reducer_clears_on_escape() {
         let mut is_searching = true;
         let mut query = String::from("abc");
-        let consumed = handle_search_interceptor(KeyCode::Esc, &mut is_searching, &mut query);
-        assert!(consumed);
+        let action = map_search_key_to_browser_action(KeyCode::Esc, is_searching)
+            .expect("expected search action");
+        let out = reduce_browser_action(action, &mut is_searching, &mut query);
+        assert!(out.consumed);
         assert!(!is_searching);
         assert!(query.is_empty());
     }
@@ -1851,7 +1780,7 @@ mod tests {
     }
 
     #[test]
-    fn name_edit_guard_updates_buffer_and_cursor() {
+    fn reducer_download_edit_insert_updates_buffer_and_cursor() {
         let mut mode = FileBrowserMode::DownloadLocSelection {
             torrent_files: vec![],
             container_name: "ab".to_string(),
@@ -1870,8 +1799,11 @@ mod tests {
             original_name_backup: "ab".to_string(),
         };
 
-        let consumed = handle_download_name_edit_guard(KeyCode::Char('c'), &mut mode);
-        assert!(consumed);
+        let out = reduce_browser_download_action(
+            BrowserDownloadAction::Edit(BrowserDownloadEditAction::Insert('c')),
+            &mut mode,
+        );
+        assert!(out.consumed);
         match mode {
             FileBrowserMode::DownloadLocSelection {
                 container_name,
@@ -2003,12 +1935,15 @@ mod tests {
             selected_index: 0,
             items: vec![],
         };
-        let consumed = handle_download_name_edit_guard(KeyCode::Char('x'), &mut mode);
-        assert!(!consumed);
+        let out = reduce_browser_download_action(
+            BrowserDownloadAction::Edit(BrowserDownloadEditAction::Insert('x')),
+            &mut mode,
+        );
+        assert!(!out.consumed);
     }
 
     #[test]
-    fn download_shortcuts_toggle_pane() {
+    fn reducer_download_shortcuts_toggle_pane() {
         let mut mode = FileBrowserMode::DownloadLocSelection {
             torrent_files: vec![],
             container_name: "x".to_string(),
@@ -2020,8 +1955,11 @@ mod tests {
             cursor_pos: 1,
             original_name_backup: "x".to_string(),
         };
-        let consumed = handle_download_shortcuts(KeyCode::Tab, &mut mode);
-        assert!(consumed);
+        let out = reduce_browser_download_action(
+            BrowserDownloadAction::Shortcut(BrowserDownloadShortcutAction::TogglePane),
+            &mut mode,
+        );
+        assert!(out.consumed);
         match mode {
             FileBrowserMode::DownloadLocSelection { focused_pane, .. } => {
                 assert_eq!(focused_pane, BrowserPane::TorrentPreview);
