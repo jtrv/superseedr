@@ -130,6 +130,12 @@ This plan is incremental, parity-driven, and includes manual testing after each 
 4. Verify config and delete-confirm flows parity.
 
 ## Phase 4: `UiAction` + Reducer + Effects Pipeline
+### Status
+- In progress:
+  - Normal screen has initial `UiAction`/`UiEffect`/`ReduceResult` scaffold.
+  - A first key subset (`Esc`, `/`, arrow/vim navigation) now flows through reducer in `normal.rs`.
+  - Reducer unit tests added for search start, error clear, and navigation selection changes.
+
 ### Steps
 1. Add `UiAction`, `UiEffect`, `ReduceResult`.
 2. Implement reducer for `Normal` screen first.

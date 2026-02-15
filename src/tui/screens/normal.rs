@@ -55,6 +55,65 @@ static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SECONDS_HISTORY_MAX: usize = 3600;
 const MINUTES_HISTORY_MAX: usize = 48 * 60;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UiAction {
+    ClearSystemError,
+    StartSearch,
+    Navigate(KeyCode),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UiEffect {}
+
+#[derive(Default)]
+pub struct ReduceResult {
+    pub redraw: bool,
+    pub effects: Vec<UiEffect>,
+}
+
+pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceResult {
+    match action {
+        UiAction::ClearSystemError => {
+            app_state.system_error = None;
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::StartSearch => {
+            app_state.ui.is_searching = true;
+            app_state.ui.selected_torrent_index = 0;
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::Navigate(key_code) => {
+            handle_navigation(app_state, key_code);
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+    }
+}
+
+fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
+    match key_code {
+        KeyCode::Esc => Some(UiAction::ClearSystemError),
+        KeyCode::Char('/') => Some(UiAction::StartSearch),
+        KeyCode::Up
+        | KeyCode::Char('k')
+        | KeyCode::Down
+        | KeyCode::Char('j')
+        | KeyCode::Left
+        | KeyCode::Char('h')
+        | KeyCode::Right
+        | KeyCode::Char('l') => Some(UiAction::Navigate(key_code)),
+        _ => None,
+    }
+}
+
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
     let app_state = screen.app.state;
     let settings = screen.settings;
@@ -2994,14 +3053,18 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     match event {
         CrosstermEvent::Key(key) => {
             if key.kind == KeyEventKind::Press {
+                if let Some(action) = map_key_to_ui_action(key.code) {
+                    let result = reduce_ui_action(&mut app.app_state, action);
+                    if result.redraw {
+                        app.app_state.ui.needs_redraw = true;
+                    }
+                    for _effect in result.effects {
+                        // Effects pipeline starts in Phase 4; no normal-screen effects emitted yet.
+                    }
+                    return;
+                }
+
                 match key.code {
-                    KeyCode::Esc => {
-                        app.app_state.system_error = None;
-                    }
-                    KeyCode::Char('/') => {
-                        app.app_state.ui.is_searching = true;
-                        app.app_state.ui.selected_torrent_index = 0;
-                    }
                     KeyCode::Char('x') => {
                         app.app_state.anonymize_torrent_names = !app.app_state.anonymize_torrent_names;
                     }
@@ -3186,16 +3249,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         };
                     }
-                    KeyCode::Up
-                    | KeyCode::Char('k')
-                    | KeyCode::Down
-                    | KeyCode::Char('j')
-                    | KeyCode::Left
-                    | KeyCode::Char('h')
-                    | KeyCode::Right
-                    | KeyCode::Char('l') => {
-                        handle_navigation(&mut app.app_state, key.code);
-                    }
                     #[cfg(windows)]
                     KeyCode::Char('v') => match ClipboardContext::new() {
                         Ok(mut ctx) => match ctx.get_contents() {
@@ -3222,5 +3275,89 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             handle_pasted_text(app, pasted_text.trim()).await;
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics};
+
+    fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
+        let mut metrics = TorrentMetrics::default();
+        let mut peers = Vec::new();
+        for i in 0..peer_count {
+            peers.push(PeerInfo {
+                address: format!("127.0.0.1:{}", 6881 + i),
+                ..Default::default()
+            });
+        }
+        metrics.peers = peers;
+        metrics
+    }
+
+    fn create_mock_display_state(peer_count: usize) -> TorrentDisplayState {
+        TorrentDisplayState {
+            latest_state: create_mock_metrics(peer_count),
+            ..Default::default()
+        }
+    }
+
+    fn create_test_app_state() -> AppState {
+        let mut app_state = AppState {
+            screen_area: ratatui::layout::Rect::new(0, 0, 200, 100),
+            ..Default::default()
+        };
+
+        let torrent_a = create_mock_display_state(2);
+        let torrent_b = create_mock_display_state(0);
+
+        app_state
+            .torrents
+            .insert("hash_a".as_bytes().to_vec(), torrent_a);
+        app_state
+            .torrents
+            .insert("hash_b".as_bytes().to_vec(), torrent_b);
+        app_state.torrent_list_order =
+            vec!["hash_a".as_bytes().to_vec(), "hash_b".as_bytes().to_vec()];
+
+        app_state
+    }
+
+    #[test]
+    fn reducer_start_search_sets_search_and_resets_selection() {
+        let mut app_state = AppState::default();
+        app_state.ui.is_searching = false;
+        app_state.ui.selected_torrent_index = 7;
+
+        let result = reduce_ui_action(&mut app_state, UiAction::StartSearch);
+
+        assert!(result.redraw);
+        assert!(app_state.ui.is_searching);
+        assert_eq!(app_state.ui.selected_torrent_index, 0);
+    }
+
+    #[test]
+    fn reducer_clear_system_error_clears_error() {
+        let mut app_state = AppState::default();
+        app_state.system_error = Some("boom".to_string());
+
+        let result = reduce_ui_action(&mut app_state, UiAction::ClearSystemError);
+
+        assert!(result.redraw);
+        assert!(app_state.system_error.is_none());
+    }
+
+    #[test]
+    fn reducer_navigate_updates_selection() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Torrent(0);
+
+        let result = reduce_ui_action(&mut app_state, UiAction::Navigate(KeyCode::Down));
+
+        assert!(result.redraw);
+        assert_eq!(app_state.ui.selected_torrent_index, 1);
+        assert_eq!(app_state.ui.selected_peer_index, 0);
     }
 }
