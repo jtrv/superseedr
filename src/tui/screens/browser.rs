@@ -1280,34 +1280,6 @@ pub fn reduce_browser_preview_action(
     }
 }
 
-pub fn apply_preview_navigation(
-    key_code: KeyCode,
-    preview_state: &mut TreeViewState,
-    preview_tree: &mut [RawNode<TorrentPreviewPayload>],
-    list_height: usize,
-) -> bool {
-    let action = match key_code {
-        KeyCode::Up | KeyCode::Char('k') => Some(TreeAction::Up),
-        KeyCode::Down | KeyCode::Char('j') => Some(TreeAction::Down),
-        KeyCode::Left | KeyCode::Char('h') => Some(TreeAction::Left),
-        KeyCode::Right | KeyCode::Char('l') => Some(TreeAction::Right),
-        _ => None,
-    };
-
-    if let Some(action) = action {
-        TreeMathHelper::apply_action(
-            preview_state,
-            preview_tree,
-            action,
-            TreeFilter::default(),
-            list_height,
-        );
-        true
-    } else {
-        false
-    }
-}
-
 pub fn build_filter(
     browser_mode: &FileBrowserMode,
     search_query: &str,
@@ -1976,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_navigation_consumes_direction_key() {
+    fn preview_reducer_navigate_consumes_direction_key() {
         let mut tree = vec![RawNode {
             name: "root".to_string(),
             full_path: PathBuf::from("root"),
@@ -1993,12 +1965,14 @@ mod tests {
         let mut state = TreeViewState::default();
         state.expanded_paths.insert(PathBuf::from("root"));
         state.cursor_path = Some(PathBuf::from("root"));
-        assert!(apply_preview_navigation(
-            KeyCode::Down,
+        let out = reduce_browser_preview_action(
+            map_preview_key_to_action(KeyCode::Down),
             &mut state,
             &mut tree,
-            10
-        ));
+            Some(10),
+        );
+        assert!(out.consumed);
+        assert_eq!(state.cursor_path, Some(PathBuf::from("root/child")));
     }
 
     #[test]
