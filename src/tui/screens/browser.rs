@@ -3,8 +3,9 @@
 
 use crate::app::{
     AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata, FilePriority,
-    TorrentPreviewPayload,
+    TorrentDisplayState, TorrentPreviewPayload,
 };
+use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
@@ -13,7 +14,7 @@ use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Sender};
 
 pub struct DownloadConfirmPayload {
     pub base_path: PathBuf,
@@ -407,6 +408,33 @@ pub fn pending_link_info_hash(pending_torrent_link: &str) -> Option<Vec<u8>> {
     crate::app::parse_hybrid_hashes(pending_torrent_link).0
 }
 
+pub fn cleanup_pending_link_on_escape(
+    pending_torrent_link: &str,
+    torrent_manager_command_txs: &mut HashMap<Vec<u8>, Sender<ManagerCommand>>,
+    torrents: &mut HashMap<Vec<u8>, TorrentDisplayState>,
+    torrent_list_order: &mut Vec<Vec<u8>>,
+    async_delete: bool,
+) {
+    if let Some(info_hash) = pending_link_info_hash(pending_torrent_link) {
+        if async_delete {
+            if let Some(manager_tx) = torrent_manager_command_txs.get(&info_hash) {
+                let tx = manager_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tx.send(ManagerCommand::DeleteFile).await {
+                        tracing::error!("Failed to send DeleteFile to cancelled manager: {}", e);
+                    }
+                });
+            }
+            torrent_manager_command_txs.remove(&info_hash);
+        } else if let Some(manager_tx) = torrent_manager_command_txs.remove(&info_hash) {
+            let _ = manager_tx.try_send(ManagerCommand::DeleteFile);
+        }
+
+        torrents.remove(&info_hash);
+        torrent_list_order.retain(|h| h != &info_hash);
+    }
+}
+
 pub fn apply_priority_cycle(
     nodes: &mut [RawNode<TorrentPreviewPayload>],
     target_path: &Path,
@@ -588,6 +616,17 @@ mod tests {
     #[test]
     fn pending_link_hash_is_none_for_empty() {
         assert!(pending_link_info_hash("").is_none());
+    }
+
+    #[test]
+    fn cleanup_pending_link_is_noop_for_empty() {
+        let mut txs: HashMap<Vec<u8>, Sender<ManagerCommand>> = HashMap::new();
+        let mut torrents: HashMap<Vec<u8>, TorrentDisplayState> = HashMap::new();
+        let mut order = vec![];
+        cleanup_pending_link_on_escape("", &mut txs, &mut torrents, &mut order, false);
+        assert!(txs.is_empty());
+        assert!(torrents.is_empty());
+        assert!(order.is_empty());
     }
 
     #[test]
