@@ -711,25 +711,19 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
 
                 if let BrowserPane::TorrentPreview = focused_pane {
-                    if let Some(list_height) = calculate_preview_list_height(
+                    let list_height = calculate_preview_list_height(
                         app.app_state.screen_area,
                         app.app_state.ui.is_searching,
                         focused_pane,
                         *use_container,
-                    ) {
-                        if !apply_preview_navigation(
-                            key.code,
-                            preview_state,
-                            preview_tree,
-                            list_height,
-                        ) && key.code == KeyCode::Char(' ')
-                        {
-                            if let Some(t) = &preview_state.cursor_path {
-                                apply_priority_cycle(preview_tree, t);
-                            }
-                        }
-                    }
-                    if key.code != KeyCode::Char('Y') {
+                    );
+                    let reduced = reduce_browser_preview_action(
+                        map_preview_key_to_action(key.code),
+                        preview_state,
+                        preview_tree,
+                        list_height,
+                    );
+                    if reduced.consumed {
                         return;
                     }
                 }
@@ -880,6 +874,18 @@ pub enum BrowserDownloadAction {
 }
 
 pub struct BrowserDownloadReduceResult {
+    pub consumed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrowserPreviewAction {
+    ConfirmSelection,
+    Navigate(TreeAction),
+    CyclePriority,
+    Ignore,
+}
+
+pub struct BrowserPreviewReduceResult {
     pub consumed: bool,
 }
 
@@ -1301,6 +1307,50 @@ pub fn calculate_preview_list_height(
         let header_rows = if use_container { 2 } else { 1 };
         inner_height.saturating_sub(header_rows) as usize
     })
+}
+
+pub fn map_preview_key_to_action(key_code: KeyCode) -> BrowserPreviewAction {
+    match key_code {
+        KeyCode::Char('Y') => BrowserPreviewAction::ConfirmSelection,
+        KeyCode::Up | KeyCode::Char('k') => BrowserPreviewAction::Navigate(TreeAction::Up),
+        KeyCode::Down | KeyCode::Char('j') => BrowserPreviewAction::Navigate(TreeAction::Down),
+        KeyCode::Left | KeyCode::Char('h') => BrowserPreviewAction::Navigate(TreeAction::Left),
+        KeyCode::Right | KeyCode::Char('l') => BrowserPreviewAction::Navigate(TreeAction::Right),
+        KeyCode::Char(' ') => BrowserPreviewAction::CyclePriority,
+        _ => BrowserPreviewAction::Ignore,
+    }
+}
+
+pub fn reduce_browser_preview_action(
+    action: BrowserPreviewAction,
+    preview_state: &mut TreeViewState,
+    preview_tree: &mut [RawNode<TorrentPreviewPayload>],
+    list_height: Option<usize>,
+) -> BrowserPreviewReduceResult {
+    match action {
+        BrowserPreviewAction::ConfirmSelection => BrowserPreviewReduceResult { consumed: false },
+        BrowserPreviewAction::Navigate(tree_action) => {
+            if let Some(height) = list_height {
+                TreeMathHelper::apply_action(
+                    preview_state,
+                    preview_tree,
+                    tree_action,
+                    TreeFilter::default(),
+                    height,
+                );
+            }
+            BrowserPreviewReduceResult { consumed: true }
+        }
+        BrowserPreviewAction::CyclePriority => {
+            if let Some(_height) = list_height {
+                if let Some(target) = &preview_state.cursor_path {
+                    apply_priority_cycle(preview_tree, target);
+                }
+            }
+            BrowserPreviewReduceResult { consumed: true }
+        }
+        BrowserPreviewAction::Ignore => BrowserPreviewReduceResult { consumed: true },
+    }
 }
 
 pub fn apply_preview_navigation(
@@ -2011,6 +2061,55 @@ mod tests {
             &mut tree,
             10
         ));
+    }
+
+    #[test]
+    fn preview_reducer_passes_through_confirm_key() {
+        let mut tree: Vec<RawNode<TorrentPreviewPayload>> = vec![];
+        let mut state = TreeViewState::default();
+        let out = reduce_browser_preview_action(
+            map_preview_key_to_action(KeyCode::Char('Y')),
+            &mut state,
+            &mut tree,
+            Some(10),
+        );
+        assert!(!out.consumed);
+    }
+
+    #[test]
+    fn preview_reducer_ignores_unknown_key_with_consume() {
+        let mut tree: Vec<RawNode<TorrentPreviewPayload>> = vec![];
+        let mut state = TreeViewState::default();
+        let out = reduce_browser_preview_action(
+            map_preview_key_to_action(KeyCode::Char('z')),
+            &mut state,
+            &mut tree,
+            Some(10),
+        );
+        assert!(out.consumed);
+    }
+
+    #[test]
+    fn preview_reducer_cycles_priority_on_space() {
+        let mut tree = vec![RawNode {
+            name: "root".to_string(),
+            full_path: PathBuf::from("root"),
+            children: vec![],
+            payload: TorrentPreviewPayload::default(),
+            is_dir: true,
+        }];
+        let mut state = TreeViewState::default();
+        state.cursor_path = Some(PathBuf::from("root"));
+
+        let out = reduce_browser_preview_action(
+            map_preview_key_to_action(KeyCode::Char(' ')),
+            &mut state,
+            &mut tree,
+            Some(10),
+        );
+
+        assert!(out.consumed);
+        assert_eq!(tree[0].payload.priority, FilePriority::Skip);
     }
 
     #[test]
