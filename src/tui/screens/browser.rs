@@ -22,6 +22,13 @@ pub struct DownloadConfirmPayload {
     pub file_priorities: HashMap<usize, FilePriority>,
 }
 
+pub enum ConfirmDecision {
+    ToConfig(AppMode),
+    Download(DownloadConfirmPayload),
+    File(PathBuf),
+    None,
+}
+
 pub fn handle_search_interceptor(
     key_code: KeyCode,
     is_searching: &mut bool,
@@ -369,6 +376,19 @@ pub fn selected_torrent_file_for_confirm(
     None
 }
 
+pub fn resolve_confirm_decision(state: &TreeViewState, browser_mode: &FileBrowserMode) -> ConfirmDecision {
+    if let Some(mode) = confirm_config_path_selection(state, browser_mode) {
+        return ConfirmDecision::ToConfig(mode);
+    }
+    if let Some(payload) = build_download_confirm_payload(state, browser_mode) {
+        return ConfirmDecision::Download(payload);
+    }
+    if let Some(path) = selected_torrent_file_for_confirm(state, browser_mode) {
+        return ConfirmDecision::File(path);
+    }
+    ConfirmDecision::None
+}
+
 pub fn build_download_confirm_payload(
     state: &TreeViewState,
     browser_mode: &FileBrowserMode,
@@ -611,6 +631,22 @@ mod tests {
         };
         let out = confirm_config_path_selection(&state, &mode);
         assert!(matches!(out, Some(AppMode::Config { .. })));
+    }
+
+    #[test]
+    fn resolve_confirm_decision_prefers_config_path_mode() {
+        let mode = FileBrowserMode::ConfigPathSelection {
+            target_item: ConfigItem::WatchFolder,
+            current_settings: Box::default(),
+            selected_index: 0,
+            items: vec![ConfigItem::WatchFolder],
+        };
+        let state = TreeViewState {
+            current_path: PathBuf::from("/tmp"),
+            ..Default::default()
+        };
+        let decision = resolve_confirm_decision(&state, &mode);
+        assert!(matches!(decision, ConfirmDecision::ToConfig(AppMode::Config { .. })));
     }
 
     #[test]
