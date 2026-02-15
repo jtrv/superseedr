@@ -1368,8 +1368,13 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics};
+    use crate::app::{
+        AppState, FilePriority, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics,
+        TorrentPreviewPayload,
+    };
+    use crate::tui::tree::RawNode;
     use ratatui::crossterm::event::KeyCode;
+    use std::path::PathBuf;
 
     /// Creates a mock TorrentMetrics with a specific number of peers.
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
@@ -1571,5 +1576,52 @@ mod tests {
         handle_navigation(&mut app_state, KeyCode::Right);
 
         assert_eq!(app_state.selected_header, SelectedHeader::Peer(0));
+    }
+
+    #[test]
+    fn test_apply_priority_action_cycles_target_and_children() {
+        let mut nodes = vec![RawNode {
+            name: "root".to_string(),
+            full_path: PathBuf::from("root"),
+            is_dir: true,
+            payload: TorrentPreviewPayload::default(),
+            children: vec![RawNode {
+                name: "leaf.bin".to_string(),
+                full_path: PathBuf::from("root/leaf.bin"),
+                is_dir: false,
+                payload: TorrentPreviewPayload::default(),
+                children: vec![],
+            }],
+        }];
+
+        let changed = apply_priority_action(
+            &mut nodes,
+            &PathBuf::from("root"),
+            PriorityAction::Cycle,
+        );
+
+        assert!(changed);
+        assert_eq!(nodes[0].payload.priority, FilePriority::Skip);
+        assert_eq!(nodes[0].children[0].payload.priority, FilePriority::Skip);
+    }
+
+    #[test]
+    fn test_apply_priority_action_returns_false_for_missing_path() {
+        let mut nodes = vec![RawNode {
+            name: "root".to_string(),
+            full_path: PathBuf::from("root"),
+            is_dir: true,
+            payload: TorrentPreviewPayload::default(),
+            children: vec![],
+        }];
+
+        let changed = apply_priority_action(
+            &mut nodes,
+            &PathBuf::from("missing"),
+            PriorityAction::Cycle,
+        );
+
+        assert!(!changed);
+        assert_eq!(nodes[0].payload.priority, FilePriority::Normal);
     }
 }
