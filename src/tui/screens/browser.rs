@@ -9,7 +9,7 @@ use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
-use ratatui::crossterm::event::KeyCode;
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,6 +20,140 @@ pub struct DownloadConfirmPayload {
     pub base_path: PathBuf,
     pub container_name_to_use: Option<String>,
     pub file_priorities: HashMap<usize, FilePriority>,
+}
+
+pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
+    let AppMode::FileBrowser {
+        state,
+        data,
+        browser_mode,
+    } = &mut app.app_state.mode
+    else {
+        return;
+    };
+
+    if let CrosstermEvent::Key(key) = event {
+        if key.kind == KeyEventKind::Press {
+            if handle_search_interceptor(
+                key.code,
+                &mut app.app_state.is_searching,
+                &mut app.app_state.search_query,
+            ) {
+                return;
+            }
+
+            if handle_download_name_edit_guard(key.code, browser_mode) {
+                return;
+            }
+            if handle_download_shortcuts(key.code, browser_mode) {
+                return;
+            }
+
+            if let FileBrowserMode::DownloadLocSelection {
+                use_container,
+                focused_pane,
+                preview_tree,
+                preview_state,
+                ..
+            } = browser_mode
+            {
+                if key.code == KeyCode::Esc {
+                    if !app.app_state.pending_torrent_link.is_empty() {
+                        cleanup_pending_link_on_escape(
+                            &app.app_state.pending_torrent_link,
+                            &mut app.torrent_manager_command_txs,
+                            &mut app.app_state.torrents,
+                            &mut app.app_state.torrent_list_order,
+                            true,
+                        );
+                    }
+
+                    app.app_state.mode = AppMode::Normal;
+                    app.app_state.pending_torrent_path = None;
+                    app.app_state.pending_torrent_link.clear();
+                    return;
+                }
+
+                if let BrowserPane::TorrentPreview = focused_pane {
+                    if let Some(list_height) = calculate_preview_list_height(
+                        app.app_state.screen_area,
+                        app.app_state.is_searching,
+                        focused_pane,
+                        *use_container,
+                    ) {
+                        if !apply_preview_navigation(key.code, preview_state, preview_tree, list_height)
+                            && key.code == KeyCode::Char(' ')
+                        {
+                            if let Some(t) = &preview_state.cursor_path {
+                                apply_priority_cycle(preview_tree, t);
+                            }
+                        }
+                    }
+                    if key.code != KeyCode::Char('Y') {
+                        return;
+                    }
+                }
+            }
+
+            let has_preview_content = has_preview_content(
+                browser_mode,
+                app.app_state.pending_torrent_path.is_some(),
+                !app.app_state.pending_torrent_link.is_empty(),
+                state.cursor_path.as_ref(),
+            );
+            let focused_pane = focused_pane(browser_mode);
+            let list_height = calculate_list_height(
+                app.app_state.screen_area,
+                has_preview_content,
+                app.app_state.is_searching,
+                &focused_pane,
+            );
+            match key.code {
+                key_code
+                    if handle_filesystem_navigation(
+                        key_code,
+                        state,
+                        data,
+                        browser_mode,
+                        &mut app.app_state.is_searching,
+                        &mut app.app_state.search_query,
+                        list_height,
+                        &app.app_command_tx,
+                    ) => {}
+                KeyCode::Char('Y') => {
+                    let decision = resolve_confirm_decision(state, browser_mode);
+                    execute_confirm_decision(app, decision).await;
+                    app.app_state.is_searching = false;
+                    app.app_state.search_query.clear();
+                }
+                KeyCode::Esc => {
+                    if let Some(mode) = escape_to_config_mode(browser_mode) {
+                        app.app_state.mode = mode;
+                        return;
+                    }
+
+                    if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
+                        if !app.app_state.pending_torrent_link.is_empty() {
+                            cleanup_pending_link_on_escape(
+                                &app.app_state.pending_torrent_link,
+                                &mut app.torrent_manager_command_txs,
+                                &mut app.app_state.torrents,
+                                &mut app.app_state.torrent_list_order,
+                                false,
+                            );
+                        }
+                    }
+
+                    app.app_state.is_searching = false;
+                    app.app_state.search_query.clear();
+                    app.app_state.mode = AppMode::Normal;
+                    app.app_state.pending_torrent_path = None;
+                    app.app_state.pending_torrent_link.clear();
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 pub enum ConfirmDecision {
