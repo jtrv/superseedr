@@ -1,11 +1,15 @@
 # TUI Architecture (Current)
 
 ## Module Layout
-- `src/tui/view.rs`: top-level draw dispatcher and shared post-processing (theme effects).
+- `src/tui/view.rs`: top-level draw dispatcher.
 - `src/tui/events.rs`: top-level input dispatcher and cross-cutting key handling.
+- `src/tui/effects.rs`: post-draw theme effect pass + effect activity speed helper.
 - `src/tui/screen_context.rs`: read-only draw context (`ScreenContext`, `AppViewModel`).
 - `src/tui/screens/*.rs`: per-screen draw + event handling.
-- `src/tui/layout.rs`: layout planning helpers.
+- `src/tui/layout.rs`: layout module root.
+- `src/tui/layout/normal.rs`: normal screen layout planner (`calculate_layout`).
+- `src/tui/layout/browser.rs`: browser screen layout planner (`calculate_file_browser_layout`).
+- `src/tui/layout/common.rs`: shared table/column layout helpers.
 - `src/tui/tree.rs`: tree navigation/filtering helpers.
 - `src/tui/formatters.rs`: rendering format helpers.
 
@@ -56,3 +60,18 @@
 - `show_help` remains a global overlay flag (not a dedicated `AppMode` yet).
 - Windows: `m` press toggles help.
 - Non-Windows: `m` press opens, `m` release closes, `Esc` closes.
+
+## Invariants
+- Reducers are deterministic and side-effect free; side effects execute via effect runners.
+- `events.rs` stays staged and thin: resize handling, Esc debounce, global hooks, then mode dispatch.
+- Screen `handle_event` entrypoints stay thin and delegate to per-screen reducer/mapping helpers.
+- Layout planners are pure functions from geometry/context to `LayoutPlan` values.
+- Draw functions read from state and context, and do not mutate core app/domain state.
+
+## Extension Guide (New Screen)
+1. Add `src/tui/screens/<screen>.rs` with `draw` and `handle_event` entrypoints.
+2. Keep `handle_event` as staged dispatch: `map input -> reduce action -> execute effects`.
+3. Add a per-screen layout planner under `src/tui/layout/<screen>.rs` if layout is non-trivial.
+4. Keep reusable table/column logic in `src/tui/layout/common.rs`.
+5. Wire dispatch in `src/tui/events.rs` and rendering in `src/tui/view.rs`.
+6. Add reducer/mapping unit tests and at least one transition/behavior regression test.
