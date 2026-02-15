@@ -269,25 +269,13 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 &app.app_command_tx,
                             ) => {}
                         KeyCode::Char('Y') => {
-                            if let Some(mode) = browser::confirm_config_path_selection(state, browser_mode) {
-                                tracing::info!(target: "superseedr", "Confirming Config Path Selection");
-                                app.app_state.mode = mode;
-                            } else {
-                                match browser_mode {
-                                    FileBrowserMode::DownloadLocSelection {
-                                    ..
-                                    } => {
-                                    let Some(payload) =
-                                        browser::build_download_confirm_payload(state, browser_mode)
-                                    else {
-                                        app.app_state.is_searching = false;
-                                        app.app_state.search_query.clear();
-                                        return;
-                                    };
-
-                                    if let Some(pending_path) =
-                                        app.app_state.pending_torrent_path.take()
-                                    {
+                            match browser::resolve_confirm_decision(state, browser_mode) {
+                                browser::ConfirmDecision::ToConfig(mode) => {
+                                    tracing::info!(target: "superseedr", "Confirming Config Path Selection");
+                                    app.app_state.mode = mode;
+                                }
+                                browser::ConfirmDecision::Download(payload) => {
+                                    if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
                                         app.add_torrent_from_file(
                                             pending_path,
                                             Some(payload.base_path.clone()),
@@ -312,30 +300,22 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     } else {
                                         tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
                                     }
-
                                     app.app_state.mode = AppMode::Normal;
-                                    }
-
-                                    FileBrowserMode::File(_) => {
-                                        if let Some(path) =
-                                            browser::selected_torrent_file_for_confirm(state, browser_mode)
-                                        {
-                                            if path
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .is_some_and(|name| name.ends_with(".torrent"))
-                                            {
-                                                let _ = app
-                                                    .app_command_tx
-                                                    .send(AppCommand::AddTorrentFromFile(path))
-                                                    .await;
-                                            }
-                                            app.app_state.mode = AppMode::Normal;
-                                        }
-                                    }
-
-                                    _ => {}
                                 }
+                                browser::ConfirmDecision::File(path) => {
+                                    if path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .is_some_and(|name| name.ends_with(".torrent"))
+                                    {
+                                        let _ = app
+                                            .app_command_tx
+                                            .send(AppCommand::AddTorrentFromFile(path))
+                                            .await;
+                                    }
+                                    app.app_state.mode = AppMode::Normal;
+                                }
+                                browser::ConfirmDecision::None => {}
                             }
                             app.app_state.is_searching = false;
                             app.app_state.search_query.clear();
