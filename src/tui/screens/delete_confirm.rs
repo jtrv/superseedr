@@ -10,6 +10,63 @@ use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode};
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DeleteConfirmAction {
+    Confirm,
+    Cancel,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DeleteConfirmEffect {
+    SendManagerCommand {
+        info_hash: Vec<u8>,
+        with_files: bool,
+    },
+    MarkDeleting {
+        info_hash: Vec<u8>,
+    },
+}
+
+#[derive(Default)]
+pub struct DeleteConfirmReduceResult {
+    pub close_dialog: bool,
+    pub effects: Vec<DeleteConfirmEffect>,
+}
+
+fn map_key_to_delete_confirm_action(key_code: KeyCode) -> Option<DeleteConfirmAction> {
+    match key_code {
+        KeyCode::Enter => Some(DeleteConfirmAction::Confirm),
+        KeyCode::Esc => Some(DeleteConfirmAction::Cancel),
+        _ => None,
+    }
+}
+
+pub fn reduce_delete_confirm_action(
+    app_state: &crate::app::AppState,
+    action: DeleteConfirmAction,
+) -> DeleteConfirmReduceResult {
+    match action {
+        DeleteConfirmAction::Cancel => DeleteConfirmReduceResult {
+            close_dialog: true,
+            effects: Vec::new(),
+        },
+        DeleteConfirmAction::Confirm => {
+            let info_hash = app_state.ui.delete_confirm.info_hash.clone();
+            let with_files = app_state.ui.delete_confirm.with_files;
+            DeleteConfirmReduceResult {
+                close_dialog: true,
+                effects: vec![
+                    DeleteConfirmEffect::SendManagerCommand {
+                        info_hash: info_hash.clone(),
+                        with_files,
+                    },
+                    DeleteConfirmEffect::MarkDeleting { info_hash },
+                ],
+            }
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let app_state = screen.ui;
     let ctx = screen.theme;
@@ -129,30 +186,74 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
 pub fn handle_event(event: CrosstermEvent, app: &mut App) -> bool {
     if let CrosstermEvent::Key(key) = event {
-        let info_hash = app.app_state.ui.delete_confirm.info_hash.clone();
-        let with_files = app.app_state.ui.delete_confirm.with_files;
-        match key.code {
-            KeyCode::Enter => {
-                let command = if with_files {
-                    ManagerCommand::DeleteFile
-                } else {
-                    ManagerCommand::Shutdown
-                };
-                if let Some(manager_tx) = app.torrent_manager_command_txs.get(&info_hash) {
-                    let manager_tx_clone = manager_tx.clone();
-                    tokio::spawn(async move {
-                        let _ = manager_tx_clone.send(command).await;
-                    });
+        if let Some(action) = map_key_to_delete_confirm_action(key.code) {
+            let reduced = reduce_delete_confirm_action(&app.app_state, action);
+            for effect in reduced.effects {
+                match effect {
+                    DeleteConfirmEffect::SendManagerCommand {
+                        info_hash,
+                        with_files,
+                    } => {
+                        let command = if with_files {
+                            ManagerCommand::DeleteFile
+                        } else {
+                            ManagerCommand::Shutdown
+                        };
+                        if let Some(manager_tx) = app.torrent_manager_command_txs.get(&info_hash) {
+                            let manager_tx_clone = manager_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = manager_tx_clone.send(command).await;
+                            });
+                        }
+                    }
+                    DeleteConfirmEffect::MarkDeleting { info_hash } => {
+                        if let Some(torrent) = app.app_state.torrents.get_mut(&info_hash) {
+                            torrent.latest_state.torrent_control_state = TorrentControlState::Deleting;
+                        }
+                    }
                 }
-                if let Some(torrent) = app.app_state.torrents.get_mut(&info_hash) {
-                    torrent.latest_state.torrent_control_state = TorrentControlState::Deleting;
-                }
-                return true;
             }
-            KeyCode::Esc => return true,
-            _ => {}
+            return reduced.close_dialog;
         }
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppMode, AppState};
+
+    #[test]
+    fn reducer_cancel_closes_without_effects() {
+        let app_state = AppState::default();
+        let out = reduce_delete_confirm_action(&app_state, DeleteConfirmAction::Cancel);
+        assert!(out.close_dialog);
+        assert!(out.effects.is_empty());
+    }
+
+    #[test]
+    fn reducer_confirm_emits_command_and_mark_deleting() {
+        let mut app_state = AppState::default();
+        app_state.mode = AppMode::DeleteConfirm;
+        app_state.ui.delete_confirm.info_hash = b"abc".to_vec();
+        app_state.ui.delete_confirm.with_files = true;
+
+        let out = reduce_delete_confirm_action(&app_state, DeleteConfirmAction::Confirm);
+
+        assert!(out.close_dialog);
+        assert_eq!(out.effects.len(), 2);
+        assert!(matches!(
+            out.effects[0],
+            DeleteConfirmEffect::SendManagerCommand {
+                ref info_hash,
+                with_files: true
+            } if info_hash == b"abc"
+        ));
+        assert!(matches!(
+            out.effects[1],
+            DeleteConfirmEffect::MarkDeleting { ref info_hash } if info_hash == b"abc"
+        ));
+    }
 }
