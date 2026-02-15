@@ -11,7 +11,7 @@ use crate::theme::ThemeContext;
 
 use crate::tui::effects::apply_theme_effects_to_frame;
 use crate::tui::layout::common::{compute_smart_table_layout, SmartCol};
-use crate::tui::layout::normal::{calculate_layout, LayoutContext};
+use crate::tui::layout::normal::{calculate_layout, LayoutContext, DEFAULT_SIDEBAR_PERCENT};
 
 use crate::config::Settings;
 
@@ -68,7 +68,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
         _ => {}
     }
 
-    let layout_ctx = LayoutContext::new(area, app_state, 35);
+    let layout_ctx = LayoutContext::new(area, app_state, DEFAULT_SIDEBAR_PERCENT);
     let plan = calculate_layout(area, &layout_ctx);
 
     normal::draw(f, &screen, &plan);
@@ -147,7 +147,7 @@ pub(crate) fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::layout::normal::MIN_SIDEBAR_WIDTH;
+    use crate::tui::layout::normal::{DEFAULT_SIDEBAR_PERCENT, MIN_SIDEBAR_WIDTH};
     use ratatui::layout::Rect;
 
     /// Helper to create a LayoutContext manually since we don't want to mock AppState.
@@ -156,7 +156,7 @@ mod tests {
         LayoutContext {
             width,
             height,
-            settings_sidebar_percent: 35, // Default sidebar percentage
+            settings_sidebar_percent: DEFAULT_SIDEBAR_PERCENT,
         }
     }
 

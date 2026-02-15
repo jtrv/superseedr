@@ -6,6 +6,7 @@ use ratatui::prelude::{Constraint, Layout, Rect};
 
 pub const MIN_SIDEBAR_WIDTH: u16 = 25;
 pub const MIN_DETAILS_HEIGHT: u16 = 10;
+pub const DEFAULT_SIDEBAR_PERCENT: u16 = 50;
 
 #[derive(Default, Debug)]
 pub struct LayoutPlan {
