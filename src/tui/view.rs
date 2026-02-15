@@ -16,7 +16,7 @@ use crate::config::Settings;
 pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
 
-    let ctx = ThemeContext::new(app_state.theme, app_state.effects_phase_time);
+    let ctx = ThemeContext::new(app_state.theme, app_state.ui.effects_phase_time);
     let screen = ScreenContext::new(app_state, settings, &ctx);
 
     if app_state.show_help {

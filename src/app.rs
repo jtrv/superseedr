@@ -501,6 +501,14 @@ pub struct TorrentDisplayState {
 }
 
 #[derive(Default)]
+pub struct UiState {
+    pub needs_redraw: bool,
+    pub effects_phase_time: f64,
+    pub effects_last_wall_time: f64,
+    pub effects_speed_multiplier: f64,
+}
+
+#[derive(Default)]
 pub struct AppState {
     pub update_available: Option<String>,
     pub should_quit: bool,
@@ -562,12 +570,9 @@ pub struct AppState {
     pub read_iops: u32,
     pub write_iops: u32,
 
-    pub ui_needs_redraw: bool,
+    pub ui: UiState,
     pub data_rate: DataRate,
     pub theme: Theme,
-    pub effects_phase_time: f64,
-    pub effects_last_wall_time: f64,
-    pub effects_speed_multiplier: f64,
 
     pub selected_header: SelectedHeader,
     pub torrent_sort: (TorrentSortColumn, SortDirection),
@@ -686,7 +691,10 @@ impl App {
             system_warning,
             system_error: None,
             limits: limits.clone(),
-            ui_needs_redraw: true,
+            ui: UiState {
+                needs_redraw: true,
+                ..Default::default()
+            },
             theme: Theme::builtin(client_configs.ui_theme),
             torrent_sort: (
                 client_configs.torrent_sort_column,
@@ -817,7 +825,7 @@ impl App {
                 }
                 Some(event) = self.manager_event_rx.recv() => {
                     self.handle_manager_event(event);
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                 }
 
                 Some(command) = self.app_command_rx.recv() => {
@@ -836,7 +844,7 @@ impl App {
 
                 _ = stats_interval.tick() => {
                     self.calculate_stats(&mut sys);
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                 }
 
                 _ = tuning_interval.tick() => {
@@ -850,12 +858,12 @@ impl App {
                 _ = time::sleep_until(next_draw_time.into()) => {
                     next_draw_time = Instant::now() + current_target_framerate;
                     self.drain_latest_torrent_metrics();
-                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui_needs_redraw) {
+                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
                         self.tick_ui_effects_clock();
                         terminal.draw(|f| {
                             draw(f, &self.app_state, &self.client_configs);
                         })?;
-                        self.app_state.ui_needs_redraw = false;
+                        self.app_state.ui.needs_redraw = false;
                     }
                 }
                 _ = version_interval.tick() => {
@@ -908,15 +916,15 @@ impl App {
         let activity_speed_multiplier =
             compute_effects_activity_speed_multiplier(&self.app_state, &self.client_configs);
 
-        if self.app_state.effects_last_wall_time <= 0.0 {
-            self.app_state.effects_last_wall_time = frame_wall_time;
+        if self.app_state.ui.effects_last_wall_time <= 0.0 {
+            self.app_state.ui.effects_last_wall_time = frame_wall_time;
         }
 
         let frame_dt =
-            (frame_wall_time - self.app_state.effects_last_wall_time).clamp(0.0, 0.25);
-        self.app_state.effects_last_wall_time = frame_wall_time;
-        self.app_state.effects_speed_multiplier = activity_speed_multiplier;
-        self.app_state.effects_phase_time += frame_dt * activity_speed_multiplier;
+            (frame_wall_time - self.app_state.ui.effects_last_wall_time).clamp(0.0, 0.25);
+        self.app_state.ui.effects_last_wall_time = frame_wall_time;
+        self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
+        self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
     }
 
     fn startup_crossterm_event_listener(&mut self) {
@@ -1493,7 +1501,7 @@ impl App {
                             existing_data.first().map(|node| node.full_path.clone());
                     }
 
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                 }
             }
             AppCommand::UpdateConfig(new_settings) => {
@@ -1543,7 +1551,7 @@ impl App {
                 self.save_state_to_disk();
 
                 // 4. Force Redraw
-                self.app_state.ui_needs_redraw = true;
+                self.app_state.ui.needs_redraw = true;
             }
 
             AppCommand::UpdateVersionAvailable(latest_version) => {
@@ -1599,7 +1607,7 @@ impl App {
 
                 self.save_state_to_disk();
 
-                self.app_state.ui_needs_redraw = true;
+                self.app_state.ui.needs_redraw = true;
             }
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
                 if let AppMode::FileBrowser {
@@ -1661,7 +1669,7 @@ impl App {
                     }
 
                     // 7. Force UI redraw
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                     tracing::info!(target: "superseedr", "Magnet preview tree hydrated (first arrival)");
                 }
             }
@@ -1852,7 +1860,7 @@ impl App {
 
         if changed {
             self.sort_and_filter_torrent_list();
-            self.app_state.ui_needs_redraw = true;
+            self.app_state.ui.needs_redraw = true;
         }
     }
 

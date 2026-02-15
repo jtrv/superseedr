@@ -15,7 +15,7 @@ static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if let CrosstermEvent::Resize(w, h) = &event {
         app.app_state.screen_area = Rect::new(0, 0, *w, *h);
-        app.app_state.ui_needs_redraw = true;
+        app.app_state.ui.needs_redraw = true;
         return;
     }
 
@@ -39,14 +39,14 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
     if let CrosstermEvent::Key(key) = event {
         if key.kind == KeyEventKind::Press && normal::handle_search_key(key, app) {
-            app.app_state.ui_needs_redraw = true;
+            app.app_state.ui.needs_redraw = true;
             return;
         }
 
         if let help::HelpKeyResult::Consumed { redraw } = help::handle_key(key, &mut app.app_state)
         {
             if redraw {
-                app.app_state.ui_needs_redraw = true;
+                app.app_state.ui.needs_redraw = true;
             }
             return;
         }
@@ -54,7 +54,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
     if matches!(app.app_state.mode, AppMode::FileBrowser { .. }) {
         browser::handle_event(event, app).await;
-        app.app_state.ui_needs_redraw = true;
+        app.app_state.ui.needs_redraw = true;
         return;
     }
 
@@ -96,7 +96,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
         AppMode::FileBrowser { .. } => {}
     }
-    app.app_state.ui_needs_redraw = true;
+    app.app_state.ui.needs_redraw = true;
 }
 
 #[cfg(test)]
