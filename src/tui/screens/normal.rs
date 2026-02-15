@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::AppCommand;
+use crate::app::BrowserPane;
 use crate::app::FileBrowserMode;
 use crate::app::{App, AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::app::GraphDisplayMode;
@@ -9,7 +10,6 @@ use crate::config::Settings;
 use crate::config::SortDirection;
 use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
-use crate::tui::events::handle_pasted_text;
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
     format_latency, format_limit_bps, format_limit_delta, format_memory, format_permits_spans,
@@ -24,10 +24,13 @@ use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
 use crate::tui::layout::{PeerColumnId, SmartCol};
+use crate::tui::tree::TreeViewState;
 use crate::app::torrent_completion_percent;
 use crate::app::PeerInfo;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::collections::HashMap;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
@@ -44,7 +47,6 @@ use ratatui::widgets::{
 };
 use strum::IntoEnumIterator;
 use throbber_widgets_tui::Throbber;
-#[cfg(windows)]
 use tracing::{event as tracing_event, Level};
 
 static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -2890,6 +2892,73 @@ pub fn handle_search_key(key: ratatui::crossterm::event::KeyEvent, app: &mut App
     }
 
     true
+}
+
+async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
+    let pasted_text = pasted_text.trim();
+
+    if pasted_text.starts_with("magnet:") {
+        let download_path = app.client_configs.default_download_folder.clone();
+
+        app.add_magnet_torrent(
+            "Fetching name...".to_string(),
+            pasted_text.to_string(),
+            download_path.clone(),
+            false,
+            TorrentControlState::Running,
+            HashMap::new(),
+            None,
+        )
+        .await;
+
+        if download_path.is_none() {
+            app.app_state.pending_torrent_link = pasted_text.to_string();
+            let initial_path = app.get_initial_destination_path();
+            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                path: initial_path,
+                browser_mode: FileBrowserMode::DownloadLocSelection {
+                    torrent_files: vec![],
+                    container_name: String::new(),
+                    use_container: false,
+                    is_editing_name: false,
+                    focused_pane: BrowserPane::FileSystem,
+                    preview_tree: Vec::new(),
+                    preview_state: TreeViewState::default(),
+                    cursor_pos: 0,
+                    original_name_backup: "Magnet Download".to_string(),
+                },
+                highlight_path: None,
+            });
+        }
+    } else {
+        let path = Path::new(pasted_text);
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "torrent") {
+            if let Some(download_path) = app.client_configs.default_download_folder.clone() {
+                app.add_torrent_from_file(
+                    path.to_path_buf(),
+                    Some(download_path),
+                    false,
+                    TorrentControlState::Running,
+                    HashMap::new(),
+                    None,
+                )
+                .await;
+            } else {
+                let _ = app
+                    .app_command_tx
+                    .try_send(AppCommand::AddTorrentFromFile(path.to_path_buf()));
+            }
+        } else {
+            tracing_event!(
+                Level::WARN,
+                "Clipboard content not recognized as magnet link or torrent file: {}",
+                pasted_text
+            );
+            app.app_state.system_error = Some(
+                "Clipboard content not recognized as magnet link or torrent file.".to_string(),
+            );
+        }
+    }
 }
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {

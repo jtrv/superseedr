@@ -1,20 +1,12 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::AppCommand;
-use crate::app::FileBrowserMode;
-use crate::app::{App, AppMode, TorrentControlState};
-use crate::app::BrowserPane;
+use crate::app::{App, AppMode};
 
 use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
-use crate::tui::tree::TreeViewState;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::prelude::Rect;
-
-use std::collections::HashMap;
-use std::path::Path;
-use tracing::{event as tracing_event, Level};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -105,73 +97,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         AppMode::FileBrowser { .. } => {}
     }
     app.app_state.ui_needs_redraw = true;
-}
-
-pub(crate) async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
-    let pasted_text = pasted_text.trim();
-
-    if pasted_text.starts_with("magnet:") {
-        let download_path = app.client_configs.default_download_folder.clone();
-
-        app.add_magnet_torrent(
-            "Fetching name...".to_string(),
-            pasted_text.to_string(),
-            download_path.clone(),
-            false,
-            TorrentControlState::Running,
-            HashMap::new(),
-            None,
-        )
-        .await;
-
-        if download_path.is_none() {
-            app.app_state.pending_torrent_link = pasted_text.to_string();
-            let initial_path = app.get_initial_destination_path();
-            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                path: initial_path,
-                browser_mode: FileBrowserMode::DownloadLocSelection {
-                    torrent_files: vec![],
-                    container_name: String::new(),
-                    use_container: false,
-                    is_editing_name: false,
-                    focused_pane: BrowserPane::FileSystem,
-                    preview_tree: Vec::new(),
-                    preview_state: TreeViewState::default(),
-                    cursor_pos: 0,
-                    original_name_backup: "Magnet Download".to_string(),
-                },
-                highlight_path: None,
-            });
-        }
-    } else {
-        let path = Path::new(pasted_text);
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "torrent") {
-            if let Some(download_path) = app.client_configs.default_download_folder.clone() {
-                app.add_torrent_from_file(
-                    path.to_path_buf(),
-                    Some(download_path),
-                    false,
-                    TorrentControlState::Running,
-                    HashMap::new(),
-                    None,
-                )
-                .await;
-            } else {
-                let _ = app
-                    .app_command_tx
-                    .try_send(AppCommand::AddTorrentFromFile(path.to_path_buf()));
-            }
-        } else {
-            tracing_event!(
-                Level::WARN,
-                "Clipboard content not recognized as magnet link or torrent file: {}",
-                pasted_text
-            );
-            app.app_state.system_error = Some(
-                "Clipboard content not recognized as magnet link or torrent file.".to_string(),
-            );
-        }
-    }
 }
 
 #[cfg(test)]
