@@ -3057,7 +3057,8 @@ mod tests {
 
     #[test]
     fn extract_magnet_display_name_decodes_dn() {
-        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Ubuntu+24.04+ISO";
+        let magnet =
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Ubuntu+24.04+ISO";
         assert_eq!(
             extract_magnet_display_name(magnet),
             Some("Ubuntu 24.04 ISO".to_string())
