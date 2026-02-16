@@ -377,7 +377,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
         draw_peer_stream(f, app_state, r, ctx);
     }
     if let Some(r) = plan.block_stream {
-        draw_vertical_block_stream(f, app_state, r, ctx);
+        draw_block_stream_and_disk_orb(f, app_state, r, ctx);
     }
     if let Some(r) = plan.stats {
         draw_stats_panel(f, app_state, settings, r, ctx);
@@ -2232,13 +2232,163 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     f.render_widget(chart, area);
 }
 
-pub fn draw_vertical_block_stream(
+pub fn draw_block_stream_and_disk_orb(
     f: &mut Frame,
     app_state: &AppState,
     area: Rect,
     ctx: &ThemeContext,
 ) {
-    if area.width < 2 {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let split =
+        Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).split(area);
+    draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+    draw_disk_health_panel(f, app_state, split[1], ctx);
+}
+
+fn draw_vertical_block_stream_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let block = Block::default()
+        .title(Span::styled(
+            "Blocks",
+            ctx.apply(Style::default().fg(ctx.theme.scale.stream.inflow)),
+        ))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_vertical_block_stream_content(f, app_state, inner, ctx);
+}
+
+fn draw_disk_health_panel(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let block = Block::default()
+        .title(Span::styled(
+            "Disk",
+            ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
+        ))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_disk_health_orb(f, app_state, inner, ctx);
+}
+
+fn compute_throughput_gap(app_state: &AppState) -> f64 {
+    let net_total_bps = app_state.avg_download_history.last().copied().unwrap_or(0)
+        + app_state.avg_upload_history.last().copied().unwrap_or(0);
+    if net_total_bps == 0 {
+        return 0.0;
+    }
+    let disk_total_bps = app_state.avg_disk_read_bps + app_state.avg_disk_write_bps;
+    (net_total_bps.saturating_sub(disk_total_bps) as f64 / net_total_bps as f64).clamp(0.0, 1.0)
+}
+
+fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let health = app_state
+        .disk_health_ema
+        .max(app_state.disk_health_peak_hold)
+        .clamp(0.0, 1.0);
+    let gap = compute_throughput_gap(app_state);
+    let phase = app_state.disk_health_phase;
+
+    let orb_color = if health > 0.70 {
+        ctx.state_error()
+    } else if health > 0.35 {
+        ctx.state_warning()
+    } else {
+        ctx.state_success()
+    };
+
+    let max_square = area.width.min(area.height);
+    if max_square < 3 {
+        return;
+    }
+    let side = ((max_square as f32) * 0.72).round() as u16;
+    let side = side.clamp(3, max_square);
+    let orb_area = Rect::new(
+        area.x + (area.width.saturating_sub(side)) / 2,
+        area.y + (area.height.saturating_sub(side)) / 2,
+        side,
+        side,
+    );
+
+    let cells_w = orb_area.width as usize;
+    let cells_h = orb_area.height as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(cells_h);
+
+    const BRAILLE_BITS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+    for cy in 0..cells_h {
+        let mut row = String::with_capacity(cells_w);
+        for cx in 0..cells_w {
+            let mut bits: u8 = 0;
+            for sy in 0..4usize {
+                for sx in 0..2usize {
+                    let px = cx as f64 + (sx as f64 + 0.5) / 2.0;
+                    let py = cy as f64 + (sy as f64 + 0.5) / 4.0;
+
+                    let nx = ((px / cells_w as f64) - 0.5) * 2.0;
+                    let ny = ((py / cells_h as f64) - 0.5) * 2.0;
+
+                    let squeeze = if nx > 0.0 { 1.0 - (0.35 * gap) } else { 1.0 };
+                    let x = nx / squeeze.max(0.35);
+                    // Terminal cells are usually taller than they are wide; compensate to keep a round shape.
+                    let y = ny * (cells_w as f64 / cells_h as f64).clamp(0.6, 1.8) * 2.0;
+                    let theta = y.atan2(x);
+                    let dist = (x * x + y * y).sqrt();
+
+                    let deform = (0.04 + 0.18 * health) * f64::sin(2.0 * theta + phase)
+                        + (0.02 + 0.10 * health) * f64::sin(3.0 * theta - 0.7 * phase);
+                    let edge = 0.78 + deform;
+
+                    let shell_thickness = (0.11 - 0.03 * health).clamp(0.06, 0.12);
+                    let on_shell = (dist - edge).abs() <= shell_thickness;
+                    let fill_factor = (0.86 - 0.22 * health).clamp(0.58, 0.86);
+                    let in_fill = dist < edge * fill_factor;
+
+                    if on_shell || in_fill {
+                        bits |= BRAILLE_BITS[sy][sx];
+                    }
+                }
+            }
+            row.push(if bits == 0 {
+                ' '
+            } else {
+                char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
+            });
+        }
+        lines.push(Line::from(Span::styled(
+            row,
+            ctx.apply(Style::default().fg(orb_color)),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines), orb_area);
+}
+
+fn draw_vertical_block_stream_content(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    if area.width < 1 || area.height < 1 {
         return;
     }
     let selected_torrent = app_state
@@ -2246,66 +2396,20 @@ pub fn draw_vertical_block_stream(
         .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
+    let Some(torrent) = selected_torrent else {
+        return;
+    };
+
     const UP_TRIANGLE: &str = "▲";
     const DOWN_TRIANGLE: &str = "▼";
     const SEPARATOR: &str = "·";
 
     let color_inflow = ctx.theme.scale.stream.inflow;
     let color_outflow = ctx.theme.scale.stream.outflow;
-    let color_border = ctx.theme.semantic.border;
     let color_empty = ctx.theme.semantic.surface0;
 
-    let (total_in, total_out) = if let Some(t) = selected_torrent {
-        let in_sum: u64 = t.latest_state.blocks_in_history.iter().sum();
-        let out_sum: u64 = t.latest_state.blocks_out_history.iter().sum();
-        (in_sum, out_sum)
-    } else {
-        (0, 0)
-    };
-
-    let title_str = "Blocks";
-    let title_len = title_str.len();
-    let total_ops = total_in + total_out;
-
-    let title_spans: Vec<Span> = if total_ops == 0 {
-        vec![Span::styled(
-            title_str,
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-        )]
-    } else {
-        let blue_ratio = total_in as f64 / total_ops as f64;
-        let blue_chars = (blue_ratio * title_len as f64).round() as usize;
-        let (blue_part, green_part) = title_str.split_at(blue_chars.min(title_len));
-        let mut spans = Vec::new();
-        if !blue_part.is_empty() {
-            spans.push(Span::styled(
-                blue_part,
-                ctx.apply(Style::default().fg(color_inflow)),
-            ));
-        }
-        if !green_part.is_empty() {
-            spans.push(Span::styled(
-                green_part,
-                ctx.apply(Style::default().fg(color_outflow)),
-            ));
-        }
-        spans
-    };
-    let block = Block::default()
-        .title(Line::from(title_spans))
-        .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(color_border)));
-
-    let Some(torrent) = selected_torrent else {
-        f.render_widget(block, area);
-        return;
-    };
-
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
-
-    let history_len = inner_area.height as usize;
-    let content_width = inner_area.width as usize;
+    let history_len = area.height as usize;
+    let content_width = area.width as usize;
 
     if history_len == 0 || content_width == 0 {
         return;
@@ -2471,8 +2575,8 @@ pub fn draw_vertical_block_stream(
         }
         lines.push(Line::from(spans));
     }
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, inner_area);
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_sparkles<'a>(
