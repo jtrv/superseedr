@@ -2242,10 +2242,19 @@ pub fn draw_block_stream_and_disk_orb(
         return;
     }
 
-    let split =
-        Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).split(area);
-    draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
-    draw_disk_health_panel(f, app_state, split[1], ctx);
+    let is_vertical_mode = app_state.screen_area.width < 100
+        || (app_state.screen_area.height as f32 > app_state.screen_area.width as f32 * 0.6);
+    if is_vertical_mode {
+        let split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+        draw_disk_health_panel(f, app_state, split[1], ctx);
+    } else {
+        let split =
+            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
+        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+        draw_disk_health_panel(f, app_state, split[1], ctx);
+    }
 }
 
 fn draw_vertical_block_stream_panel(
@@ -2273,11 +2282,25 @@ fn draw_disk_health_panel(f: &mut Frame, app_state: &AppState, area: Rect, ctx: 
     if area.width < 2 || area.height < 2 {
         return;
     }
+    let disk_theme_color = ctx.theme.scale.categorical.teal;
+    let disk_state_word = match app_state.disk_health_state_level {
+        0 => "Stable",
+        1 => "Busy",
+        2 => "Strain",
+        _ => "Chaos",
+    };
     let block = Block::default()
-        .title(Span::styled(
+        .title_top(Span::styled(
             "Disk",
-            ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
+            ctx.apply(Style::default().fg(disk_theme_color).bold()),
         ))
+        .title_top(
+            Line::from(Span::styled(
+                disk_state_word,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+            ))
+            .alignment(Alignment::Right),
+        )
         .borders(Borders::ALL)
         .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
     let inner = block.inner(area);
@@ -2307,19 +2330,20 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let gap = compute_throughput_gap(app_state);
     let phase = app_state.disk_health_phase;
 
-    let orb_color = if health > 0.70 {
-        ctx.state_error()
+    let orb_color = ctx.theme.scale.categorical.teal;
+    let orb_style = if health > 0.70 {
+        ctx.apply(Style::default().fg(orb_color).bold())
     } else if health > 0.35 {
-        ctx.state_warning()
+        ctx.apply(Style::default().fg(orb_color))
     } else {
-        ctx.state_success()
+        ctx.apply(Style::default().fg(orb_color).dim())
     };
 
     let max_square = area.width.min(area.height);
     if max_square < 3 {
         return;
     }
-    let side = ((max_square as f32) * 0.72).round() as u16;
+    let side = ((max_square as f32) * 1.0).round() as u16;
     let side = side.clamp(3, max_square);
     let orb_area = Rect::new(
         area.x + (area.width.saturating_sub(side)) / 2,
@@ -2338,8 +2362,8 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         let mut row = String::with_capacity(cells_w);
         for cx in 0..cells_w {
             let mut bits: u8 = 0;
-            for sy in 0..4usize {
-                for sx in 0..2usize {
+            for (sy, braille_row) in BRAILLE_BITS.iter().enumerate() {
+                for (sx, &bit) in braille_row.iter().enumerate() {
                     let px = cx as f64 + (sx as f64 + 0.5) / 2.0;
                     let py = cy as f64 + (sy as f64 + 0.5) / 4.0;
 
@@ -2355,15 +2379,14 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
 
                     let deform = (0.04 + 0.18 * health) * f64::sin(2.0 * theta + phase)
                         + (0.02 + 0.10 * health) * f64::sin(3.0 * theta - 0.7 * phase);
-                    let edge = 0.78 + deform;
+                    let edge = 0.96 + deform;
 
-                    let shell_thickness = (0.11 - 0.03 * health).clamp(0.06, 0.12);
-                    let on_shell = (dist - edge).abs() <= shell_thickness;
-                    let fill_factor = (0.86 - 0.22 * health).clamp(0.58, 0.86);
-                    let in_fill = dist < edge * fill_factor;
+                    // Render as a solid blob (no hollow shell look).
+                    let fill_factor = (1.02 - 0.04 * health).clamp(0.94, 1.02);
+                    let in_blob = dist <= edge * fill_factor;
 
-                    if on_shell || in_fill {
-                        bits |= BRAILLE_BITS[sy][sx];
+                    if in_blob {
+                        bits |= bit;
                     }
                 }
             }
@@ -2373,10 +2396,7 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
                 char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
             });
         }
-        lines.push(Line::from(Span::styled(
-            row,
-            ctx.apply(Style::default().fg(orb_color)),
-        )));
+        lines.push(Line::from(Span::styled(row, orb_style)));
     }
 
     f.render_widget(Paragraph::new(lines), orb_area);

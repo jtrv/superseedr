@@ -613,6 +613,7 @@ pub struct AppState {
     pub disk_health_ema: f64,
     pub disk_health_phase: f64,
     pub disk_health_peak_hold: f64,
+    pub disk_health_state_level: u8,
 
     pub recently_processed_files: HashMap<PathBuf, Instant>,
 
@@ -943,7 +944,12 @@ impl App {
         self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
         self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
 
-        let disk_phase_speed = 0.8 + 2.0 * self.app_state.disk_health_ema.clamp(0.0, 1.0);
+        let disk_activity = self
+            .app_state
+            .disk_health_ema
+            .max(self.app_state.disk_health_peak_hold)
+            .clamp(0.0, 1.0);
+        let disk_phase_speed = 1.6 + 5.0 * disk_activity;
         self.app_state.disk_health_phase = (self.app_state.disk_health_phase
             + frame_dt * disk_phase_speed)
             .rem_euclid(std::f64::consts::TAU);

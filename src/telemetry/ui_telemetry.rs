@@ -447,6 +447,55 @@ fn compute_disk_health_raw(app_state: &AppState) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+fn compute_disk_state_score(app_state: &AppState) -> f64 {
+    let net_total_bps = app_state.avg_download_history.last().copied().unwrap_or(0)
+        + app_state.avg_upload_history.last().copied().unwrap_or(0);
+    let disk_total_bps = app_state.avg_disk_read_bps + app_state.avg_disk_write_bps;
+    let throughput_gap = if net_total_bps == 0 {
+        0.0
+    } else {
+        ((net_total_bps.saturating_sub(disk_total_bps)) as f64 / net_total_bps as f64)
+            .clamp(0.0, 1.0)
+    };
+    let thrash_norm = ((app_state.global_disk_thrash_score / app_state.adaptive_max_scpb.max(1.0))
+        .min(2.0)
+        / 2.0)
+        .clamp(0.0, 1.0);
+    let latency_ms = app_state
+        .avg_disk_read_latency
+        .max(app_state.avg_disk_write_latency)
+        .as_millis() as f64;
+    let latency_norm = ((latency_ms - 2.0) / (25.0 - 2.0)).clamp(0.0, 1.0);
+    let backoff_norm = (app_state.max_disk_backoff_this_tick_ms as f64 / 200.0).clamp(0.0, 1.0);
+
+    let mut score =
+        (0.40 * throughput_gap + 0.25 * thrash_norm + 0.20 * latency_norm + 0.15 * backoff_norm)
+            .clamp(0.0, 1.0);
+
+    if backoff_norm > 0.8 {
+        score = score.max(0.70);
+    }
+    if thrash_norm > 0.9 && throughput_gap > 0.5 {
+        score = score.max(0.80);
+    }
+    score
+}
+
+fn update_disk_health_state_level(app_state: &mut AppState) {
+    let score = compute_disk_state_score(app_state);
+    let mut level = app_state.disk_health_state_level.min(3);
+    const ENTER: [f64; 3] = [0.20, 0.60, 0.80];
+    const HYSTERESIS: f64 = 0.06;
+
+    while level < 3 && score >= ENTER[level as usize] + HYSTERESIS {
+        level += 1;
+    }
+    while level > 0 && score < ENTER[(level - 1) as usize] - HYSTERESIS {
+        level -= 1;
+    }
+    app_state.disk_health_state_level = level;
+}
+
 fn update_disk_health_state(app_state: &mut AppState) {
     let raw = compute_disk_health_raw(app_state);
     let prev_ema = app_state.disk_health_ema;
@@ -461,6 +510,7 @@ fn update_disk_health_state(app_state: &mut AppState) {
             .max(app_state.disk_health_ema)
             .max(0.0)
     };
+    update_disk_health_state_level(app_state);
 }
 
 fn calculate_thrash_score(history_log: &VecDeque<DiskIoOperation>) -> u64 {
@@ -523,7 +573,10 @@ fn aggregate_peers_to_availability(peers: &[PeerInfo], total_pieces: usize) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_disk_health_raw, update_disk_health_state, UiTelemetry};
+    use super::{
+        compute_disk_health_raw, update_disk_health_state, update_disk_health_state_level,
+        UiTelemetry,
+    };
     use crate::app::{AppState, PeerInfo, TorrentDisplayState, TorrentMetrics};
     use crate::telemetry::manager_telemetry::ManagerTelemetry;
     use std::collections::HashMap;
@@ -731,5 +784,32 @@ mod tests {
             app_state.disk_health_ema
         );
         assert!(app_state.disk_health_peak_hold >= app_state.disk_health_ema);
+    }
+
+    #[test]
+    fn disk_health_state_level_uses_hysteresis() {
+        let mut app_state = AppState {
+            disk_health_state_level: 0,
+            avg_download_history: vec![100_000_000],
+            avg_upload_history: vec![20_000_000],
+            avg_disk_read_bps: 20_000_000,
+            avg_disk_write_bps: 20_000_000,
+            global_disk_thrash_score: 18.0,
+            adaptive_max_scpb: 10.0,
+            avg_disk_write_latency: Duration::from_millis(20),
+            max_disk_backoff_this_tick_ms: 120,
+            ..Default::default()
+        };
+        update_disk_health_state_level(&mut app_state);
+        assert!(app_state.disk_health_state_level >= 2);
+
+        app_state.avg_disk_read_bps = 55_000_000;
+        app_state.avg_disk_write_bps = 55_000_000;
+        app_state.global_disk_thrash_score = 3.0;
+        app_state.avg_disk_write_latency = Duration::from_millis(7);
+        app_state.max_disk_backoff_this_tick_ms = 10;
+        let before = app_state.disk_health_state_level;
+        update_disk_health_state_level(&mut app_state);
+        assert!(app_state.disk_health_state_level <= before);
     }
 }

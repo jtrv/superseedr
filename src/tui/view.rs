@@ -301,8 +301,8 @@ mod tests {
         // Ensure stats and block stream are splitting the bottom area
         if let Some(bs) = plan.block_stream {
             assert_eq!(
-                bs.width, 14,
-                "Block stream has fixed width of 14 in wide mode"
+                bs.width, 17,
+                "Block stream has fixed width of 17 in wide mode"
             );
         }
     }
