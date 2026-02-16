@@ -879,10 +879,16 @@ pub enum BrowserDialogAction {
 
 pub enum BrowserDialogEffect {
     ExecuteConfirmDecision(ConfirmDecision),
-    SwitchToConfig(ConfigUiState),
+    ToConfig(ConfigUiState),
     CleanupPendingLink { async_delete: bool },
-    ExitToNormalAndClearPending,
+    ToNormalAndClearPending,
     ClearSearch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrowserTransition {
+    ToNormal,
+    ToConfig,
 }
 
 pub struct BrowserDialogReduceResult {
@@ -1412,7 +1418,7 @@ pub fn reduce_browser_dialog_action(
                 result.effects.push(BrowserDialogEffect::ClearSearch);
                 result
                     .effects
-                    .push(BrowserDialogEffect::SwitchToConfig(config_ui));
+                    .push(BrowserDialogEffect::ToConfig(config_ui));
                 return result;
             }
 
@@ -1429,7 +1435,7 @@ pub fn reduce_browser_dialog_action(
             result.effects.push(BrowserDialogEffect::ClearSearch);
             result
                 .effects
-                .push(BrowserDialogEffect::ExitToNormalAndClearPending);
+                .push(BrowserDialogEffect::ToNormalAndClearPending);
         }
         BrowserDialogAction::CancelDownloadSelection => {
             if has_pending_torrent_link {
@@ -1440,7 +1446,7 @@ pub fn reduce_browser_dialog_action(
             result.effects.push(BrowserDialogEffect::ClearSearch);
             result
                 .effects
-                .push(BrowserDialogEffect::ExitToNormalAndClearPending);
+                .push(BrowserDialogEffect::ToNormalAndClearPending);
         }
     }
 
@@ -1451,11 +1457,13 @@ pub async fn execute_browser_dialog_effects(app: &mut App, effects: Vec<BrowserD
     for effect in effects {
         match effect {
             BrowserDialogEffect::ExecuteConfirmDecision(decision) => {
-                execute_confirm_decision(app, decision).await;
+                if let Some(transition) = execute_confirm_decision(app, decision).await {
+                    apply_browser_transition(app, transition);
+                }
             }
-            BrowserDialogEffect::SwitchToConfig(config_ui) => {
+            BrowserDialogEffect::ToConfig(config_ui) => {
                 app.app_state.ui.config = config_ui;
-                app.app_state.mode = AppMode::Config;
+                apply_browser_transition(app, BrowserTransition::ToConfig);
             }
             BrowserDialogEffect::CleanupPendingLink { async_delete } => {
                 cleanup_pending_link_on_escape(
@@ -1466,8 +1474,8 @@ pub async fn execute_browser_dialog_effects(app: &mut App, effects: Vec<BrowserD
                     async_delete,
                 );
             }
-            BrowserDialogEffect::ExitToNormalAndClearPending => {
-                app.app_state.mode = AppMode::Normal;
+            BrowserDialogEffect::ToNormalAndClearPending => {
+                apply_browser_transition(app, BrowserTransition::ToNormal);
                 app.app_state.pending_torrent_path = None;
                 app.app_state.pending_torrent_link.clear();
             }
@@ -1476,6 +1484,13 @@ pub async fn execute_browser_dialog_effects(app: &mut App, effects: Vec<BrowserD
                 app.app_state.ui.file_browser.search_query.clear();
             }
         }
+    }
+}
+
+fn apply_browser_transition(app: &mut App, transition: BrowserTransition) {
+    match transition {
+        BrowserTransition::ToNormal => app.app_state.mode = AppMode::Normal,
+        BrowserTransition::ToConfig => app.app_state.mode = AppMode::Config,
     }
 }
 
@@ -1560,12 +1575,15 @@ pub fn resolve_confirm_decision(
     ConfirmDecision::None
 }
 
-pub async fn execute_confirm_decision(app: &mut App, decision: ConfirmDecision) {
+pub async fn execute_confirm_decision(
+    app: &mut App,
+    decision: ConfirmDecision,
+) -> Option<BrowserTransition> {
     match decision {
         ConfirmDecision::ToConfig(config_ui) => {
             tracing::info!(target: "superseedr", "Confirming Config Path Selection");
             app.app_state.ui.config = config_ui;
-            app.app_state.mode = AppMode::Config;
+            Some(BrowserTransition::ToConfig)
         }
         ConfirmDecision::Download(payload) => {
             if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
@@ -1593,7 +1611,7 @@ pub async fn execute_confirm_decision(app: &mut App, decision: ConfirmDecision) 
             } else {
                 tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
             }
-            app.app_state.mode = AppMode::Normal;
+            Some(BrowserTransition::ToNormal)
         }
         ConfirmDecision::File(path) => {
             if path
@@ -1606,9 +1624,9 @@ pub async fn execute_confirm_decision(app: &mut App, decision: ConfirmDecision) 
                     .send(AppCommand::AddTorrentFromFile(path))
                     .await;
             }
-            app.app_state.mode = AppMode::Normal;
+            Some(BrowserTransition::ToNormal)
         }
-        ConfirmDecision::None => {}
+        ConfirmDecision::None => None,
     }
 }
 
@@ -2167,7 +2185,7 @@ mod tests {
         assert!(matches!(out.effects[0], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
             out.effects[1],
-            BrowserDialogEffect::SwitchToConfig(ConfigUiState { .. })
+            BrowserDialogEffect::ToConfig(ConfigUiState { .. })
         ));
     }
 
@@ -2182,7 +2200,7 @@ mod tests {
         assert!(matches!(out.effects[0], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
             out.effects[1],
-            BrowserDialogEffect::ExitToNormalAndClearPending
+            BrowserDialogEffect::ToNormalAndClearPending
         ));
     }
 
@@ -2213,7 +2231,7 @@ mod tests {
         assert!(matches!(out.effects[1], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
             out.effects[2],
-            BrowserDialogEffect::ExitToNormalAndClearPending
+            BrowserDialogEffect::ToNormalAndClearPending
         ));
     }
 
@@ -2247,7 +2265,7 @@ mod tests {
         assert!(matches!(out.effects[1], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
             out.effects[2],
-            BrowserDialogEffect::ExitToNormalAndClearPending
+            BrowserDialogEffect::ToNormalAndClearPending
         ));
     }
 

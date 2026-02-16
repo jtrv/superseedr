@@ -86,6 +86,8 @@ pub enum UiAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEffect {
+    ToPowerSaving,
+    ToDeleteConfirm,
     OpenAddTorrentFileBrowser,
     OpenConfigScreen,
     BroadcastManagerDataRate(u64),
@@ -136,13 +138,10 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
-        UiAction::EnterPowerSaving => {
-            app_state.mode = AppMode::PowerSaving;
-            ReduceResult {
-                redraw: true,
-                effects: Vec::new(),
-            }
-        }
+        UiAction::EnterPowerSaving => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::ToPowerSaving],
+        },
         UiAction::RequestQuit => {
             app_state.should_quit = true;
             ReduceResult {
@@ -176,7 +175,10 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             {
                 app_state.ui.delete_confirm.info_hash = info_hash;
                 app_state.ui.delete_confirm.with_files = with_files;
-                app_state.mode = AppMode::DeleteConfirm;
+                return ReduceResult {
+                    redraw: true,
+                    effects: vec![UiEffect::ToDeleteConfirm],
+                };
             }
             ReduceResult {
                 redraw: true,
@@ -3359,6 +3361,12 @@ async fn execute_ui_effects(app: &mut App, effects: Vec<UiEffect>) {
 
 async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
     match effect {
+        UiEffect::ToPowerSaving => {
+            app.app_state.mode = AppMode::PowerSaving;
+        }
+        UiEffect::ToDeleteConfirm => {
+            app.app_state.mode = AppMode::DeleteConfirm;
+        }
         UiEffect::OpenAddTorrentFileBrowser => {
             let initial_path = app.get_initial_source_path();
             let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
@@ -3574,15 +3582,16 @@ mod tests {
     }
 
     #[test]
-    fn reducer_enter_power_saving_sets_mode() {
+    fn reducer_enter_power_saving_emits_mode_effect() {
         let mut app_state = AppState {
             mode: AppMode::Normal,
             ..Default::default()
         };
 
-        reduce_ui_action(&mut app_state, UiAction::EnterPowerSaving);
+        let result = reduce_ui_action(&mut app_state, UiAction::EnterPowerSaving);
 
-        assert!(matches!(app_state.mode, AppMode::PowerSaving));
+        assert_eq!(result.effects, vec![UiEffect::ToPowerSaving]);
+        assert!(matches!(app_state.mode, AppMode::Normal));
     }
 
     #[test]
@@ -3618,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn reducer_open_delete_confirm_sets_mode_and_payload() {
+    fn reducer_open_delete_confirm_emits_mode_effect_and_sets_payload() {
         let mut app_state = create_test_app_state();
         app_state.ui.selected_torrent_index = 1;
 
@@ -3628,7 +3637,7 @@ mod tests {
         );
 
         assert!(result.redraw);
-        assert!(matches!(app_state.mode, AppMode::DeleteConfirm));
+        assert_eq!(result.effects, vec![UiEffect::ToDeleteConfirm]);
         assert_eq!(app_state.ui.delete_confirm.info_hash, b"hash_b".to_vec());
         assert!(app_state.ui.delete_confirm.with_files);
     }
@@ -3644,6 +3653,7 @@ mod tests {
         );
 
         assert!(result.redraw);
+        assert!(result.effects.is_empty());
         assert!(matches!(app_state.mode, AppMode::Normal));
     }
 

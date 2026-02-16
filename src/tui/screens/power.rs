@@ -12,11 +12,52 @@ use crate::tui::screen_context::ScreenContext;
 use crate::tui::view::calculate_player_stats;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PowerAction {
+    Resume,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PowerEffect {
+    ToNormal,
+}
+
+#[derive(Default)]
+pub struct PowerReduceResult {
+    pub consumed: bool,
+    pub effects: Vec<PowerEffect>,
+}
+
+fn map_key_to_power_action(key_code: KeyCode, key_kind: KeyEventKind) -> Option<PowerAction> {
+    if key_kind == KeyEventKind::Press && matches!(key_code, KeyCode::Char('z')) {
+        return Some(PowerAction::Resume);
+    }
+    None
+}
+
+pub fn reduce_power_action(action: PowerAction) -> PowerReduceResult {
+    match action {
+        PowerAction::Resume => PowerReduceResult {
+            consumed: true,
+            effects: vec![PowerEffect::ToNormal],
+        },
+    }
+}
+
+pub fn execute_power_effects(app_state: &mut AppState, effects: Vec<PowerEffect>) {
+    for effect in effects {
+        match effect {
+            PowerEffect::ToNormal => app_state.mode = AppMode::Normal,
+        }
+    }
+}
+
 pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
     if let CrosstermEvent::Key(key) = event {
-        if key.kind == KeyEventKind::Press {
-            if let KeyCode::Char('z') = key.code {
-                app_state.mode = AppMode::Normal;
+        if let Some(action) = map_key_to_power_action(key.code, key.kind) {
+            let reduced = reduce_power_action(action);
+            if reduced.consumed {
+                execute_power_effects(app_state, reduced.effects);
             }
         }
     }
@@ -169,4 +210,40 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
     f.render_widget(main_paragraph, content_area);
     f.render_widget(footer_paragraph, footer_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    #[test]
+    fn power_z_returns_to_normal() {
+        let mut app_state = AppState {
+            mode: AppMode::PowerSaving,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::Normal));
+    }
+
+    #[test]
+    fn power_ignores_other_keys() {
+        let mut app_state = AppState {
+            mode: AppMode::PowerSaving,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::PowerSaving));
+    }
 }

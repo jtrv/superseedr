@@ -70,9 +70,10 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
         AppMode::Normal => normal::handle_event(event, app).await,
         AppMode::PowerSaving => power::handle_event(event, &mut app.app_state),
         AppMode::Config => {
-            if let config::ConfigOutcome::ToNormal = config::handle_event(
+            config::handle_event(
                 event,
                 config::ConfigHandleContext {
+                    mode: &mut app.app_state.mode,
                     settings_edit: &mut app.app_state.ui.config.settings_edit,
                     selected_index: &mut app.app_state.ui.config.selected_index,
                     items: app.app_state.ui.config.items.as_mut_slice(),
@@ -81,14 +82,10 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
                     global_dl_bucket: &app.global_dl_bucket,
                     global_ul_bucket: &app.global_ul_bucket,
                 },
-            ) {
-                app.app_state.mode = AppMode::Normal;
-            }
+            );
         }
         AppMode::DeleteConfirm => {
-            if delete_confirm::handle_event(event, app) {
-                app.app_state.mode = AppMode::Normal;
-            }
+            let _ = delete_confirm::handle_event(event, app);
         }
         AppMode::FileBrowser => {}
     }

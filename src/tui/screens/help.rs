@@ -10,32 +10,70 @@ use crate::tui::view::calculate_player_stats;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
 
-#[cfg(windows)]
-pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
-    if !matches!(app_state.mode, AppMode::Help) {
-        return;
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HelpAction {
+    Close,
+}
 
-    if let CrosstermEvent::Key(key) = event {
-        if key.kind == KeyEventKind::Press
-            && (key.code == KeyCode::Esc || key.code == KeyCode::Char('m'))
-        {
-            app_state.mode = AppMode::Normal;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HelpEffect {
+    ToNormal,
+}
+
+#[derive(Default)]
+pub struct HelpReduceResult {
+    pub consumed: bool,
+    pub effects: Vec<HelpEffect>,
+}
+
+#[cfg(windows)]
+fn map_key_to_help_action(key_code: KeyCode, key_kind: KeyEventKind) -> Option<HelpAction> {
+    if key_kind == KeyEventKind::Press
+        && (key_code == KeyCode::Esc || key_code == KeyCode::Char('m'))
+    {
+        return Some(HelpAction::Close);
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn map_key_to_help_action(key_code: KeyCode, key_kind: KeyEventKind) -> Option<HelpAction> {
+    if (key_code == KeyCode::Esc && key_kind == KeyEventKind::Press)
+        || (key_code == KeyCode::Char('m') && key_kind == KeyEventKind::Release)
+    {
+        return Some(HelpAction::Close);
+    }
+    None
+}
+
+pub fn reduce_help_action(action: HelpAction) -> HelpReduceResult {
+    match action {
+        HelpAction::Close => HelpReduceResult {
+            consumed: true,
+            effects: vec![HelpEffect::ToNormal],
+        },
+    }
+}
+
+pub fn execute_help_effects(app_state: &mut AppState, effects: Vec<HelpEffect>) {
+    for effect in effects {
+        match effect {
+            HelpEffect::ToNormal => app_state.mode = AppMode::Normal,
         }
     }
 }
 
-#[cfg(not(windows))]
 pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
     if !matches!(app_state.mode, AppMode::Help) {
         return;
     }
 
     if let CrosstermEvent::Key(key) = event {
-        if (key.code == KeyCode::Esc && key.kind == KeyEventKind::Press)
-            || (key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Release)
-        {
-            app_state.mode = AppMode::Normal;
+        if let Some(action) = map_key_to_help_action(key.code, key.kind) {
+            let reduced = reduce_help_action(action);
+            if reduced.consumed {
+                execute_help_effects(app_state, reduced.effects);
+            }
         }
     }
 }
@@ -183,6 +221,57 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
         let footer_paragraph = Paragraph::new(footer_lines)
             .style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
         f.render_widget(footer_paragraph, footer_inner_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    #[test]
+    fn help_esc_returns_to_normal() {
+        let mut app_state = AppState {
+            mode: AppMode::Help,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::Normal));
+    }
+
+    #[test]
+    fn help_ignores_non_close_key() {
+        let mut app_state = AppState {
+            mode: AppMode::Help,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::Help));
+    }
+
+    #[test]
+    fn help_handler_ignores_when_not_in_help_mode() {
+        let mut app_state = AppState {
+            mode: AppMode::Normal,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::Normal));
     }
 }
 fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
