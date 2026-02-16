@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::app::{AppCommand, ConfigItem, FileBrowserMode};
+use crate::app::{AppCommand, AppMode, ConfigItem, FileBrowserMode};
 use crate::config::Settings;
 use crate::token_bucket::TokenBucket;
 use crate::tui::formatters::{format_limit_bps, path_to_string};
@@ -14,11 +14,6 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::prelude::{Frame, Line, Span, Style};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use tokio::sync::mpsc;
-
-pub enum ConfigOutcome {
-    Stay,
-    ToNormal,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConfigAction {
@@ -39,9 +34,11 @@ pub enum ConfigEffect {
     AppCommand(Box<AppCommand>),
     SetDownloadRate(u64),
     SetUploadRate(u64),
+    ToNormal,
 }
 
 pub struct ConfigHandleContext<'a> {
+    pub mode: &'a mut AppMode,
     pub settings_edit: &'a mut Box<Settings>,
     pub selected_index: &'a mut usize,
     pub items: &'a mut [ConfigItem],
@@ -52,14 +49,14 @@ pub struct ConfigHandleContext<'a> {
 }
 
 pub struct ConfigReduceResult {
-    pub outcome: ConfigOutcome,
+    pub consumed: bool,
     pub effects: Vec<ConfigEffect>,
 }
 
 impl Default for ConfigReduceResult {
     fn default() -> Self {
         Self {
-            outcome: ConfigOutcome::Stay,
+            consumed: false,
             effects: Vec::new(),
         }
     }
@@ -101,12 +98,14 @@ pub fn reduce_config_action(
     let mut result = ConfigReduceResult::default();
     match action {
         ConfigAction::SaveAndExit => {
-            result.outcome = ConfigOutcome::ToNormal;
+            result.consumed = true;
             result.effects.push(ConfigEffect::AppCommand(Box::new(
                 AppCommand::UpdateConfig(*settings_edit.clone()),
             )));
+            result.effects.push(ConfigEffect::ToNormal);
         }
         ConfigAction::StartEditOrBrowse => {
+            result.consumed = true;
             let selected_item = items[*selected_index];
             match selected_item {
                 ConfigItem::GlobalDownloadLimit
@@ -142,14 +141,17 @@ pub fn reduce_config_action(
             }
         }
         ConfigAction::MoveUp => {
+            result.consumed = true;
             *selected_index = selected_index.saturating_sub(1);
         }
         ConfigAction::MoveDown => {
+            result.consumed = true;
             if *selected_index < items.len().saturating_sub(1) {
                 *selected_index += 1;
             }
         }
         ConfigAction::ResetSelected => {
+            result.consumed = true;
             let default_settings = Settings::default();
             let selected_item = items[*selected_index];
             match selected_item {
@@ -174,6 +176,7 @@ pub fn reduce_config_action(
             }
         }
         ConfigAction::IncreaseSelected => {
+            result.consumed = true;
             let item = items[*selected_index];
             let increment = 10_000 * 8;
             match item {
@@ -195,6 +198,7 @@ pub fn reduce_config_action(
             }
         }
         ConfigAction::DecreaseSelected => {
+            result.consumed = true;
             let item = items[*selected_index];
             let decrement = 10_000 * 8;
             match item {
@@ -216,19 +220,23 @@ pub fn reduce_config_action(
             }
         }
         ConfigAction::EditInsert(c) => {
+            result.consumed = true;
             if let Some((_item, buffer)) = editing {
                 buffer.push(c);
             }
         }
         ConfigAction::EditBackspace => {
+            result.consumed = true;
             if let Some((_item, buffer)) = editing {
                 buffer.pop();
             }
         }
         ConfigAction::EditCancel => {
+            result.consumed = true;
             *editing = None;
         }
         ConfigAction::EditCommit => {
+            result.consumed = true;
             if let Some((item, buffer)) = editing {
                 match item {
                     ConfigItem::ClientPort => {
@@ -396,10 +404,10 @@ pub fn draw(
     f.render_widget(footer_paragraph, footer_area);
 }
 
-pub fn handle_event(event: CrosstermEvent, ctx: ConfigHandleContext<'_>) -> ConfigOutcome {
+pub fn handle_event(event: CrosstermEvent, ctx: ConfigHandleContext<'_>) -> bool {
     if let CrosstermEvent::Key(key) = event {
         if key.kind != KeyEventKind::Press {
-            return ConfigOutcome::Stay;
+            return false;
         }
         if let Some(action) = map_key_to_config_action(key.code, ctx.editing) {
             let reduced = reduce_config_action(
@@ -426,13 +434,16 @@ pub fn handle_event(event: CrosstermEvent, ctx: ConfigHandleContext<'_>) -> Conf
                             bucket.set_rate(new_rate as f64);
                         });
                     }
+                    ConfigEffect::ToNormal => {
+                        *ctx.mode = AppMode::Normal;
+                    }
                 }
             }
-            return reduced.outcome;
+            return reduced.consumed;
         }
     }
 
-    ConfigOutcome::Stay
+    false
 }
 
 #[cfg(test)]
@@ -505,8 +516,8 @@ mod tests {
             &mut editing,
         );
 
-        assert!(matches!(out.outcome, ConfigOutcome::ToNormal));
-        assert_eq!(out.effects.len(), 1);
+        assert_eq!(out.effects.len(), 2);
         assert!(matches!(out.effects[0], ConfigEffect::AppCommand(_)));
+        assert!(matches!(out.effects[1], ConfigEffect::ToNormal));
     }
 }

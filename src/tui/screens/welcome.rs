@@ -41,6 +41,46 @@ const LOGO_SMALL: &str = r#"
  \/___/  \/___/ 
 "#;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WelcomeAction {
+    Dismiss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WelcomeEffect {
+    ToNormal,
+}
+
+#[derive(Default)]
+pub struct WelcomeReduceResult {
+    pub consumed: bool,
+    pub effects: Vec<WelcomeEffect>,
+}
+
+fn map_key_to_welcome_action(key_code: KeyCode, key_kind: KeyEventKind) -> Option<WelcomeAction> {
+    if key_kind == KeyEventKind::Press && key_code == KeyCode::Esc {
+        return Some(WelcomeAction::Dismiss);
+    }
+    None
+}
+
+pub fn reduce_welcome_action(action: WelcomeAction) -> WelcomeReduceResult {
+    match action {
+        WelcomeAction::Dismiss => WelcomeReduceResult {
+            consumed: true,
+            effects: vec![WelcomeEffect::ToNormal],
+        },
+    }
+}
+
+pub fn execute_welcome_effects(app_state: &mut AppState, effects: Vec<WelcomeEffect>) {
+    for effect in effects {
+        match effect {
+            WelcomeEffect::ToNormal => app_state.mode = AppMode::Normal,
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let settings = screen.settings;
     let ctx = screen.theme;
@@ -331,9 +371,48 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
 pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
     if let CrosstermEvent::Key(key) = event {
-        if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
-            app_state.mode = AppMode::Normal;
+        if let Some(action) = map_key_to_welcome_action(key.code, key.kind) {
+            let reduced = reduce_welcome_action(action);
+            if reduced.consumed {
+                execute_welcome_effects(app_state, reduced.effects);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    #[test]
+    fn welcome_esc_transitions_to_normal() {
+        let mut app_state = AppState {
+            mode: AppMode::Welcome,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::Normal));
+    }
+
+    #[test]
+    fn welcome_ignores_non_esc_keys() {
+        let mut app_state = AppState {
+            mode: AppMode::Welcome,
+            ..Default::default()
+        };
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(matches!(app_state.mode, AppMode::Welcome));
     }
 }
 

@@ -25,11 +25,12 @@ pub enum DeleteConfirmEffect {
     MarkDeleting {
         info_hash: Vec<u8>,
     },
+    ToNormal,
 }
 
 #[derive(Default)]
 pub struct DeleteConfirmReduceResult {
-    pub close_dialog: bool,
+    pub consumed: bool,
     pub effects: Vec<DeleteConfirmEffect>,
 }
 
@@ -47,20 +48,21 @@ pub fn reduce_delete_confirm_action(
 ) -> DeleteConfirmReduceResult {
     match action {
         DeleteConfirmAction::Cancel => DeleteConfirmReduceResult {
-            close_dialog: true,
-            effects: Vec::new(),
+            consumed: true,
+            effects: vec![DeleteConfirmEffect::ToNormal],
         },
         DeleteConfirmAction::Confirm => {
             let info_hash = app_state.ui.delete_confirm.info_hash.clone();
             let with_files = app_state.ui.delete_confirm.with_files;
             DeleteConfirmReduceResult {
-                close_dialog: true,
+                consumed: true,
                 effects: vec![
                     DeleteConfirmEffect::SendManagerCommand {
                         info_hash: info_hash.clone(),
                         with_files,
                     },
                     DeleteConfirmEffect::MarkDeleting { info_hash },
+                    DeleteConfirmEffect::ToNormal,
                 ],
             }
         }
@@ -212,9 +214,12 @@ pub fn handle_event(event: CrosstermEvent, app: &mut App) -> bool {
                                 TorrentControlState::Deleting;
                         }
                     }
+                    DeleteConfirmEffect::ToNormal => {
+                        app.app_state.mode = AppMode::Normal;
+                    }
                 }
             }
-            return reduced.close_dialog;
+            return reduced.consumed;
         }
     }
 
@@ -230,8 +235,8 @@ mod tests {
     fn reducer_cancel_closes_without_effects() {
         let app_state = AppState::default();
         let out = reduce_delete_confirm_action(&app_state, DeleteConfirmAction::Cancel);
-        assert!(out.close_dialog);
-        assert!(out.effects.is_empty());
+        assert!(out.consumed);
+        assert_eq!(out.effects, vec![DeleteConfirmEffect::ToNormal]);
     }
 
     #[test]
@@ -250,8 +255,8 @@ mod tests {
 
         let out = reduce_delete_confirm_action(&app_state, DeleteConfirmAction::Confirm);
 
-        assert!(out.close_dialog);
-        assert_eq!(out.effects.len(), 2);
+        assert!(out.consumed);
+        assert_eq!(out.effects.len(), 3);
         assert!(matches!(
             out.effects[0],
             DeleteConfirmEffect::SendManagerCommand {
@@ -263,5 +268,6 @@ mod tests {
             out.effects[1],
             DeleteConfirmEffect::MarkDeleting { ref info_hash } if info_hash == b"abc"
         ));
+        assert!(matches!(out.effects[2], DeleteConfirmEffect::ToNormal));
     }
 }

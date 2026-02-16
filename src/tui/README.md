@@ -56,6 +56,43 @@
   - `/` enters browser search.
 - `DeleteConfirm`: `Enter` confirms and returns to `Normal`; `Esc` cancels.
 
+## Navigation Contract (Minimal)
+This contract formalizes top-level screen transitions. Any transition behavior change should update this table and the transition tests.
+
+| From Mode | Input/Event | To Mode | Notes |
+| --- | --- | --- | --- |
+| `Welcome` | `Esc` press | `Normal` | Entry handoff |
+| `Normal` | `m` | `Help` | Manual/help route |
+| `Help` | `Esc` | `Normal` | Close help |
+| `Normal` | `z` | `PowerSaving` | Zen mode |
+| `PowerSaving` | `z` | `Normal` | Return from zen |
+| `Normal` | `c` | `Config` | Open settings |
+| `Config` | `Esc` or `Q` | `Normal` | Save + exit |
+| `Normal` | `d`/`D` | `DeleteConfirm` | Selected torrent only |
+| `DeleteConfirm` | `Enter` or `Esc` | `Normal` | Confirm/cancel dialog |
+| `Normal` | `a` | `FileBrowser` | Add torrent path flow |
+| `Config` | `Enter` on path item | `FileBrowser` | Path picker flow |
+| `FileBrowser` | `Esc` | `Normal` or `Config` | Depends on browser sub-mode |
+
+### Forbidden/No-op examples
+- `Help` + unrelated keys (e.g. `c`, `a`, `d`) must stay in `Help`.
+- `PowerSaving` + non-`z` keys must stay in `PowerSaving`.
+- `Welcome` + non-`Esc` keys must stay in `Welcome`.
+
+### Executable Transition Table (Tests)
+- Treat this matrix as an executable contract via focused tests:
+  - mode-local handler tests for `Welcome`, `Help`, and `PowerSaving`
+  - existing reducer/effect tests for `Normal`, `Config`, `DeleteConfirm`, and `FileBrowser`
+  - existing event-layer debounce tests in `tui/events.rs`
+- If a transition behavior changes, update both this table and the corresponding tests.
+
+### Future Full-System Trigger
+Keep the current lightweight contract unless one or more of these happen:
+1. Top-level modes/submodes grow enough that distributed handler logic becomes hard to reason about.
+2. Navigation regressions continue despite transition contract tests.
+3. Multiple parallel features frequently modify navigation and produce conflicts.
+4. Guarded/conditional transitions become complex enough to justify a centralized runtime FSM.
+
 ## Help Overlay
 - Help now uses dedicated route mode: `AppMode::Help`.
 - Windows: `m` press toggles between `Normal` and `Help`.
@@ -63,6 +100,7 @@
 
 ## Invariants
 - Reducers are deterministic and side-effect free; side effects execute via effect runners.
+- Screen reducers do not mutate `app_state.mode` directly; route transitions are emitted as effects and applied in effect executors.
 - `events.rs` stays staged and thin: resize handling, Esc debounce, global hooks, then mode dispatch.
 - Screen `handle_event` entrypoints stay thin and delegate to per-screen reducer/mapping helpers.
 - Layout planners are pure functions from geometry/context to `LayoutPlan` values.
