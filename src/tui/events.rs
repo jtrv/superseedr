@@ -5,7 +5,7 @@ use crate::app::{App, AppMode};
 
 use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
 
-use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::prelude::Rect;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +14,10 @@ static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if handle_resize_event(&event, app) {
+        return;
+    }
+
+    if should_quit_on_ctrl_c(&event, app) {
         return;
     }
 
@@ -29,6 +33,20 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
     dispatch_mode_event(event, app).await;
     app.app_state.ui.needs_redraw = true;
+}
+
+fn should_quit_on_ctrl_c(event: &CrosstermEvent, app: &mut App) -> bool {
+    if let CrosstermEvent::Key(key) = event {
+        if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            app.app_state.should_quit = true;
+            app.app_state.ui.needs_redraw = true;
+            return true;
+        }
+    }
+    false
 }
 
 fn handle_resize_event(event: &CrosstermEvent, app: &mut App) -> bool {

@@ -237,6 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        tracing::info!("Initializing application state...");
+        let mut app = App::new(client_configs).await?;
+        tracing::info!("Application state initialized. Starting TUI.");
+
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
             let _ = cleanup_terminal();
@@ -259,7 +263,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let mut app = App::new(client_configs).await?;
         if let Err(e) = app.run(&mut terminal).await {
             eprintln!("[Error] Application failed: {}", e);
         }
@@ -280,14 +283,14 @@ fn get_lock_path() -> Option<PathBuf> {
 }
 
 fn cleanup_terminal() -> Result<(), Box<dyn std::error::Error>> {
-    disable_raw_mode()?;
+    let _ = disable_raw_mode();
     // Common cleanup for all platforms
-    execute!(stdout(), LeaveAlternateScreen,)?;
+    let _ = execute!(stdout(), LeaveAlternateScreen,);
 
     // Corresponding cleanup ONLY for non-Windows platforms
     #[cfg(not(windows))]
     {
-        execute!(stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste)?;
+        let _ = execute!(stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste);
     }
 
     Ok(())
