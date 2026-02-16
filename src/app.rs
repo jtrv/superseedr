@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
-use std::io::Stdout;
+use std::io::{ErrorKind, Stdout};
 
 use std::collections::VecDeque;
 
@@ -2165,13 +2165,37 @@ impl App {
             return;
         }
         if let Err(e) = fs::rename(&temp_torrent_path, &permanent_torrent_path) {
-            let _ = fs::remove_file(&temp_torrent_path);
-            tracing_event!(
-                Level::ERROR,
-                "Failed to finalize torrent copy in data directory: {}",
-                e
-            );
-            return;
+            if e.kind() == ErrorKind::AlreadyExists {
+                if let Err(remove_err) = fs::remove_file(&permanent_torrent_path) {
+                    if remove_err.kind() != ErrorKind::NotFound {
+                        let _ = fs::remove_file(&temp_torrent_path);
+                        tracing_event!(
+                            Level::ERROR,
+                            "Failed to replace existing torrent file in data directory: {}",
+                            remove_err
+                        );
+                        return;
+                    }
+                }
+
+                if let Err(retry_err) = fs::rename(&temp_torrent_path, &permanent_torrent_path) {
+                    let _ = fs::remove_file(&temp_torrent_path);
+                    tracing_event!(
+                        Level::ERROR,
+                        "Failed to finalize torrent copy in data directory after replace: {}",
+                        retry_err
+                    );
+                    return;
+                }
+            } else {
+                let _ = fs::remove_file(&temp_torrent_path);
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to finalize torrent copy in data directory: {}",
+                    e
+                );
+                return;
+            }
         }
 
         let number_of_pieces_total = if !torrent.info.pieces.is_empty() {
