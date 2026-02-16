@@ -2318,6 +2318,7 @@ impl App {
             .clone()
             .or_else(|| v2_hash.clone())
             .expect("Magnet link missing both btih and btmh hashes");
+        let resolved_name = resolve_magnet_torrent_name(&torrent_name, &magnet_link, &info_hash);
 
         if self.app_state.torrents.contains_key(&info_hash) {
             if let Some(path) = download_path {
@@ -2338,7 +2339,7 @@ impl App {
                 torrent_control_state: torrent_control_state.clone(),
                 info_hash: info_hash.clone(),
                 torrent_or_magnet: magnet_link.clone(),
-                torrent_name,
+                torrent_name: resolved_name,
                 download_path: download_path.clone(),
                 container_name: container_name.clone(),
                 ..Default::default()
@@ -2764,6 +2765,39 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
     (v1, v2)
 }
 
+fn resolve_magnet_torrent_name(
+    requested_name: &str,
+    magnet_link: &str,
+    info_hash: &[u8],
+) -> String {
+    let is_placeholder = requested_name.trim().is_empty() || requested_name == "Fetching name...";
+    if !is_placeholder {
+        return requested_name.to_string();
+    }
+
+    extract_magnet_display_name(magnet_link)
+        .unwrap_or_else(|| format!("Magnet {}", hex::encode(info_hash)))
+}
+
+fn extract_magnet_display_name(magnet_link: &str) -> Option<String> {
+    for raw_part in magnet_link.split('&') {
+        let part = raw_part.strip_prefix("magnet:?").unwrap_or(raw_part);
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("dn") {
+            let value_for_decode = value.replace('+', "%20");
+            if let Ok(decoded) = urlencoding::decode(&value_for_decode) {
+                let name = decoded.trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn clamp_selected_indices_in_state(app_state: &mut AppState) {
     let torrent_count = app_state.torrent_list_order.len();
 
@@ -2879,7 +2913,8 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_selected_indices_in_state, persisted_validation_status_from_piece_completion,
+        clamp_selected_indices_in_state, extract_magnet_display_name,
+        persisted_validation_status_from_piece_completion, resolve_magnet_torrent_name,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
         SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
@@ -3018,5 +3053,44 @@ mod tests {
 
         assert_eq!(app_state.torrent_list_order, vec![hash_a]);
         assert_eq!(app_state.ui.selected_torrent_index, 0);
+    }
+
+    #[test]
+    fn extract_magnet_display_name_decodes_dn() {
+        let magnet =
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Ubuntu+24.04+ISO";
+        assert_eq!(
+            extract_magnet_display_name(magnet),
+            Some("Ubuntu 24.04 ISO".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_magnet_name_uses_dn_for_placeholder() {
+        let info_hash = vec![0x11; 20];
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Fedora";
+        assert_eq!(
+            resolve_magnet_torrent_name("Fetching name...", magnet, &info_hash),
+            "Fedora".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_magnet_name_falls_back_to_hash_label_when_dn_missing() {
+        let info_hash = vec![0x22; 20];
+        let magnet = "magnet:?xt=urn:btih:2222222222222222222222222222222222222222";
+        assert_eq!(
+            resolve_magnet_torrent_name("Fetching name...", magnet, &info_hash),
+            format!("Magnet {}", hex::encode(&info_hash))
+        );
+    }
+
+    #[test]
+    fn extract_magnet_display_name_skips_malformed_segments() {
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&badsegment&dn=Debian+Netinst";
+        assert_eq!(
+            extract_magnet_display_name(magnet),
+            Some("Debian Netinst".to_string())
+        );
     }
 }
