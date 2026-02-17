@@ -4,9 +4,10 @@
 use crate::app::{AppCommand, AppMode, AppState, RssScreen};
 use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
-use regex::Regex;
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,16 +180,12 @@ fn execute_rss_effects(
                                 set_rss_status(app_state, "Feed added");
                             }
                             RssScreen::Filters => {
-                                if Regex::new(&value).is_ok() {
-                                    new_settings.rss.filters.push(crate::config::RssFilter {
-                                        regex: value,
-                                        enabled: true,
-                                    });
-                                    app_state.ui.rss.filter_draft.clear();
-                                    set_rss_status(app_state, "Filter added");
-                                } else {
-                                    app_state.system_error = Some("Invalid regex".to_string());
-                                }
+                                new_settings.rss.filters.push(crate::config::RssFilter {
+                                    regex: value,
+                                    enabled: true,
+                                });
+                                app_state.ui.rss.filter_draft.clear();
+                                set_rss_status(app_state, "Filter added");
                             }
                             _ => {}
                         }
@@ -294,7 +291,7 @@ fn execute_rss_effects(
                     if let Some(item) = app_state.rss_runtime.preview_items.get(idx) {
                         app_state.ui.rss.active_screen = RssScreen::Filters;
                         app_state.ui.rss.is_editing = true;
-                        app_state.ui.rss.edit_buffer = regex::escape(item.title.as_str());
+                        app_state.ui.rss.edit_buffer = item.title.clone();
                         app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
                         set_rss_status(app_state, "Editing new filter from selection");
                     }
@@ -534,31 +531,28 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     }
     if !draft.is_empty() {
         let mut live_preview_titles: Vec<String> = Vec::new();
-        let match_count = match Regex::new(&draft) {
-            Ok(rx) => {
-                for item in app_state.rss_runtime.preview_items.iter() {
-                    if rx.is_match(item.title.as_str()) {
-                        if live_preview_titles.len() < 5 {
-                            live_preview_titles.push(item.title.clone());
-                        }
-                    }
+        let matcher = SkimMatcherV2::default();
+        let draft_lc = draft.to_lowercase();
+        let match_count = app_state
+            .rss_runtime
+            .preview_items
+            .iter()
+            .filter(|item| {
+                matcher
+                    .fuzzy_match(&item.title.to_lowercase(), &draft_lc)
+                    .is_some()
+            })
+            .inspect(|item| {
+                if live_preview_titles.len() < 5 {
+                    live_preview_titles.push(item.title.clone());
                 }
-                app_state
-                    .rss_runtime
-                    .preview_items
-                    .iter()
-                    .filter(|item| rx.is_match(item.title.as_str()))
-                    .count()
-            }
-            Err(_) => 0,
-        };
+            })
+            .count();
 
         lines.push(Line::from(""));
         lines.push(Line::from(format!("Draft: {}", draft)));
         lines.push(Line::from(format!("Live matches: {}", match_count)));
-        if Regex::new(&draft).is_err() {
-            lines.push(Line::from("Invalid regex draft"));
-        } else if !live_preview_titles.is_empty() {
+        if !live_preview_titles.is_empty() {
             lines.push(Line::from("Live preview:"));
             for title in live_preview_titles {
                 lines.push(Line::from(format!("- {}", title)));
@@ -868,10 +862,7 @@ mod tests {
         );
 
         assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Filters));
-        assert_eq!(
-            app_state.ui.rss.filter_draft,
-            regex::escape("Ubuntu (LTS) [x64]")
-        );
+        assert_eq!(app_state.ui.rss.filter_draft, "Ubuntu (LTS) [x64]");
     }
 
     #[test]

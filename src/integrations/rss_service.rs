@@ -6,7 +6,8 @@ use crate::config::{get_watch_path, RssAddedVia, RssHistoryEntry, Settings};
 use crate::persistence::rss::load_rss_state;
 use chrono::{Duration as ChronoDuration, Utc};
 use feed_rs::parser;
-use regex::Regex;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use reqwest::Client;
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
@@ -166,7 +167,8 @@ async fn run_sync(
         return;
     }
 
-    let filter_regexes = compile_filters(settings);
+    let matcher = SkimMatcherV2::default();
+    let enabled_filters = enabled_filters(settings);
 
     let mut aggregated = Vec::new();
 
@@ -206,9 +208,7 @@ async fn run_sync(
             continue;
         }
 
-        let is_match = filter_regexes
-            .iter()
-            .any(|regex| regex.is_match(item.title.as_str()));
+        let is_match = title_matches_filters(item.title.as_str(), &enabled_filters, &matcher);
         let mut is_downloaded = downloaded_keys.contains(&item.dedupe_key);
 
         if is_match && !is_downloaded {
@@ -257,14 +257,27 @@ async fn run_sync(
         .await;
 }
 
-fn compile_filters(settings: &Settings) -> Vec<Regex> {
+fn enabled_filters(settings: &Settings) -> Vec<String> {
     settings
         .rss
         .filters
         .iter()
         .filter(|f| f.enabled)
-        .filter_map(|filter| Regex::new(filter.regex.as_str()).ok())
+        .map(|f| f.regex.trim().to_string())
+        .filter(|s| !s.is_empty())
         .collect()
+}
+
+fn title_matches_filters(title: &str, filters: &[String], matcher: &SkimMatcherV2) -> bool {
+    if filters.is_empty() {
+        return false;
+    }
+    let title_lc = title.to_lowercase();
+    filters.iter().any(|filter| {
+        matcher
+            .fuzzy_match(&title_lc, &filter.to_lowercase())
+            .is_some()
+    })
 }
 
 async fn fetch_and_parse_feed(
