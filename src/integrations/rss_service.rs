@@ -454,6 +454,8 @@ fn rss_watch_dir(settings: &Settings) -> io::Result<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn dedupe_key_prefers_guid_then_link_then_title_source() {
@@ -554,6 +556,66 @@ mod tests {
         assert_eq!(entry.title, "Ubuntu ISO");
         assert_eq!(entry.guid.as_deref(), Some("abc123"));
         assert_eq!(entry.source.as_deref(), Some("Example Feed"));
+        assert_eq!(entry.added_via, RssAddedVia::Manual);
+    }
+
+    #[tokio::test]
+    async fn manual_ingest_http_torrent_writes_watch_file_and_returns_history_entry() {
+        let tmp = tempdir().expect("tempdir");
+        let mut settings = Settings::default();
+        settings.watch_folder = Some(tmp.path().to_path_buf());
+
+        let payload = b"d8:announce13:http://t4:infod6:lengthi1e4:name4:test12:piece lengthi1e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/x-bittorrent\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write headers");
+            socket.write_all(payload).await.expect("write body");
+        });
+
+        let url = format!("http://{}/example.torrent", addr);
+        let item = RssPreviewItem {
+            dedupe_key: "link:test-http".to_string(),
+            title: "Fedora ISO".to_string(),
+            link: Some(url.clone()),
+            guid: None,
+            source: Some("HTTP Feed".to_string()),
+            date_iso: Some("2026-02-17T13:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let entry = manual_ingest_preview_item(&settings, &item)
+            .await
+            .expect("manual ingest should succeed");
+
+        server_task.await.expect("server task");
+
+        let expected_name = format!("{}.torrent", hex::encode(Sha1::digest(url.as_bytes())));
+        let expected_path = tmp.path().join(expected_name);
+        assert!(
+            expected_path.exists(),
+            "expected torrent file to be created"
+        );
+
+        let content = std::fs::read(expected_path).expect("read torrent file");
+        assert_eq!(content, payload);
+
+        assert_eq!(entry.dedupe_key, "link:test-http");
+        assert_eq!(entry.title, "Fedora ISO");
+        assert_eq!(entry.source.as_deref(), Some("HTTP Feed"));
         assert_eq!(entry.added_via, RssAddedVia::Manual);
     }
 }
