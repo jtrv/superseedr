@@ -338,6 +338,24 @@ fn execute_rss_effects(
     }
 }
 
+fn apply_pasted_text(app_state: &mut AppState, pasted_text: &str) {
+    let trimmed = pasted_text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    if app_state.ui.rss.is_editing {
+        app_state.ui.rss.edit_buffer.push_str(trimmed);
+        if matches!(app_state.ui.rss.active_screen, RssScreen::Filters) {
+            app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
+        }
+        app_state.ui.rss.status_message = Some("Pasted input".to_string());
+    } else if app_state.ui.rss.is_searching {
+        app_state.ui.rss.search_query.push_str(trimmed);
+        app_state.ui.rss.status_message = Some("Pasted search".to_string());
+    }
+}
+
 #[cfg(windows)]
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let mut ctx =
@@ -409,12 +427,19 @@ pub fn handle_event(
         return;
     }
 
-    if let CrosstermEvent::Key(key) = event {
-        if let Some(action) = map_key_to_rss_action(key.code, key.kind, app_state) {
-            let result = reduce_rss_action(action);
-            execute_rss_effects(app_state, settings, app_command_tx, result.effects);
+    match event {
+        CrosstermEvent::Key(key) => {
+            if let Some(action) = map_key_to_rss_action(key.code, key.kind, app_state) {
+                let result = reduce_rss_action(action);
+                execute_rss_effects(app_state, settings, app_command_tx, result.effects);
+                app_state.ui.needs_redraw = true;
+            }
+        }
+        CrosstermEvent::Paste(pasted_text) => {
+            apply_pasted_text(app_state, pasted_text.as_str());
             app_state.ui.needs_redraw = true;
         }
+        _ => {}
     }
 }
 
@@ -947,6 +972,51 @@ mod tests {
                 assert_eq!(s.rss.feeds.len(), 1);
                 assert_eq!(s.rss.feeds[0].url, "https://example.com/rss.xml");
                 assert!(s.rss.feeds[0].enabled);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn paste_feed_url_in_edit_mode_dispatches_update_config() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(app_state.ui.rss.is_editing);
+
+        handle_event(
+            CrosstermEvent::Paste("https://subsplease.org/rss/?t&r=1080".to_string()),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let cmd = rx.try_recv().expect("expected UpdateConfig dispatch");
+        match cmd {
+            AppCommand::UpdateConfig(s) => {
+                assert_eq!(s.rss.feeds.len(), 1);
+                assert_eq!(s.rss.feeds[0].url, "https://subsplease.org/rss/?t&r=1080");
             }
             _ => panic!("unexpected command"),
         }
