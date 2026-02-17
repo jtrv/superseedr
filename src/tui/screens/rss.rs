@@ -530,37 +530,61 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         )));
     }
     if !draft.is_empty() {
-        let mut live_preview_titles: Vec<String> = Vec::new();
-        let matcher = SkimMatcherV2::default();
-        let draft_lc = draft.to_lowercase();
-        let match_count = app_state
-            .rss_runtime
-            .preview_items
+        let ranked_preview =
+            compute_filter_preview_items(&app_state.rss_runtime.preview_items, &draft);
+        let match_count = ranked_preview
             .iter()
-            .filter(|item| {
-                matcher
-                    .fuzzy_match(&item.title.to_lowercase(), &draft_lc)
-                    .is_some()
-            })
-            .inspect(|item| {
-                if live_preview_titles.len() < 5 {
-                    live_preview_titles.push(item.title.clone());
-                }
-            })
+            .filter(|(_, is_match)| *is_match)
             .count();
 
         lines.push(Line::from(""));
         lines.push(Line::from(format!("Draft: {}", draft)));
         lines.push(Line::from(format!("Live matches: {}", match_count)));
-        if !live_preview_titles.is_empty() {
-            lines.push(Line::from("Live preview:"));
-            for title in live_preview_titles {
-                lines.push(Line::from(format!("- {}", title)));
+        if !ranked_preview.is_empty() {
+            lines.push(Line::from("Live preview (all items):"));
+            for (item, is_match) in ranked_preview {
+                let source = item.source.unwrap_or_else(|| "unknown".to_string());
+                let badge = if is_match { "[M]" } else { "[ ]" };
+                let style = if is_match {
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text))
+                } else {
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0))
+                };
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{} {} ({})", badge, item.title, source),
+                    style,
+                )]));
             }
         }
     }
 
     f.render_widget(build_rows(lines, "Filters", ctx), area);
+}
+
+fn compute_filter_preview_items(
+    preview_items: &[crate::app::RssPreviewItem],
+    draft: &str,
+) -> Vec<(crate::app::RssPreviewItem, bool)> {
+    let draft = draft.trim();
+    if draft.is_empty() {
+        return Vec::new();
+    }
+
+    let matcher = SkimMatcherV2::default();
+    let draft_lc = draft.to_lowercase();
+
+    let mut ranked: Vec<(crate::app::RssPreviewItem, bool)> = preview_items
+        .iter()
+        .map(|item| {
+            let is_match = matcher
+                .fuzzy_match(&item.title.to_lowercase(), &draft_lc)
+                .is_some();
+            (item.clone(), is_match)
+        })
+        .collect();
+
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked
 }
 
 fn compute_explorer_items(
@@ -1099,5 +1123,26 @@ mod tests {
         let (active_sorted, _, active_prioritise) = compute_explorer_items(&items, "", true);
         assert!(active_prioritise);
         assert_eq!(active_sorted[0].title, "Match");
+    }
+
+    #[test]
+    fn filter_preview_keeps_all_items_and_sorts_matches_first() {
+        let items = vec![
+            RssPreviewItem {
+                title: "Fedora".to_string(),
+                ..Default::default()
+            },
+            RssPreviewItem {
+                title: "Ubuntu LTS".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let ranked = compute_filter_preview_items(&items, "ubuntu");
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked[0].1);
+        assert_eq!(ranked[0].0.title, "Ubuntu LTS");
+        assert!(!ranked[1].1);
+        assert_eq!(ranked[1].0.title, "Fedora");
     }
 }
