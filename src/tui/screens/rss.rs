@@ -771,30 +771,31 @@ fn draw_unified_body(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     if area.width >= 140 {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(30),
-                Constraint::Percentage(30),
-                Constraint::Percentage(40),
-            ])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
 
-        draw_links(
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(cols[1]);
+
+        draw_explorer(
             f,
             cols[0],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer),
+        );
+        draw_links(
+            f,
+            right_rows[0],
             screen,
             matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links),
         );
         draw_filters(
             f,
-            cols[1],
+            right_rows[1],
             screen,
             matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters),
-        );
-        draw_explorer(
-            f,
-            cols[2],
-            screen,
-            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer),
         );
     } else {
         let rows = Layout::default()
