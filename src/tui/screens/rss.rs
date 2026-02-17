@@ -522,11 +522,7 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         })
         .collect();
 
-    let draft = if app_state.ui.rss.is_editing {
-        app_state.ui.rss.edit_buffer.clone()
-    } else {
-        app_state.ui.rss.filter_draft.clone()
-    };
+    let draft = active_filter_query(app_state, settings);
     let ranked_preview = compute_filter_preview_items(&app_state.rss_runtime.preview_items, &draft);
     let match_count = ranked_preview
         .iter()
@@ -554,6 +550,24 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     }
 
     f.render_widget(build_rows(lines, "Filters", ctx), area);
+}
+
+fn active_filter_query(app_state: &AppState, settings: &crate::config::Settings) -> String {
+    if app_state.ui.rss.is_editing {
+        return app_state.ui.rss.edit_buffer.clone();
+    }
+
+    let draft = app_state.ui.rss.filter_draft.trim();
+    if !draft.is_empty() {
+        return app_state.ui.rss.filter_draft.clone();
+    }
+
+    settings
+        .rss
+        .filters
+        .get(app_state.ui.rss.selected_filter_index)
+        .map(|f| f.regex.clone())
+        .unwrap_or_default()
 }
 
 fn compute_filter_preview_items(
@@ -1161,5 +1175,27 @@ mod tests {
         let ranked = compute_filter_preview_items(&items, "");
         assert_eq!(ranked.len(), 2);
         assert!(ranked.iter().all(|(_, is_match)| *is_match));
+    }
+
+    #[test]
+    fn active_filter_query_uses_selected_filter_in_nav_mode() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Filters;
+        app_state.ui.rss.is_editing = false;
+        app_state.ui.rss.filter_draft.clear();
+        app_state.ui.rss.selected_filter_index = 1;
+
+        let mut settings = crate::config::Settings::default();
+        settings.rss.filters.push(crate::config::RssFilter {
+            regex: "ubuntu".to_string(),
+            enabled: true,
+        });
+        settings.rss.filters.push(crate::config::RssFilter {
+            regex: "fedora".to_string(),
+            enabled: true,
+        });
+
+        let query = active_filter_query(&app_state, &settings);
+        assert_eq!(query, "fedora");
     }
 }
