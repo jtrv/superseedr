@@ -590,10 +590,10 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "f / l / e / h",
+                        "l / f / e / h",
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     )),
-                    Cell::from("Switch RSS sub-screen (Feeds/FiLters/Explorer/History)"),
+                    Cell::from("Switch RSS sub-screen (Links/Filters/Explorer/History)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -614,7 +614,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "a / d / x",
                         ctx.apply(Style::default().fg(ctx.state_complete())),
                     )),
-                    Cell::from("Feeds: add/delete/toggle. Filters: add/delete (no toggle key)"),
+                    Cell::from("Links: add/delete/toggle. Filters: add/delete (no toggle key)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -629,6 +629,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
                     )),
                     Cell::from("Start Explorer search mode (live as you type)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "F",
+                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                    )),
+                    Cell::from("In Explorer, seed filter draft from selected title"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

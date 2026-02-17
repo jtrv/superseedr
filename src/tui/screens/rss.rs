@@ -54,14 +54,15 @@ fn map_key_to_rss_action(
 
     match key_code {
         KeyCode::Esc | KeyCode::Char('q') => Some(RssAction::ToNormal),
-        KeyCode::Char('f') => {
+        KeyCode::Char('F') => {
             if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
                 Some(RssAction::SeedFilterFromSelectedTitle)
             } else {
-                Some(RssAction::SwitchScreen(RssScreen::Feeds))
+                None
             }
         }
-        KeyCode::Char('l') => Some(RssAction::SwitchScreen(RssScreen::Filters)),
+        KeyCode::Char('l') => Some(RssAction::SwitchScreen(RssScreen::Feeds)),
+        KeyCode::Char('f') => Some(RssAction::SwitchScreen(RssScreen::Filters)),
         KeyCode::Char('e') => Some(RssAction::SwitchScreen(RssScreen::Explorer)),
         KeyCode::Char('h') => Some(RssAction::SwitchScreen(RssScreen::History)),
         KeyCode::Char('S') => Some(RssAction::TriggerSync),
@@ -177,7 +178,7 @@ fn execute_rss_effects(
                                     url: value,
                                     enabled: true,
                                 });
-                                set_rss_status(app_state, "Feed added");
+                                set_rss_status(app_state, "Link added");
                             }
                             RssScreen::Filters => {
                                 new_settings.rss.filters.push(crate::config::RssFilter {
@@ -236,7 +237,7 @@ fn execute_rss_effects(
                             app_state.ui.rss.selected_feed_index =
                                 app_state.ui.rss.selected_feed_index.saturating_sub(1);
                             let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
-                            set_rss_status(app_state, "Feed deleted");
+                            set_rss_status(app_state, "Link deleted");
                         }
                     }
                     RssScreen::Filters => {
@@ -271,9 +272,9 @@ fn execute_rss_effects(
                         set_rss_status(
                             app_state,
                             if enabled {
-                                "Feed enabled"
+                                "Link enabled"
                             } else {
-                                "Feed disabled"
+                                "Link disabled"
                             },
                         );
                     }
@@ -347,7 +348,7 @@ pub fn handle_event(
 
 fn screen_name(screen: RssScreen) -> &'static str {
     match screen {
-        RssScreen::Feeds => "Feeds",
+        RssScreen::Feeds => "Links",
         RssScreen::Filters => "Filters",
         RssScreen::Explorer => "Explorer",
         RssScreen::History => "History",
@@ -400,7 +401,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let mut footer_spans = vec![
         Span::styled(
-            "[f]eeds [l]filters [e]xplorer [h]istory ",
+            "[l]inks [f]ilters [e]xplorer [h]istory ",
             ctx.apply(Style::default().fg(ctx.accent_sapphire())),
         ),
         Span::styled(
@@ -430,7 +431,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 ctx.apply(Style::default().fg(ctx.state_info())),
             )),
             RssScreen::Explorer => footer_spans.push(Span::styled(
-                "[/] search [j/k] move [f] to filter ",
+                "[/] search [j/k] move [F] seed filter ",
                 ctx.apply(Style::default().fg(ctx.state_info())),
             )),
             RssScreen::History => footer_spans.push(Span::styled(
@@ -501,7 +502,7 @@ fn draw_feeds(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         )));
     }
 
-    f.render_widget(build_rows(lines, "Feeds", ctx), area);
+    f.render_widget(build_rows(lines, "Links", ctx), area);
 }
 
 fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
@@ -771,7 +772,7 @@ mod tests {
             &settings,
             &tx,
         );
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Filters));
+        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Feeds));
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
@@ -807,7 +808,7 @@ mod tests {
             &settings,
             &tx,
         );
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Feeds));
+        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Filters));
     }
 
     #[test]
@@ -862,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn explorer_f_seeds_filter_and_switches_screen() {
+    fn explorer_shift_f_seeds_filter_and_switches_screen() {
         let mut app_state = base_state();
         app_state.ui.rss.active_screen = RssScreen::Explorer;
         app_state.rss_runtime.preview_items.push(RssPreviewItem {
@@ -875,7 +876,7 @@ mod tests {
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Char('f'),
+                KeyCode::Char('F'),
                 ratatui::crossterm::event::KeyModifiers::NONE,
             )),
             &mut app_state,
