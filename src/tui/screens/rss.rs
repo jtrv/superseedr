@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{AppCommand, AppMode, AppState, RssScreen};
+use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
 #[cfg(windows)]
 use clipboard::{ClipboardContext, ClipboardProvider};
@@ -772,10 +773,11 @@ fn draw_history(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
 }
 
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
-    let area = f.area();
+    let area = centered_rect(88, 86, f.area());
     let app_state = screen.app.state;
     let ctx = screen.theme;
 
+    f.render_widget(Clear, area);
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
