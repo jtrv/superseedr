@@ -490,4 +490,34 @@ mod tests {
 
         assert!(rx.try_recv().is_err());
     }
+
+    #[tokio::test]
+    async fn rss_service_applies_runtime_settings_update_on_sync_now() {
+        let settings = Settings::default();
+        let (tx, mut rx) = mpsc::channel::<AppCommand>(8);
+        let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
+        let (settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let handle = spawn_rss_service(settings, tx, sync_rx, settings_rx, shutdown_tx.clone());
+        tokio::task::yield_now().await;
+
+        // Enable RSS at runtime with no feeds (network-free path):
+        // run_sync should emit RssPreviewUpdated(Vec::new()).
+        let mut updated = Settings::default();
+        updated.rss.enabled = true;
+        settings_tx.send(updated).expect("send settings update");
+        sync_tx.send(()).await.expect("send sync trigger");
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for command");
+        match got {
+            Some(AppCommand::RssPreviewUpdated(items)) => assert!(items.is_empty()),
+            other => panic!("unexpected command: {:?}", other.map(|_| "non-preview")),
+        }
+
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
 }
