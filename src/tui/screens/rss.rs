@@ -479,13 +479,23 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
 
     let draft = app_state.ui.rss.filter_draft.clone();
     if !draft.is_empty() {
+        let mut live_preview_titles: Vec<String> = Vec::new();
         let match_count = match Regex::new(&draft) {
-            Ok(rx) => app_state
-                .rss_runtime
-                .preview_items
-                .iter()
-                .filter(|item| rx.is_match(item.title.as_str()))
-                .count(),
+            Ok(rx) => {
+                for item in app_state.rss_runtime.preview_items.iter() {
+                    if rx.is_match(item.title.as_str()) {
+                        if live_preview_titles.len() < 5 {
+                            live_preview_titles.push(item.title.clone());
+                        }
+                    }
+                }
+                app_state
+                    .rss_runtime
+                    .preview_items
+                    .iter()
+                    .filter(|item| rx.is_match(item.title.as_str()))
+                    .count()
+            }
             Err(_) => 0,
         };
 
@@ -494,6 +504,11 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         lines.push(Line::from(format!("Live matches: {}", match_count)));
         if Regex::new(&draft).is_err() {
             lines.push(Line::from("Invalid regex draft"));
+        } else if !live_preview_titles.is_empty() {
+            lines.push(Line::from("Live preview:"));
+            for title in live_preview_titles {
+                lines.push(Line::from(format!("- {}", title)));
+            }
         }
     }
 
@@ -516,11 +531,19 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let prioritise_matches = has_search || has_filters;
 
     let mut items = app_state.rss_runtime.preview_items.clone();
-    if has_search {
-        items.retain(|item| item.title.to_lowercase().contains(&search));
-    }
+    let mut combined_match: Vec<bool> = items
+        .iter()
+        .map(|item| {
+            let search_hit = has_search && item.title.to_lowercase().contains(&search);
+            item.is_match || search_hit
+        })
+        .collect();
     if prioritise_matches {
-        items.sort_by(|a, b| b.is_match.cmp(&a.is_match));
+        let mut paired: Vec<(crate::app::RssPreviewItem, bool)> =
+            items.into_iter().zip(combined_match.into_iter()).collect();
+        paired.sort_by(|a, b| b.1.cmp(&a.1));
+        combined_match = paired.iter().map(|p| p.1).collect();
+        items = paired.into_iter().map(|p| p.0).collect();
     }
 
     let mut lines: Vec<Line<'static>> = items
@@ -529,11 +552,15 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         .map(|(i, item)| {
             let cursor = if i == selected { "> " } else { "  " };
             let mut badges = String::new();
-            if item.is_match {
+            let is_combined_match = combined_match.get(i).copied().unwrap_or(item.is_match);
+            if is_combined_match {
                 badges.push('M');
             }
             if item.is_downloaded {
                 badges.push('D');
+            }
+            if prioritise_matches && !is_combined_match {
+                badges.push('d');
             }
             let src = item.source.clone().unwrap_or_else(|| "unknown".to_string());
             Line::from(format!("{}[{}] {} ({})", cursor, badges, item.title, src))
@@ -566,7 +593,14 @@ fn draw_history(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 .source
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            Line::from(format!("{}{} ({})", cursor, entry.title, src))
+            let via = match entry.added_via {
+                crate::config::RssAddedVia::Auto => "auto",
+                crate::config::RssAddedVia::Manual => "manual",
+            };
+            Line::from(format!(
+                "{}{} | {} | {} | {}",
+                cursor, entry.date_iso, via, src, entry.title
+            ))
         })
         .collect();
 

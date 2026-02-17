@@ -715,6 +715,7 @@ pub struct App {
     pub app_command_tx: mpsc::Sender<AppCommand>,
     pub app_command_rx: mpsc::Receiver<AppCommand>,
     pub rss_sync_tx: mpsc::Sender<()>,
+    pub rss_settings_tx: watch::Sender<Settings>,
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
@@ -731,6 +732,7 @@ impl App {
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (rss_sync_tx, rss_sync_rx) = mpsc::channel::<()>(8);
+        let (rss_settings_tx, rss_settings_rx) = watch::channel(client_configs.clone());
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -839,6 +841,7 @@ impl App {
             app_command_tx,
             app_command_rx,
             rss_sync_tx,
+            rss_settings_tx,
             tui_event_tx,
             tui_event_rx,
             shutdown_tx,
@@ -851,6 +854,7 @@ impl App {
             app.client_configs.clone(),
             app.app_command_tx.clone(),
             rss_sync_rx,
+            rss_settings_rx,
             app.shutdown_tx.clone(),
         );
 
@@ -1693,12 +1697,14 @@ impl App {
                 self.app_state.ui.needs_redraw = true;
             }
             AppCommand::RssConfigUpdated => {
+                let _ = self.rss_settings_tx.send(self.client_configs.clone());
                 self.save_state_to_disk();
                 self.app_state.ui.needs_redraw = true;
             }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
+                let _ = self.rss_settings_tx.send(self.client_configs.clone());
 
                 if new_settings.ui_theme != old_settings.ui_theme {
                     self.app_state.theme = Theme::builtin(new_settings.ui_theme);

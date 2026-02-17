@@ -36,17 +36,16 @@ pub fn spawn_rss_service(
     settings: Settings,
     app_command_tx: mpsc::Sender<AppCommand>,
     mut sync_now_rx: mpsc::Receiver<()>,
+    mut settings_rx: tokio::sync::watch::Receiver<Settings>,
     shutdown_tx: broadcast::Sender<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut shutdown_rx = shutdown_tx.subscribe();
-
-        if !settings.rss.enabled {
-            let _ = shutdown_rx.recv().await;
-            return;
-        }
-
-        let poll_secs = settings.rss.poll_interval_secs.max(MIN_POLL_INTERVAL_SECS);
+        let mut current_settings = settings;
+        let mut poll_secs = current_settings
+            .rss
+            .poll_interval_secs
+            .max(MIN_POLL_INTERVAL_SECS);
         let mut ticker = time::interval(Duration::from_secs(poll_secs));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
@@ -69,11 +68,26 @@ pub fn spawn_rss_service(
                 _ = shutdown_rx.recv() => {
                     break;
                 }
+                changed = settings_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    current_settings = settings_rx.borrow().clone();
+                    poll_secs = current_settings
+                        .rss
+                        .poll_interval_secs
+                        .max(MIN_POLL_INTERVAL_SECS);
+                    ticker = time::interval(Duration::from_secs(poll_secs));
+                    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+                }
                 maybe_sync = sync_now_rx.recv() => {
                     if maybe_sync.is_none() {
                         break;
                     }
-                    run_sync(&settings, &client, &app_command_tx, &mut downloaded_keys).await;
+                    if !current_settings.rss.enabled {
+                        continue;
+                    }
+                    run_sync(&current_settings, &client, &app_command_tx, &mut downloaded_keys).await;
                     let now = Utc::now();
                     let next = now + ChronoDuration::seconds(poll_secs as i64);
                     let _ = app_command_tx.send(AppCommand::RssSyncStatusUpdated {
@@ -82,7 +96,10 @@ pub fn spawn_rss_service(
                     }).await;
                 }
                 _ = ticker.tick() => {
-                    run_sync(&settings, &client, &app_command_tx, &mut downloaded_keys).await;
+                    if !current_settings.rss.enabled {
+                        continue;
+                    }
+                    run_sync(&current_settings, &client, &app_command_tx, &mut downloaded_keys).await;
                     let now = Utc::now();
                     let next = now + ChronoDuration::seconds(poll_secs as i64);
                     let _ = app_command_tx.send(AppCommand::RssSyncStatusUpdated {
@@ -459,10 +476,12 @@ mod tests {
         let settings = Settings::default();
         let (tx, mut rx) = mpsc::channel::<AppCommand>(2);
         let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
+        let (settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let handle = spawn_rss_service(settings, tx, sync_rx, shutdown_tx.clone());
+        let handle = spawn_rss_service(settings, tx, sync_rx, settings_rx, shutdown_tx.clone());
         drop(sync_tx);
+        drop(settings_tx);
         tokio::task::yield_now().await;
 
         let _ = shutdown_tx.send(());
