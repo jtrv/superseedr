@@ -394,8 +394,6 @@ pub enum AppCommand {
     #[allow(dead_code)]
     RssDownloadSelected(RssHistoryEntry),
     #[allow(dead_code)]
-    RssManualAddSelected(RssPreviewItem),
-    #[allow(dead_code)]
     RssConfigUpdated,
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
@@ -1675,35 +1673,6 @@ impl App {
                 }
                 self.app_state.ui.needs_redraw = true;
             }
-            AppCommand::RssManualAddSelected(item) => {
-                match rss_service::manual_ingest_preview_item(&self.client_configs, &item).await {
-                    Ok(entry) => {
-                        let exists = self
-                            .app_state
-                            .rss_runtime
-                            .history
-                            .iter()
-                            .any(|existing| existing.dedupe_key == entry.dedupe_key);
-                        if !exists {
-                            self.app_state.rss_runtime.history.push(entry);
-                            self.save_state_to_disk();
-                        }
-                        if let Some(preview) = self
-                            .app_state
-                            .rss_runtime
-                            .preview_items
-                            .iter_mut()
-                            .find(|p| p.dedupe_key == item.dedupe_key)
-                        {
-                            preview.is_downloaded = true;
-                        }
-                    }
-                    Err(e) => {
-                        self.app_state.system_error = Some(format!("RSS manual add failed: {}", e));
-                    }
-                }
-                self.app_state.ui.needs_redraw = true;
-            }
             AppCommand::RssConfigUpdated => {
                 let _ = self.rss_settings_tx.send(self.client_configs.clone());
                 self.save_state_to_disk();
@@ -1713,7 +1682,7 @@ impl App {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
                 let _ = self.rss_settings_tx.send(self.client_configs.clone());
-                let rss_changed = new_settings.rss != old_settings.rss;
+                let rss_changed = rss_settings_changed(&old_settings, &new_settings);
 
                 if new_settings.ui_theme != old_settings.ui_theme {
                     self.app_state.theme = Theme::builtin(new_settings.ui_theme);
@@ -3128,12 +3097,16 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
     clamp_selected_indices_in_state(app_state);
 }
 
+fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> bool {
+    new_settings.rss != old_settings.rss
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         clamp_selected_indices_in_state, extract_magnet_display_name,
         persisted_validation_status_from_piece_completion, resolve_magnet_torrent_name,
-        sort_and_filter_torrent_list_state, torrent_completion_percent,
+        rss_settings_changed, sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
         SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
         UiState,
@@ -3310,5 +3283,26 @@ mod tests {
             extract_magnet_display_name(magnet),
             Some("Debian Netinst".to_string())
         );
+    }
+
+    #[test]
+    fn rss_settings_changed_detects_filter_updates() {
+        let old = crate::config::Settings::default();
+        let mut new = old.clone();
+        new.rss.filters.push(crate::config::RssFilter {
+            regex: "ubuntu".to_string(),
+            enabled: true,
+        });
+
+        assert!(rss_settings_changed(&old, &new));
+    }
+
+    #[test]
+    fn rss_settings_changed_ignores_non_rss_updates() {
+        let old = crate::config::Settings::default();
+        let mut new = old.clone();
+        new.global_download_limit_bps += 1;
+
+        assert!(!rss_settings_changed(&old, &new));
     }
 }

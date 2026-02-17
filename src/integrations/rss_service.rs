@@ -116,43 +116,6 @@ pub fn spawn_rss_service(
     })
 }
 
-pub async fn manual_ingest_preview_item(
-    settings: &Settings,
-    item: &RssPreviewItem,
-) -> Result<RssHistoryEntry, String> {
-    let link = item
-        .link
-        .as_ref()
-        .ok_or_else(|| "selected item has no link".to_string())?;
-
-    if link.starts_with("magnet:") {
-        write_magnet(settings, link).map_err(|e| format!("magnet write failed: {e}"))?;
-    } else if link.starts_with("http://") || link.starts_with("https://") {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| format!("HTTP client build failed: {e}"))?;
-        let bytes = fetch_torrent_bytes(&client, link).await?;
-        write_torrent_bytes(settings, link, &bytes)
-            .map_err(|e| format!("torrent write failed: {e}"))?;
-    } else {
-        return Err("unsupported link scheme".to_string());
-    }
-
-    Ok(RssHistoryEntry {
-        dedupe_key: item.dedupe_key.clone(),
-        guid: item.guid.clone(),
-        link: item.link.clone(),
-        title: item.title.clone(),
-        source: item.source.clone(),
-        date_iso: item
-            .date_iso
-            .clone()
-            .unwrap_or_else(|| Utc::now().to_rfc3339()),
-        added_via: RssAddedVia::Manual,
-    })
-}
-
 async fn run_sync(
     settings: &Settings,
     client: &Client,
@@ -505,9 +468,6 @@ fn rss_watch_dir(settings: &Settings) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     #[test]
     fn dedupe_key_prefers_guid_then_link_then_title_source() {
@@ -595,98 +555,4 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
-    #[tokio::test]
-    async fn manual_ingest_magnet_writes_watch_file_and_returns_history_entry() {
-        let tmp = tempdir().expect("tempdir");
-        let mut settings = Settings::default();
-        settings.watch_folder = Some(tmp.path().to_path_buf());
-
-        let magnet = "magnet:?xt=urn:btih:00112233445566778899AABBCCDDEEFF00112233";
-        let item = RssPreviewItem {
-            dedupe_key: "guid:abc123".to_string(),
-            title: "Ubuntu ISO".to_string(),
-            link: Some(magnet.to_string()),
-            guid: Some("abc123".to_string()),
-            source: Some("Example Feed".to_string()),
-            date_iso: Some("2026-02-17T12:00:00Z".to_string()),
-            ..Default::default()
-        };
-
-        let entry = manual_ingest_preview_item(&settings, &item)
-            .await
-            .expect("manual ingest should succeed");
-
-        let expected_name = format!("{}.magnet", hex::encode(Sha1::digest(magnet.as_bytes())));
-        let expected_path = tmp.path().join(expected_name);
-        assert!(expected_path.exists(), "expected magnet file to be created");
-
-        let content = std::fs::read_to_string(expected_path).expect("read magnet file");
-        assert_eq!(content, magnet);
-
-        assert_eq!(entry.dedupe_key, "guid:abc123");
-        assert_eq!(entry.title, "Ubuntu ISO");
-        assert_eq!(entry.guid.as_deref(), Some("abc123"));
-        assert_eq!(entry.source.as_deref(), Some("Example Feed"));
-        assert_eq!(entry.added_via, RssAddedVia::Manual);
-    }
-
-    #[tokio::test]
-    async fn manual_ingest_http_torrent_writes_watch_file_and_returns_history_entry() {
-        let tmp = tempdir().expect("tempdir");
-        let mut settings = Settings::default();
-        settings.watch_folder = Some(tmp.path().to_path_buf());
-
-        let payload = b"d8:announce13:http://t4:infod6:lengthi1e4:name4:test12:piece lengthi1e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local test server");
-        let addr = listener.local_addr().expect("local addr");
-
-        let server_task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/x-bittorrent\r\nConnection: close\r\n\r\n",
-                payload.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write headers");
-            socket.write_all(payload).await.expect("write body");
-        });
-
-        let url = format!("http://{}/example.torrent", addr);
-        let item = RssPreviewItem {
-            dedupe_key: "link:test-http".to_string(),
-            title: "Fedora ISO".to_string(),
-            link: Some(url.clone()),
-            guid: None,
-            source: Some("HTTP Feed".to_string()),
-            date_iso: Some("2026-02-17T13:00:00Z".to_string()),
-            ..Default::default()
-        };
-
-        let entry = manual_ingest_preview_item(&settings, &item)
-            .await
-            .expect("manual ingest should succeed");
-
-        server_task.await.expect("server task");
-
-        let expected_name = format!("{}.torrent", hex::encode(Sha1::digest(url.as_bytes())));
-        let expected_path = tmp.path().join(expected_name);
-        assert!(
-            expected_path.exists(),
-            "expected torrent file to be created"
-        );
-
-        let content = std::fs::read(expected_path).expect("read torrent file");
-        assert_eq!(content, payload);
-
-        assert_eq!(entry.dedupe_key, "link:test-http");
-        assert_eq!(entry.title, "Fedora ISO");
-        assert_eq!(entry.source.as_deref(), Some("HTTP Feed"));
-        assert_eq!(entry.added_via, RssAddedVia::Manual);
-    }
 }

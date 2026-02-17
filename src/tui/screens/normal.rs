@@ -3810,6 +3810,16 @@ mod tests {
     }
 
     #[test]
+    fn reducer_open_rss_emits_open_rss_effect() {
+        let mut app_state = AppState::default();
+
+        let result = reduce_ui_action(&mut app_state, UiAction::OpenRss);
+
+        assert!(result.redraw);
+        assert_eq!(result.effects, vec![UiEffect::OpenRssScreen]);
+    }
+
+    #[test]
     fn reducer_data_rate_actions_update_rate_and_emit_effect() {
         let mut app_state = AppState {
             data_rate: DataRate::Rate1s,
@@ -3941,5 +3951,19 @@ mod tests {
                 "magnet:?xt=urn:btih:test".to_string()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn apply_open_rss_screen_sets_rss_mode_and_unified_screen() {
+        let mut app = App::new(crate::config::Settings::default())
+            .await
+            .expect("build app");
+        app.app_state.ui.rss.active_screen = RssScreen::History;
+
+        execute_ui_effect(&mut app, UiEffect::OpenRssScreen).await;
+
+        assert!(matches!(app.app_state.mode, AppMode::Rss));
+        assert!(matches!(app.app_state.ui.rss.active_screen, RssScreen::Unified));
+        let _ = app.shutdown_tx.send(());
     }
 }

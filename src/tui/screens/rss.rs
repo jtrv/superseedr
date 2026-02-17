@@ -786,9 +786,23 @@ fn draw_history(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnifiedLayout {
+    Wide,
+    Narrow,
+}
+
+fn unified_layout_for_width(width: u16) -> UnifiedLayout {
+    if width >= 140 {
+        UnifiedLayout::Wide
+    } else {
+        UnifiedLayout::Narrow
+    }
+}
+
 fn draw_unified_body(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
-    if area.width >= 140 {
+    if matches!(unified_layout_for_width(area.width), UnifiedLayout::Wide) {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -1389,5 +1403,15 @@ mod tests {
 
         let query = active_filter_query(&app_state, &settings);
         assert_eq!(query, "fedora");
+    }
+
+    #[test]
+    fn unified_layout_is_narrow_below_boundary() {
+        assert!(matches!(unified_layout_for_width(139), UnifiedLayout::Narrow));
+    }
+
+    #[test]
+    fn unified_layout_is_wide_at_boundary() {
+        assert!(matches!(unified_layout_for_width(140), UnifiedLayout::Wide));
     }
 }
