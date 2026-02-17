@@ -58,13 +58,24 @@ pub fn spawn_rss_service(
             .build()
         {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                tracing::error!("RSS service startup failed: HTTP client build error: {}", e);
+                return;
+            }
         };
 
         let mut downloaded_keys: HashSet<String> = load_rss_state()
             .history
-            .into_iter()
-            .map(|h| h.dedupe_key)
+            .iter()
+            .flat_map(|h| {
+                identity_keys_for(
+                    h.guid.as_deref(),
+                    h.link.as_deref(),
+                    h.title.as_str(),
+                    h.source.as_deref(),
+                    h.dedupe_key.as_str(),
+                )
+            })
             .collect();
 
         loop {
@@ -171,14 +182,23 @@ async fn run_sync(
             continue;
         }
 
+        let identity_keys = identity_keys_for(
+            item.guid.as_deref(),
+            item.link.as_deref(),
+            item.title.as_str(),
+            item.source.as_deref(),
+            item.dedupe_key.as_str(),
+        );
         let is_match = title_matches_filters(item.title.as_str(), &enabled_filters, &matcher);
-        let mut is_downloaded = downloaded_keys.contains(&item.dedupe_key);
+        let mut is_downloaded = identity_keys.iter().any(|k| downloaded_keys.contains(k));
 
         if is_match && !is_downloaded {
             let added = auto_ingest_item(settings, client, &item).await;
             if added {
                 is_downloaded = true;
-                downloaded_keys.insert(item.dedupe_key.clone());
+                for key in &identity_keys {
+                    downloaded_keys.insert(key.clone());
+                }
 
                 let entry = RssHistoryEntry {
                     dedupe_key: item.dedupe_key.clone(),
@@ -226,7 +246,7 @@ fn enabled_filters(settings: &Settings) -> Vec<String> {
         .filters
         .iter()
         .filter(|f| f.enabled)
-        .map(|f| f.regex.trim().to_string())
+        .map(|f| f.query.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -369,6 +389,33 @@ fn dedupe_key_for(
     let normalized_title = normalize_title(title);
     let normalized_source = normalize_title(source.unwrap_or(""));
     format!("title_source:{}::{}", normalized_title, normalized_source)
+}
+
+fn identity_keys_for(
+    guid: Option<&str>,
+    link: Option<&str>,
+    title: &str,
+    source: Option<&str>,
+    primary_key: &str,
+) -> Vec<String> {
+    let mut keys = HashSet::new();
+    let primary = primary_key.trim();
+    if !primary.is_empty() {
+        keys.insert(primary.to_string());
+    }
+    if let Some(g) = guid.filter(|v| !v.trim().is_empty()) {
+        keys.insert(format!("guid:{}", g.trim()));
+    }
+    if let Some(l) = link.filter(|v| !v.trim().is_empty()) {
+        keys.insert(format!("link:{}", l.trim()));
+    }
+    let normalized_title = normalize_title(title);
+    let normalized_source = normalize_title(source.unwrap_or(""));
+    keys.insert(format!(
+        "title_source:{}::{}",
+        normalized_title, normalized_source
+    ));
+    keys.into_iter().collect()
 }
 
 fn normalize_title(input: &str) -> String {
@@ -554,5 +601,4 @@ mod tests {
         let _ = shutdown_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
-
 }

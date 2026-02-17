@@ -590,14 +590,14 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "Tab / Shift+Tab / h / l / ← / → / H",
+                        "Tab / h",
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     )),
-                    Cell::from("Cycle pane focus (Links/Filters/Explorer) / open History (H)"),
+                    Cell::from("Next pane focus (Tab) / swap Explorer with History (h)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "S",
+                        "s",
                         ctx.apply(Style::default().fg(ctx.state_warning())),
                     )),
                     Cell::from("Sync now"),
@@ -611,10 +611,12 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "a / d / x",
+                        "a / d / Space",
                         ctx.apply(Style::default().fg(ctx.state_complete())),
                     )),
-                    Cell::from("Focused pane actions: Links add/delete/toggle; Filters add/delete"),
+                    Cell::from(
+                        "Focused pane actions: Links add/delete/toggle; Filters add/delete/toggle",
+                    ),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -629,13 +631,6 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
                     )),
                     Cell::from("Start Explorer search mode (when Explorer pane is focused)"),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        "F",
-                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-                    )),
-                    Cell::from("In Explorer, seed filter draft from selected title"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

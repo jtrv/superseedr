@@ -377,24 +377,17 @@ pub enum AppCommand {
         data: Vec<tree::RawNode<FileMetadata>>,
         highlight_path: Option<PathBuf>,
     },
-    #[allow(dead_code)]
     RssSyncNow,
-    #[allow(dead_code)]
     RssPreviewUpdated(Vec<RssPreviewItem>),
-    #[allow(dead_code)]
     RssSyncStatusUpdated {
         last_sync_at: Option<String>,
         next_sync_at: Option<String>,
     },
-    #[allow(dead_code)]
     RssFeedErrorUpdated {
         feed_url: String,
         error: Option<FeedSyncError>,
     },
-    #[allow(dead_code)]
     RssDownloadSelected(RssHistoryEntry),
-    #[allow(dead_code)]
-    RssConfigUpdated,
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
 }
@@ -586,6 +579,7 @@ pub struct RssUiState {
     pub add_feed_buffer: String,
     pub add_filter_buffer: String,
     pub status_message: Option<String>,
+    pub last_sync_request_at: Option<Instant>,
 }
 
 #[derive(Default, Clone)]
@@ -1671,11 +1665,6 @@ impl App {
                     self.app_state.rss_runtime.history.push(entry);
                     self.save_state_to_disk();
                 }
-                self.app_state.ui.needs_redraw = true;
-            }
-            AppCommand::RssConfigUpdated => {
-                let _ = self.rss_settings_tx.send(self.client_configs.clone());
-                self.save_state_to_disk();
                 self.app_state.ui.needs_redraw = true;
             }
             AppCommand::UpdateConfig(new_settings) => {
@@ -3290,7 +3279,7 @@ mod tests {
         let old = crate::config::Settings::default();
         let mut new = old.clone();
         new.rss.filters.push(crate::config::RssFilter {
-            regex: "ubuntu".to_string(),
+            query: "ubuntu".to_string(),
             enabled: true,
         });
 

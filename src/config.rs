@@ -78,14 +78,15 @@ impl Default for RssFeed {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct RssFilter {
-    pub regex: String,
+    #[serde(alias = "regex")]
+    pub query: String,
     pub enabled: bool,
 }
 
 impl Default for RssFilter {
     fn default() -> Self {
         Self {
-            regex: String::new(),
+            query: String::new(),
             enabled: true,
         }
     }
@@ -614,6 +615,29 @@ mod tests {
             ThemeName::default(),
             "Invalid ui_theme type should safely fallback to default"
         );
+    }
+
+    #[test]
+    fn test_rss_filter_legacy_regex_key_is_accepted() {
+        let toml_str = r#"
+            [rss]
+            enabled = true
+            poll_interval_secs = 300
+            max_preview_items = 50
+
+            [[rss.filters]]
+            regex = "ubuntu"
+            enabled = true
+        "#;
+
+        let settings: Settings = Figment::new()
+            .merge(Toml::string(toml_str))
+            .extract()
+            .expect("Settings parsing should accept legacy rss.filters.regex key");
+
+        assert_eq!(settings.rss.filters.len(), 1);
+        assert_eq!(settings.rss.filters[0].query, "ubuntu");
+        assert!(settings.rss.filters[0].enabled);
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::tui::layout::normal::LayoutPlan;
 use crate::tui::layout::normal::DEFAULT_SIDEBAR_PERCENT;
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::TreeViewState;
+use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -1765,6 +1766,21 @@ pub fn draw_stats_panel(
         ]),
         Line::from(vec![
             Span::styled(
+                "RSS Sync: ",
+                ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+            ),
+            Span::styled(
+                app_state
+                    .rss_runtime
+                    .next_sync_at
+                    .as_deref()
+                    .and_then(rss_sync_countdown_label)
+                    .unwrap_or_else(|| "-".to_string()),
+                ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "Torrents: ",
                 ctx.apply(Style::default().fg(ctx.accent_peach())),
             ),
@@ -1836,18 +1852,12 @@ pub fn draw_stats_panel(
         Line::from(vec![
             Span::styled("RAM: ", ctx.apply(Style::default().fg(ctx.state_warning()))),
             Span::styled(
-                format!("{:.1}%", app_state.ram_usage_percent),
+                format!(
+                    "{:.1}% ({})",
+                    app_state.ram_usage_percent,
+                    format_memory(app_state.app_ram_usage)
+                ),
                 ctx.apply(Style::default().fg(ctx.state_warning())),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "App RAM: ",
-                ctx.apply(Style::default().fg(ctx.accent_flamingo())),
-            ),
-            Span::styled(
-                format_memory(app_state.app_ram_usage),
-                ctx.apply(Style::default().fg(ctx.accent_flamingo())),
             ),
         ]),
         Line::from(vec![
@@ -2035,6 +2045,29 @@ pub fn draw_stats_panel(
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
 
     f.render_widget(stats_paragraph, stats_chunk);
+}
+
+fn rss_sync_countdown_label(next_sync_at: &str) -> Option<String> {
+    let next_sync = DateTime::parse_from_rfc3339(next_sync_at).ok()?;
+    let remaining_secs = next_sync
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now())
+        .num_seconds();
+    if remaining_secs <= 0 {
+        return None;
+    }
+
+    let hours = remaining_secs / 3600;
+    let minutes = (remaining_secs % 3600) / 60;
+    let seconds = remaining_secs % 60;
+    let label = if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, seconds)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    };
+    Some(label)
 }
 
 pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
