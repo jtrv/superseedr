@@ -611,6 +611,34 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
+                        "a / d / x",
+                        ctx.apply(Style::default().fg(ctx.state_complete())),
+                    )),
+                    Cell::from("Add / delete / toggle feed or filter entries"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Enter",
+                        ctx.apply(Style::default().fg(ctx.state_warning())),
+                    )),
+                    Cell::from("Confirm input or manual add from Explorer"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "/",
+                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                    )),
+                    Cell::from("Start Explorer search"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "y",
+                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                    )),
+                    Cell::from("Copy selected Explorer link to clipboard"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
                         "Tab / Shift+Tab",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),

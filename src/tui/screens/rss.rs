@@ -8,6 +8,10 @@ use clipboard::{ClipboardContext, ClipboardProvider};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
 use regex::Regex;
+#[cfg(not(windows))]
+use std::io::Write;
+#[cfg(not(windows))]
+use std::process::{Command, Stdio};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -281,28 +285,15 @@ fn execute_rss_effects(
                         .get(idx)
                         .and_then(|item| item.link.clone())
                     {
-                        #[cfg(windows)]
-                        {
-                            match ClipboardContext::new() {
-                                Ok(mut ctx) => match ctx.set_contents(link.clone()) {
-                                    Ok(_) => {
-                                        app_state.system_warning =
-                                            Some("Copied link to clipboard".to_string());
-                                    }
-                                    Err(e) => {
-                                        app_state.system_warning =
-                                            Some(format!("Clipboard copy failed: {}", e));
-                                    }
-                                },
-                                Err(e) => {
-                                    app_state.system_warning =
-                                        Some(format!("Clipboard unavailable: {}", e));
-                                }
+                        match copy_to_clipboard(link.as_str()) {
+                            Ok(()) => {
+                                app_state.system_warning =
+                                    Some("Copied link to clipboard".to_string());
                             }
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            app_state.system_warning = Some(format!("Link: {}", link));
+                            Err(e) => {
+                                app_state.system_warning =
+                                    Some(format!("Clipboard copy failed: {} (link: {})", e, link));
+                            }
                         }
                     }
                 }
@@ -320,6 +311,67 @@ fn execute_rss_effects(
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut ctx =
+        ClipboardContext::new().map_err(|e| format!("clipboard initialization error: {}", e))?;
+    ctx.set_contents(text.to_string())
+        .map_err(|e| format!("clipboard write error: {}", e))
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn pbcopy: {}", e))?;
+
+    if let Some(stdin) = &mut child.stdin {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("failed to write to pbcopy stdin: {}", e))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait for pbcopy: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("pbcopy exited with status {}", status))
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
+        if let Some(stdin) = &mut child.stdin {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+
+    for args in [["-selection", "clipboard"], ["-selection", "primary"]] {
+        if let Ok(mut child) = Command::new("xclip")
+            .args(args)
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = &mut child.stdin {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+    }
+
+    Err("no supported clipboard command found (tried wl-copy and xclip)".to_string())
 }
 
 pub fn handle_event(
