@@ -34,7 +34,8 @@ Webapp-visible behavior is the source of truth for MVP parity. Enhancements are 
 ## Superseedr Integration Constraints
 - Keep all torrent ingestion through existing handlers in `src/integrations/watcher.rs` and add flows equivalent to CLI atomic write style in `src/integrations/cli.rs`.
 - Keep status output model compatible with `src/integrations/status.rs` (`status_files/app_state.json`).
-- Persist durable config in `settings.toml` via `src/config.rs::save_settings` and use the same backup behavior.
+- Persist durable RSS config in `settings.toml` via `src/config.rs::save_settings`.
+- Persist RSS runtime state in `rss.toml` under a dedicated `persistence/` path.
 - Reuse existing mode/event/view architecture (`AppMode`, `tui/events.rs`, `tui/view.rs`, reducer/effect style from `tui/screens/normal.rs` and `tui/screens/config.rs`).
 
 ## Target TUI UX (Selection Experience)
@@ -115,8 +116,8 @@ Global RSS controls:
 
 ## Data Model and Persistence
 
-### Add to `Settings` (persistent)
-Add `rss: RssSettings` under `Settings` in `src/config.rs`.
+### `settings.toml` (durable config)
+Keep RSS user-configurable/static values under `Settings.rss` in `src/config.rs`.
 
 ```rust
 pub struct RssSettings {
@@ -125,9 +126,6 @@ pub struct RssSettings {
     pub max_preview_items: usize,
     pub feeds: Vec<RssFeed>,
     pub filters: Vec<RssFilter>,
-    pub history: Vec<RssHistoryEntry>,
-    pub last_sync_at: Option<String>,
-    pub feed_errors: std::collections::HashMap<String, FeedSyncError>,
 }
 
 pub struct RssFeed {
@@ -139,6 +137,17 @@ pub struct RssFilter {
     pub regex: String,
     // MVP parity: always active; no UI toggle.
     pub enabled: bool,
+}
+```
+
+### `persistence/rss.toml` (runtime state)
+Store mutable RSS runtime state in a dedicated persistence file.
+
+```rust
+pub struct RssPersistedState {
+    pub history: Vec<RssHistoryEntry>,
+    pub last_sync_at: Option<String>,
+    pub feed_errors: std::collections::HashMap<String, FeedSyncError>,
 }
 
 pub struct RssHistoryEntry {
@@ -164,13 +173,10 @@ Use two dedupe rules for different goals:
 
 ### Persistent requirements
 Persist these values:
-1. RSS feature enabled/disabled.
-2. Poll interval.
-3. Feed list + per-feed enabled state.
-4. Filter list (all effectively enabled in MVP UI behavior).
-5. Download/add history used for dedupe and Downloaded badge.
-6. Last successful sync timestamp.
-7. Last sync error per feed (for UI diagnostics).
+1. In `settings.toml`: RSS enabled/disabled, poll interval, feed list + per-feed enabled state, filter list.
+2. In `persistence/rss.toml`: download/add history used for dedupe + Downloaded badge.
+3. In `persistence/rss.toml`: last successful sync timestamp.
+4. In `persistence/rss.toml`: last sync error per feed (for UI diagnostics).
 
 ### Retention
 - Cap history at 1000 entries.
@@ -186,7 +192,8 @@ Persist these values:
 ### Migration
 - `Settings` defaults must initialize `rss` safely.
 - Old settings files without RSS fields must load cleanly with defaults (`#[serde(default)]`).
-- Preserve existing backup/save behavior unchanged.
+- Add `src/persistence/` module and initialize `persistence/rss.toml` lazily on first RSS write.
+- If `persistence/rss.toml` is missing or corrupt, recover to empty RSS state without blocking app startup.
 
 ## Runtime Components
 
@@ -200,6 +207,7 @@ Add dedicated `rss_service` runtime task:
 - For auto matches: write to watch folder using atomic temp->rename pattern.
 - Emit app commands/events to refresh RSS mode state.
 - Stop via existing app shutdown signal.
+- Persist runtime changes via `src/persistence/rss.rs` into `persistence/rss.toml`.
 
 ### Feed parsing
 - Use `feed-rs` and normalize fields (`title`, `link`, `guid`, `pubDate`, `source`).
@@ -274,7 +282,9 @@ Create `src/tui/screens/rss.rs` with:
 1. Poll feed fixture -> matched item writes atomic `.magnet`/`.torrent`.
 2. Manual row download writes once and marks history.
 3. Manual add bypasses filters but still dedupes by history key.
-4. Restart persistence: feeds/filters/history/sync metadata survive reload.
+4. Restart persistence split:
+- `settings.toml`: feeds/filters/settings survive reload.
+- `persistence/rss.toml`: history/sync metadata/errors survive reload.
 5. Watch folder override works with RSS writes.
 
 ### UI parity checks
@@ -287,11 +297,11 @@ Create `src/tui/screens/rss.rs` with:
 
 ## Implementation Phases
 1. **Parity contract + data semantics**: lock behavior rules, add settings schema, dedupe definitions.
-2. **Persistence + runtime wiring**: defaults/migration, dedicated `rss_service` lifecycle, command bus plumbing.
+2. **Persistence + runtime wiring**: add `src/persistence/`, implement `rss.toml` load/save/recovery, dedicated `rss_service` lifecycle, command bus plumbing.
 3. **Worker + ingest path**: polling, parsing, filter application, shared atomic writer, fetch policy.
 4. **RSS screen MVP**: mode switch, feeds/filters/explorer/history UI, key interactions, Sync Now, quick link paste.
 5. **Help/footer/status integration**: key hints, parity docs, sync metadata display.
 6. **Hardening + regression**: failure paths, parity tests, retention limits.
 
 ## Scope Control
-Initial in-TUI RSS ships without external web service. Sidecar plugin may coexist, but core TUI RSS is self-contained, persisted in `settings.toml`, and operates through Superseedr's existing file-based ingest model.
+Initial in-TUI RSS ships without external web service. Sidecar plugin may coexist, but core TUI RSS is self-contained, persisted via `settings.toml` (config) + `persistence/rss.toml` (runtime state), and operates through Superseedr's existing file-based ingest model.
