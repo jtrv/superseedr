@@ -521,40 +521,34 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         })
         .collect();
 
-    let draft = app_state.ui.rss.filter_draft.clone();
-    if app_state.ui.rss.is_editing {
-        lines.push(Line::from(""));
-        lines.push(Line::from(format!(
-            "Input: {}",
-            app_state.ui.rss.edit_buffer
-        )));
-    }
-    if !draft.is_empty() {
-        let ranked_preview =
-            compute_filter_preview_items(&app_state.rss_runtime.preview_items, &draft);
-        let match_count = ranked_preview
-            .iter()
-            .filter(|(_, is_match)| *is_match)
-            .count();
+    let draft = if app_state.ui.rss.is_editing {
+        app_state.ui.rss.edit_buffer.clone()
+    } else {
+        app_state.ui.rss.filter_draft.clone()
+    };
+    let ranked_preview = compute_filter_preview_items(&app_state.rss_runtime.preview_items, &draft);
+    let match_count = ranked_preview
+        .iter()
+        .filter(|(_, is_match)| *is_match)
+        .count();
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(format!("Draft: {}", draft)));
-        lines.push(Line::from(format!("Live matches: {}", match_count)));
-        if !ranked_preview.is_empty() {
-            lines.push(Line::from("Live preview (all items):"));
-            for (item, is_match) in ranked_preview {
-                let source = item.source.unwrap_or_else(|| "unknown".to_string());
-                let badge = if is_match { "[M]" } else { "[ ]" };
-                let style = if is_match {
-                    ctx.apply(Style::default().fg(ctx.theme.semantic.text))
-                } else {
-                    ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0))
-                };
-                lines.push(Line::from(vec![Span::styled(
-                    format!("{} {} ({})", badge, item.title, source),
-                    style,
-                )]));
-            }
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!("Draft: {}", draft)));
+    lines.push(Line::from(format!("Live matches: {}", match_count)));
+    if !ranked_preview.is_empty() {
+        lines.push(Line::from("Live preview (all items):"));
+        for (item, is_match) in ranked_preview {
+            let source = item.source.unwrap_or_else(|| "unknown".to_string());
+            let badge = if is_match { "[M]" } else { "[ ]" };
+            let style = if is_match {
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text))
+            } else {
+                ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0))
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!("{} {} ({})", badge, item.title, source),
+                style,
+            )]));
         }
     }
 
@@ -567,7 +561,11 @@ fn compute_filter_preview_items(
 ) -> Vec<(crate::app::RssPreviewItem, bool)> {
     let draft = draft.trim();
     if draft.is_empty() {
-        return Vec::new();
+        return preview_items
+            .iter()
+            .cloned()
+            .map(|item| (item, true))
+            .collect();
     }
 
     let matcher = SkimMatcherV2::default();
@@ -1144,5 +1142,23 @@ mod tests {
         assert_eq!(ranked[0].0.title, "Ubuntu LTS");
         assert!(!ranked[1].1);
         assert_eq!(ranked[1].0.title, "Fedora");
+    }
+
+    #[test]
+    fn filter_preview_with_empty_draft_still_shows_full_list() {
+        let items = vec![
+            RssPreviewItem {
+                title: "Fedora".to_string(),
+                ..Default::default()
+            },
+            RssPreviewItem {
+                title: "Ubuntu".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let ranked = compute_filter_preview_items(&items, "");
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked.iter().all(|(_, is_match)| *is_match));
     }
 }
