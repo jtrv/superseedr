@@ -453,6 +453,7 @@ fn rss_watch_dir(settings: &Settings) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn dedupe_key_prefers_guid_then_link_then_title_source() {
@@ -519,5 +520,40 @@ mod tests {
 
         let _ = shutdown_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn manual_ingest_magnet_writes_watch_file_and_returns_history_entry() {
+        let tmp = tempdir().expect("tempdir");
+        let mut settings = Settings::default();
+        settings.watch_folder = Some(tmp.path().to_path_buf());
+
+        let magnet = "magnet:?xt=urn:btih:00112233445566778899AABBCCDDEEFF00112233";
+        let item = RssPreviewItem {
+            dedupe_key: "guid:abc123".to_string(),
+            title: "Ubuntu ISO".to_string(),
+            link: Some(magnet.to_string()),
+            guid: Some("abc123".to_string()),
+            source: Some("Example Feed".to_string()),
+            date_iso: Some("2026-02-17T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let entry = manual_ingest_preview_item(&settings, &item)
+            .await
+            .expect("manual ingest should succeed");
+
+        let expected_name = format!("{}.magnet", hex::encode(Sha1::digest(magnet.as_bytes())));
+        let expected_path = tmp.path().join(expected_name);
+        assert!(expected_path.exists(), "expected magnet file to be created");
+
+        let content = std::fs::read_to_string(expected_path).expect("read magnet file");
+        assert_eq!(content, magnet);
+
+        assert_eq!(entry.dedupe_key, "guid:abc123");
+        assert_eq!(entry.title, "Ubuntu ISO");
+        assert_eq!(entry.guid.as_deref(), Some("abc123"));
+        assert_eq!(entry.source.as_deref(), Some("Example Feed"));
+        assert_eq!(entry.added_via, RssAddedVia::Manual);
     }
 }
