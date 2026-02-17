@@ -533,7 +533,8 @@ mod tests {
 
     #[tokio::test]
     async fn rss_service_disabled_waits_for_shutdown() {
-        let settings = Settings::default();
+        let mut settings = Settings::default();
+        settings.rss.enabled = false;
         let (tx, mut rx) = mpsc::channel::<AppCommand>(2);
         let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
         let (settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());

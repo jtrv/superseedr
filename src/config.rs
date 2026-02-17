@@ -104,7 +104,7 @@ pub struct RssSettings {
 impl Default for RssSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             poll_interval_secs: 900,
             max_preview_items: 500,
             feeds: Vec::new(),

@@ -143,6 +143,11 @@ fn execute_rss_effects(
                 }
             }
             RssAction::TriggerSync => {
+                if !settings.rss.enabled {
+                    let mut new_settings = settings.clone();
+                    new_settings.rss.enabled = true;
+                    let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                }
                 if app_command_tx.try_send(AppCommand::RssSyncNow).is_err() {
                     set_rss_status(app_state, "RSS sync enqueue failed");
                 } else {
@@ -176,6 +181,7 @@ fn execute_rss_effects(
                         let mut new_settings = settings.clone();
                         match app_state.ui.rss.active_screen {
                             RssScreen::Feeds => {
+                                new_settings.rss.enabled = true;
                                 new_settings.rss.feeds.push(crate::config::RssFeed {
                                     url: value,
                                     enabled: true,
@@ -912,6 +918,33 @@ mod tests {
             app_state.ui.rss.status_message.as_deref(),
             Some("RSS sync requested")
         );
+    }
+
+    #[test]
+    fn sync_key_auto_enables_rss_when_disabled() {
+        let mut app_state = base_state();
+        let mut settings = crate::config::Settings::default();
+        settings.rss.enabled = false;
+        let (tx, mut rx) = mpsc::channel(4);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('S'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let first = rx.try_recv().expect("expected first command");
+        match first {
+            AppCommand::UpdateConfig(s) => assert!(s.rss.enabled),
+            _ => panic!("unexpected first command"),
+        }
+
+        let second = rx.try_recv().expect("expected second command");
+        assert!(matches!(second, AppCommand::RssSyncNow));
     }
 
     #[test]
