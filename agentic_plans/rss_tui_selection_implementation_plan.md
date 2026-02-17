@@ -39,6 +39,39 @@ Webapp-visible behavior is the source of truth for MVP parity. Enhancements are 
 
 ## Target TUI UX (Selection Experience)
 
+### WebUI layout reference (panel placement + rough sizing)
+Note: this section is reference-only; terminal geometry and panel ratios will differ from browser layout constraints.
+
+Reference shape from `plugins/RSS/superseedr-rss/public/index.html` and CSS (`style.css`, `ui-refactor.css`):
+
+1. App frame
+- Centered container with `max-width: 1200px`, full-width below that, with about `2rem` page padding.
+
+2. Header strip
+- Single row, left/right split.
+- Left cluster: logo + title (`Superseedr RSS`).
+- Right cluster: `Sync Now` button, sync countdown, connection badge.
+- Visual spacing: header has bottom border and large bottom margin (`~3rem`) before content.
+
+3. Top primary card (full width)
+- Occupies full content width above any lower grid.
+- Header row: `Live Feed Explorer` title on left, refresh action on right.
+- Subtitle line under header.
+- Config row directly under subtitle with two equal columns:
+  - Left column: `RSS Sources` list + add-feed form.
+  - Right column: `Content Filters` list + add-filter form.
+- Explorer panel sits below config row in same card:
+  - Match-count text aligned to top-right of explorer area.
+  - Scrollable preview list with fixed desktop height around `400px`.
+
+4. Lower secondary grid
+- Two columns with asymmetric widths: roughly `1fr` (left) and `1.5fr` (right), with about `2rem` gap.
+- In the webapp this area holds non-core controls/history; for TUI RSS parity, keep focus on history in this lower zone and do not treat output-path or manual magnet-link entry as required parity targets.
+
+5. Mobile behavior
+- At widths `<= 768px`, lower grid collapses to a single vertical column.
+- Top full-width explorer card stays first; lower content stacks below.
+
 ### Screen model
 Add a dedicated `AppMode::Rss` screen, accessible from normal mode keybinding `r`.
 
@@ -71,8 +104,6 @@ When focus is on explorer list:
 
 Global RSS controls:
 - `S`: Sync Now.
-- `Ctrl+V`: paste into Quick Add Link input.
-- `v`: Windows fallback paste trigger for Quick Add Link input.
 
 ### Pane navigation
 - `Tab`/`Shift+Tab` cycle panes.
