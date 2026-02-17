@@ -56,9 +56,11 @@ fn map_key_to_rss_action(
 
     match key_code {
         KeyCode::Esc | KeyCode::Char('q') => Some(RssAction::ToNormal),
-        KeyCode::Char('h') => Some(RssAction::SwitchScreen(RssScreen::History)),
+        KeyCode::Char('H') => Some(RssAction::SwitchScreen(RssScreen::History)),
         KeyCode::Tab => Some(RssAction::FocusNext),
         KeyCode::BackTab => Some(RssAction::FocusPrev),
+        KeyCode::Char('h') | KeyCode::Left => Some(RssAction::FocusPrev),
+        KeyCode::Char('l') | KeyCode::Right => Some(RssAction::FocusNext),
         KeyCode::Char('S') => Some(RssAction::TriggerSync),
         KeyCode::Char('a') => Some(RssAction::AddEntry),
         KeyCode::Char('d') => Some(RssAction::DeleteEntry),
@@ -446,7 +448,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let mut footer_spans = vec![
         Span::styled(
-            "[Tab/Shift+Tab] focus [h] history [S]yncNow ",
+            "[Tab/Shift+Tab/h/l/←/→] focus [H] history [S]yncNow ",
             ctx.apply(Style::default().fg(ctx.accent_sapphire())),
         ),
     ];
@@ -919,10 +921,49 @@ mod tests {
     }
 
     #[test]
-    fn h_switches_to_history_screen() {
+    fn shift_h_switches_to_history_screen() {
         let mut app_state = base_state();
         let settings = crate::config::Settings::default();
         let (tx, _rx) = mpsc::channel(2);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('H'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::History));
+    }
+
+    #[test]
+    fn hjkl_and_arrows_navigate_focus_and_rows() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "A".to_string(),
+            ..Default::default()
+        });
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "B".to_string(),
+            ..Default::default()
+        });
+        let settings = crate::config::Settings::default();
+        let (tx, _rx) = mpsc::channel(2);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Down,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert_eq!(app_state.ui.rss.selected_explorer_index, 1);
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
@@ -933,8 +974,18 @@ mod tests {
             &settings,
             &tx,
         );
+        assert!(matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters));
 
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::History));
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Right,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer));
     }
 
     #[test]

@@ -590,10 +590,10 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "Tab / Shift+Tab / h",
+                        "Tab / Shift+Tab / h / l / ← / → / H",
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     )),
-                    Cell::from("Cycle focus panes (Links/Filters/Explorer) / open History"),
+                    Cell::from("Cycle pane focus (Links/Filters/Explorer) / open History (H)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
