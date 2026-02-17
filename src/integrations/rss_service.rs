@@ -20,6 +20,9 @@ use tokio::time::{self, Duration};
 const MIN_POLL_INTERVAL_SECS: u64 = 30;
 const MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
+const FEED_FETCH_MAX_ATTEMPTS: u32 = 3;
+const FEED_RETRY_BASE_DELAY_MS: u64 = 400;
+const FEED_RETRY_MAX_JITTER_MS: u64 = 250;
 
 #[derive(Clone)]
 struct CandidateItem {
@@ -168,7 +171,7 @@ async fn run_sync(
     let mut aggregated = Vec::new();
 
     for feed in enabled_feeds {
-        match fetch_and_parse_feed(client, &feed.url).await {
+        match fetch_and_parse_feed_with_retry(client, &feed.url, FEED_FETCH_MAX_ATTEMPTS).await {
             Ok(mut items) => {
                 let _ = app_command_tx
                     .send(AppCommand::RssFeedErrorUpdated {
@@ -338,6 +341,42 @@ async fn fetch_and_parse_feed(
     Ok(out)
 }
 
+fn retry_delay_ms(feed_url: &str, attempt_index: u32) -> u64 {
+    let digest = Sha1::digest(format!("{feed_url}:{attempt_index}").as_bytes());
+    let jitter =
+        (u16::from_le_bytes([digest[0], digest[1]]) as u64) % (FEED_RETRY_MAX_JITTER_MS + 1);
+    let exponential = FEED_RETRY_BASE_DELAY_MS * (1u64 << attempt_index.min(4));
+    exponential + jitter
+}
+
+async fn fetch_and_parse_feed_with_retry(
+    client: &Client,
+    feed_url: &str,
+    max_attempts: u32,
+) -> Result<Vec<CandidateItem>, String> {
+    let attempts = max_attempts.max(1);
+    let mut last_error: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        match fetch_and_parse_feed(client, feed_url).await {
+            Ok(items) => return Ok(items),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < attempts {
+                    let delay_ms = retry_delay_ms(feed_url, attempt - 1);
+                    time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "feed sync failed after {} attempts: {}",
+        attempts,
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
 fn dedupe_key_for(
     guid: Option<&str>,
     link: Option<&str>,
@@ -472,6 +511,24 @@ mod tests {
     #[test]
     fn normalize_title_compacts_whitespace_and_case() {
         assert_eq!(normalize_title("  Ubuntu   ISO  "), "ubuntu iso");
+    }
+
+    #[test]
+    fn retry_delay_has_jitter_and_increases_with_attempt() {
+        let first = retry_delay_ms("https://example.test/rss.xml", 0);
+        let second = retry_delay_ms("https://example.test/rss.xml", 1);
+
+        assert!(first >= FEED_RETRY_BASE_DELAY_MS);
+        assert!(first <= FEED_RETRY_BASE_DELAY_MS + FEED_RETRY_MAX_JITTER_MS);
+        assert!(second >= FEED_RETRY_BASE_DELAY_MS * 2);
+        assert!(second <= FEED_RETRY_BASE_DELAY_MS * 2 + FEED_RETRY_MAX_JITTER_MS);
+    }
+
+    #[test]
+    fn retry_delay_is_deterministic_for_same_input() {
+        let a = retry_delay_ms("https://example.test/rss.xml", 2);
+        let b = retry_delay_ms("https://example.test/rss.xml", 2);
+        assert_eq!(a, b);
     }
 
     #[tokio::test]

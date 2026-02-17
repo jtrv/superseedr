@@ -113,6 +113,10 @@ fn execute_rss_effects(
     app_command_tx: &mpsc::Sender<AppCommand>,
     effects: Vec<RssAction>,
 ) {
+    fn set_rss_status(app_state: &mut AppState, message: impl Into<String>) {
+        app_state.ui.rss.status_message = Some(message.into());
+    }
+
     for effect in effects {
         match effect {
             RssAction::ToNormal => app_state.mode = AppMode::Normal,
@@ -139,7 +143,9 @@ fn execute_rss_effects(
             }
             RssAction::TriggerSync => {
                 if app_command_tx.try_send(AppCommand::RssSyncNow).is_err() {
-                    app_state.system_warning = Some("Unable to enqueue RSS SyncNow".to_string());
+                    set_rss_status(app_state, "RSS sync enqueue failed");
+                } else {
+                    set_rss_status(app_state, "RSS sync requested");
                 }
             }
             RssAction::InsertChar(c) => {
@@ -173,6 +179,7 @@ fn execute_rss_effects(
                                     url: value,
                                     enabled: true,
                                 });
+                                set_rss_status(app_state, "Feed added");
                             }
                             RssScreen::Filters => {
                                 if Regex::new(&value).is_ok() {
@@ -181,6 +188,7 @@ fn execute_rss_effects(
                                         enabled: true,
                                     });
                                     app_state.ui.rss.filter_draft.clear();
+                                    set_rss_status(app_state, "Filter added");
                                 } else {
                                     app_state.system_error = Some("Invalid regex".to_string());
                                 }
@@ -193,6 +201,7 @@ fn execute_rss_effects(
                     app_state.ui.rss.edit_buffer.clear();
                 } else if app_state.ui.rss.is_searching {
                     app_state.ui.rss.is_searching = false;
+                    set_rss_status(app_state, "Search applied");
                 }
             }
             RssAction::CancelInput => {
@@ -200,9 +209,11 @@ fn execute_rss_effects(
                     app_state.ui.rss.is_editing = false;
                     app_state.ui.rss.edit_buffer.clear();
                     app_state.ui.rss.filter_draft.clear();
+                    set_rss_status(app_state, "Edit cancelled");
                 } else if app_state.ui.rss.is_searching {
                     app_state.ui.rss.is_searching = false;
                     app_state.ui.rss.search_query.clear();
+                    set_rss_status(app_state, "Search cleared");
                 } else {
                     app_state.mode = AppMode::Normal;
                 }
@@ -214,6 +225,7 @@ fn execute_rss_effects(
                 ) {
                     app_state.ui.rss.is_editing = true;
                     app_state.ui.rss.edit_buffer.clear();
+                    set_rss_status(app_state, "Editing new entry");
                 }
             }
             RssAction::DeleteEntry => {
@@ -230,6 +242,7 @@ fn execute_rss_effects(
                             app_state.ui.rss.selected_feed_index =
                                 app_state.ui.rss.selected_feed_index.saturating_sub(1);
                             let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                            set_rss_status(app_state, "Feed deleted");
                         }
                     }
                     RssScreen::Filters => {
@@ -243,6 +256,7 @@ fn execute_rss_effects(
                             app_state.ui.rss.selected_filter_index =
                                 app_state.ui.rss.selected_filter_index.saturating_sub(1);
                             let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                            set_rss_status(app_state, "Filter deleted");
                         }
                     }
                     _ => {}
@@ -258,13 +272,23 @@ fn execute_rss_effects(
                             .selected_feed_index
                             .min(new_settings.rss.feeds.len() - 1);
                         new_settings.rss.feeds[idx].enabled = !new_settings.rss.feeds[idx].enabled;
+                        let enabled = new_settings.rss.feeds[idx].enabled;
                         let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                        set_rss_status(
+                            app_state,
+                            if enabled {
+                                "Feed enabled"
+                            } else {
+                                "Feed disabled"
+                            },
+                        );
                     }
                 }
             }
             RssAction::StartSearch => {
                 if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
                     app_state.ui.rss.is_searching = true;
+                    set_rss_status(app_state, "Search mode");
                 }
             }
             RssAction::ManualAddSelected => {
@@ -273,6 +297,7 @@ fn execute_rss_effects(
                     if let Some(item) = app_state.rss_runtime.preview_items.get(idx) {
                         let _ =
                             app_command_tx.try_send(AppCommand::RssManualAddSelected(item.clone()));
+                        set_rss_status(app_state, "Manual add requested");
                     }
                 }
             }
@@ -287,8 +312,7 @@ fn execute_rss_effects(
                     {
                         match copy_to_clipboard(link.as_str()) {
                             Ok(()) => {
-                                app_state.system_warning =
-                                    Some("Copied link to clipboard".to_string());
+                                set_rss_status(app_state, "Copied link to clipboard");
                             }
                             Err(e) => {
                                 app_state.system_warning =
@@ -306,6 +330,7 @@ fn execute_rss_effects(
                         app_state.ui.rss.is_editing = true;
                         app_state.ui.rss.edit_buffer = regex::escape(item.title.as_str());
                         app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
+                        set_rss_status(app_state, "Editing new filter from selection");
                     }
                 }
             }
@@ -416,12 +441,21 @@ fn draw_shared_header(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         .next_sync_at
         .clone()
         .unwrap_or_else(|| "n/a".to_string());
+    let mode = if app_state.ui.rss.is_editing {
+        "EDIT"
+    } else if app_state.ui.rss.is_searching {
+        "SEARCH"
+    } else {
+        "NAV"
+    };
 
     let header = Line::from(vec![
         Span::styled(
             format!("RSS / {}", current),
             ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
         ),
+        Span::raw("  |  "),
+        Span::raw(format!("Mode: {}", mode)),
         Span::raw("  |  "),
         Span::raw(format!("Last: {}", last_sync)),
         Span::raw("  |  "),
@@ -436,40 +470,62 @@ fn draw_shared_header(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
 
 fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let ctx = screen.theme;
-    let footer = Line::from(vec![
+    let app_state = screen.app.state;
+    let mut footer_spans = vec![
         Span::styled(
-            "[f]eeds ",
-            ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-        ),
-        Span::styled(
-            "[l]filters ",
-            ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-        ),
-        Span::styled(
-            "[e]xplorer ",
-            ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-        ),
-        Span::styled(
-            "[h]istory ",
+            "[f]eeds [l]filters [e]xplorer [h]istory ",
             ctx.apply(Style::default().fg(ctx.accent_sapphire())),
         ),
         Span::styled(
             "[S]yncNow ",
             ctx.apply(Style::default().fg(ctx.state_warning())),
         ),
-        Span::styled(
-            "[a]/[d]/[x] ",
-            ctx.apply(Style::default().fg(ctx.state_info())),
-        ),
-        Span::styled(
-            "[Enter]/[y]/[/] ",
+    ];
+
+    if app_state.ui.rss.is_editing {
+        footer_spans.push(Span::styled(
+            "[Enter] save [Esc] cancel ",
             ctx.apply(Style::default().fg(ctx.state_complete())),
-        ),
-        Span::styled(
+        ));
+    } else if app_state.ui.rss.is_searching {
+        footer_spans.push(Span::styled(
+            "[type] search [Enter] apply [Esc] clear ",
+            ctx.apply(Style::default().fg(ctx.state_complete())),
+        ));
+    } else {
+        match app_state.ui.rss.active_screen {
+            RssScreen::Feeds => footer_spans.push(Span::styled(
+                "[a] add [d] delete [x] toggle [j/k] move ",
+                ctx.apply(Style::default().fg(ctx.state_info())),
+            )),
+            RssScreen::Filters => footer_spans.push(Span::styled(
+                "[a] add [d] delete [j/k] move ",
+                ctx.apply(Style::default().fg(ctx.state_info())),
+            )),
+            RssScreen::Explorer => footer_spans.push(Span::styled(
+                "[/] search [Enter] manual add [y] copy link [f] to filter ",
+                ctx.apply(Style::default().fg(ctx.state_info())),
+            )),
+            RssScreen::History => footer_spans.push(Span::styled(
+                "[j/k] move ",
+                ctx.apply(Style::default().fg(ctx.state_info())),
+            )),
+        }
+        footer_spans.push(Span::styled(
             "[Esc/q] back",
             ctx.apply(Style::default().fg(ctx.state_error())),
-        ),
-    ]);
+        ));
+    }
+
+    if let Some(status) = &app_state.ui.rss.status_message {
+        footer_spans.push(Span::raw("  |  "));
+        footer_spans.push(Span::styled(
+            status.clone(),
+            ctx.apply(Style::default().fg(ctx.state_success())),
+        ));
+    }
+
+    let footer = Line::from(footer_spans);
 
     let p = Paragraph::new(footer)
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)))
@@ -809,6 +865,10 @@ mod tests {
 
         let cmd = rx.try_recv().expect("expected rss sync command");
         assert!(matches!(cmd, AppCommand::RssSyncNow));
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("RSS sync requested")
+        );
     }
 
     #[test]
@@ -979,6 +1039,48 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Manual add requested")
+        );
+    }
+
+    #[test]
+    fn explorer_search_mode_sets_and_clears_status() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Explorer;
+        let settings = crate::config::Settings::default();
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('/'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(app_state.ui.rss.is_searching);
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Search mode")
+        );
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(!app_state.ui.rss.is_searching);
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Search cleared")
+        );
     }
 
     #[test]

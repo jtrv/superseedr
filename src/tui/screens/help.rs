@@ -614,21 +614,21 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "a / d / x",
                         ctx.apply(Style::default().fg(ctx.state_complete())),
                     )),
-                    Cell::from("Add / delete / toggle feed or filter entries"),
+                    Cell::from("Feeds: add/delete/toggle. Filters: add/delete (no toggle key)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Enter",
                         ctx.apply(Style::default().fg(ctx.state_warning())),
                     )),
-                    Cell::from("Confirm input or manual add from Explorer"),
+                    Cell::from("Confirm add/search input; in Explorer triggers manual add"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "/",
                         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
                     )),
-                    Cell::from("Start Explorer search"),
+                    Cell::from("Start Explorer search mode (live as you type)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

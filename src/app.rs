@@ -580,6 +580,7 @@ pub struct RssUiState {
     pub filter_draft: String,
     pub add_feed_buffer: String,
     pub add_filter_buffer: String,
+    pub status_message: Option<String>,
 }
 
 #[derive(Default, Clone)]
