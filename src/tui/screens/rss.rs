@@ -642,6 +642,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::RssPreviewItem;
 
     fn base_state() -> AppState {
         AppState {
@@ -747,13 +748,10 @@ mod tests {
     fn explorer_f_seeds_filter_and_switches_screen() {
         let mut app_state = base_state();
         app_state.ui.rss.active_screen = RssScreen::Explorer;
-        app_state
-            .rss_runtime
-            .preview_items
-            .push(crate::app::RssPreviewItem {
-                title: "Ubuntu (LTS) [x64]".to_string(),
-                ..Default::default()
-            });
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "Ubuntu (LTS) [x64]".to_string(),
+            ..Default::default()
+        });
 
         let settings = crate::config::Settings::default();
         let (tx, _rx) = mpsc::channel(2);
@@ -773,5 +771,146 @@ mod tests {
             app_state.ui.rss.filter_draft,
             regex::escape("Ubuntu (LTS) [x64]")
         );
+    }
+
+    #[test]
+    fn add_feed_dispatches_update_config() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        // Start add mode.
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(app_state.ui.rss.is_editing);
+
+        for c in "https://example.com/rss.xml".chars() {
+            handle_event(
+                CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                    KeyCode::Char(c),
+                    ratatui::crossterm::event::KeyModifiers::NONE,
+                )),
+                &mut app_state,
+                &settings,
+                &tx,
+            );
+        }
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let cmd = rx.try_recv().expect("expected UpdateConfig dispatch");
+        match cmd {
+            AppCommand::UpdateConfig(s) => {
+                assert_eq!(s.rss.feeds.len(), 1);
+                assert_eq!(s.rss.feeds[0].url, "https://example.com/rss.xml");
+                assert!(s.rss.feeds[0].enabled);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn delete_feed_dispatches_update_config() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://a.test/rss".to_string(),
+            enabled: true,
+        });
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('d'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let cmd = rx.try_recv().expect("expected UpdateConfig dispatch");
+        match cmd {
+            AppCommand::UpdateConfig(s) => assert!(s.rss.feeds.is_empty()),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn toggle_feed_dispatches_update_config() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://a.test/rss".to_string(),
+            enabled: true,
+        });
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('x'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let cmd = rx.try_recv().expect("expected UpdateConfig dispatch");
+        match cmd {
+            AppCommand::UpdateConfig(s) => assert!(!s.rss.feeds[0].enabled),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn enter_on_explorer_dispatches_manual_add() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Explorer;
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            dedupe_key: "guid:123".to_string(),
+            title: "Ubuntu".to_string(),
+            link: Some("magnet:?xt=urn:btih:abcd".to_string()),
+            ..Default::default()
+        });
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let cmd = rx.try_recv().expect("expected manual add dispatch");
+        match cmd {
+            AppCommand::RssManualAddSelected(item) => {
+                assert_eq!(item.dedupe_key, "guid:123");
+                assert_eq!(item.title, "Ubuntu");
+            }
+            _ => panic!("unexpected command"),
+        }
     }
 }
