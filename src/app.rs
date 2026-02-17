@@ -1706,6 +1706,7 @@ impl App {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
                 let _ = self.rss_settings_tx.send(self.client_configs.clone());
+                let rss_changed = new_settings.rss != old_settings.rss;
 
                 if new_settings.ui_theme != old_settings.ui_theme {
                     self.app_state.theme = Theme::builtin(new_settings.ui_theme);
@@ -1744,6 +1745,11 @@ impl App {
                             tracing::error!("Failed to watch new folder: {}", e);
                         }
                     }
+                }
+
+                // Refresh RSS preview immediately when feed/filter config changes.
+                if rss_changed {
+                    let _ = self.rss_sync_tx.try_send(());
                 }
 
                 // 3. Persist to Disk
