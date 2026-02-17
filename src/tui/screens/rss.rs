@@ -443,6 +443,40 @@ fn draw_shared_header(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     f.render_widget(p, area);
 }
 
+fn draw_input_panel(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
+    let app_state = screen.app.state;
+    let ctx = screen.theme;
+
+    let (title, value) = if app_state.ui.rss.is_searching {
+        (" RSS Search ".to_string(), app_state.ui.rss.search_query.clone())
+    } else {
+        let label = match app_state.ui.rss.focused_section {
+            RssSectionFocus::Links => "Add Link",
+            RssSectionFocus::Filters => "Add Filter",
+            RssSectionFocus::Explorer => "Input",
+        };
+        (format!(" RSS {} ", label), app_state.ui.rss.edit_buffer.clone())
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            "> ",
+            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
+        ),
+        Span::raw(value),
+        Span::styled(
+            "_",
+            ctx.apply(Style::default().fg(ctx.state_warning())),
+        ),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(ctx.apply(Style::default().fg(ctx.state_selected())));
+    f.render_widget(Paragraph::new(line).block(block), area);
+}
+
 fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let ctx = screen.theme;
     let app_state = screen.app.state;
@@ -524,7 +558,7 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
     let settings = screen.settings;
     let selected = app_state.ui.rss.selected_feed_index;
 
-    let mut lines: Vec<Line<'static>> = settings
+    let lines: Vec<Line<'static>> = settings
         .rss
         .feeds
         .iter()
@@ -535,12 +569,6 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
             Line::from(format!("{}{} {}", cursor, enabled, feed.url))
         })
         .collect();
-
-    if app_state.ui.rss.is_editing && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links)
-    {
-        lines.push(Line::from(""));
-        lines.push(Line::from(format!("Draft: {}", app_state.ui.rss.edit_buffer)));
-    }
 
     let items: Vec<ListItem<'static>> = lines.into_iter().map(ListItem::new).collect();
     f.render_widget(
@@ -622,7 +650,6 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
         .count();
 
     lines.push(Line::from(""));
-    lines.push(Line::from(format!("Draft: {}", draft)));
     lines.push(Line::from(format!("Live matches: {}", match_count)));
 
     let items: Vec<ListItem<'static>> = lines.into_iter().map(ListItem::new).collect();
@@ -689,7 +716,7 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
         has_filters,
     );
 
-    let mut list_items: Vec<ListItem<'static>> = items
+    let list_items: Vec<ListItem<'static>> = items
         .iter()
         .enumerate()
         .map(|(i, item)| {
@@ -718,13 +745,6 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
             )]))
         })
         .collect();
-
-    if app_state.ui.rss.is_searching || !app_state.ui.rss.search_query.is_empty() {
-        list_items.insert(
-            0,
-            ListItem::new(Line::from(format!("Search: {}", app_state.ui.rss.search_query))),
-        );
-    }
 
     f.render_widget(
         List::new(list_items).block(pane_block("Explorer", active, screen.theme)),
@@ -834,21 +854,38 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
     f.render_widget(Clear, area);
 
-    let inner = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let show_input_panel = app_state.ui.rss.is_editing || app_state.ui.rss.is_searching;
+    let constraints = if show_input_panel {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ]
+    } else {
+        vec![
             Constraint::Length(2),
             Constraint::Min(5),
             Constraint::Length(1),
-        ])
+        ]
+    };
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     draw_shared_header(f, inner[0], screen);
-    match app_state.ui.rss.active_screen {
-        RssScreen::Unified => draw_unified_body(f, inner[1], screen),
-        RssScreen::History => draw_history(f, inner[1], screen),
+    if show_input_panel {
+        draw_input_panel(f, inner[1], screen);
     }
-    draw_shared_footer(f, inner[2], screen);
+    let body_idx = if show_input_panel { 2 } else { 1 };
+    let footer_idx = if show_input_panel { 3 } else { 2 };
+    match app_state.ui.rss.active_screen {
+        RssScreen::Unified => draw_unified_body(f, inner[body_idx], screen),
+        RssScreen::History => draw_history(f, inner[body_idx], screen),
+    }
+    draw_shared_footer(f, inner[footer_idx], screen);
 }
 
 #[cfg(test)]
