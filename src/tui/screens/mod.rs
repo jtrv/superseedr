@@ -7,4 +7,5 @@ pub mod delete_confirm;
 pub mod help;
 pub mod normal;
 pub mod power;
+pub mod rss;
 pub mod welcome;

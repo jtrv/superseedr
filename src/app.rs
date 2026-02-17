@@ -15,7 +15,11 @@ use strum_macros::EnumIter;
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{get_app_paths, save_settings};
-use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, TorrentSortColumn};
+use crate::config::{
+    FeedSyncError, PeerSortColumn, RssHistoryEntry, Settings, SortDirection, TorrentSettings,
+    TorrentSortColumn,
+};
+use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
 use crate::token_bucket::TokenBucket;
 
@@ -34,7 +38,7 @@ use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
 
 use crate::integrations::status::AppOutputState;
-use crate::integrations::{status, watcher};
+use crate::integrations::{rss_service, status, watcher};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
@@ -373,6 +377,26 @@ pub enum AppCommand {
         data: Vec<tree::RawNode<FileMetadata>>,
         highlight_path: Option<PathBuf>,
     },
+    #[allow(dead_code)]
+    RssSyncNow,
+    #[allow(dead_code)]
+    RssPreviewUpdated(Vec<RssPreviewItem>),
+    #[allow(dead_code)]
+    RssSyncStatusUpdated {
+        last_sync_at: Option<String>,
+        next_sync_at: Option<String>,
+    },
+    #[allow(dead_code)]
+    RssFeedErrorUpdated {
+        feed_url: String,
+        error: Option<FeedSyncError>,
+    },
+    #[allow(dead_code)]
+    RssDownloadSelected(RssHistoryEntry),
+    #[allow(dead_code)]
+    RssManualAddSelected(RssPreviewItem),
+    #[allow(dead_code)]
+    RssConfigUpdated,
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
 }
@@ -397,6 +421,16 @@ pub enum AppMode {
     DeleteConfirm,
     Config,
     FileBrowser,
+    Rss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RssScreen {
+    #[default]
+    Feeds,
+    Filters,
+    Explorer,
+    History,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -504,6 +538,8 @@ pub struct UiState {
     pub config: ConfigUiState,
     pub delete_confirm: DeleteConfirmUiState,
     pub file_browser: FileBrowserUiState,
+    #[allow(dead_code)]
+    pub rss: RssUiState,
 }
 
 #[derive(Default)]
@@ -527,6 +563,45 @@ pub struct FileBrowserUiState {
     pub browser_mode: FileBrowserMode,
     pub is_searching: bool,
     pub search_query: String,
+}
+
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct RssUiState {
+    pub active_screen: RssScreen,
+    pub selected_feed_index: usize,
+    pub selected_filter_index: usize,
+    pub selected_explorer_index: usize,
+    pub selected_history_index: usize,
+    pub is_searching: bool,
+    pub search_query: String,
+    pub is_editing: bool,
+    pub edit_buffer: String,
+    pub filter_draft: String,
+    pub add_feed_buffer: String,
+    pub add_filter_buffer: String,
+}
+
+#[derive(Default, Clone)]
+pub struct RssRuntimeState {
+    pub history: Vec<RssHistoryEntry>,
+    pub preview_items: Vec<RssPreviewItem>,
+    pub last_sync_at: Option<String>,
+    pub next_sync_at: Option<String>,
+    pub feed_errors: HashMap<String, FeedSyncError>,
+}
+
+#[derive(Default, Clone)]
+#[allow(dead_code)]
+pub struct RssPreviewItem {
+    pub dedupe_key: String,
+    pub title: String,
+    pub link: Option<String>,
+    pub guid: Option<String>,
+    pub source: Option<String>,
+    pub date_iso: Option<String>,
+    pub is_match: bool,
+    pub is_downloaded: bool,
 }
 
 #[derive(Default)]
@@ -591,6 +666,7 @@ pub struct AppState {
     pub write_iops: u32,
 
     pub ui: UiState,
+    pub rss_runtime: RssRuntimeState,
     pub data_rate: DataRate,
     pub theme: Theme,
 
@@ -638,6 +714,7 @@ pub struct App {
     pub manager_event_rx: mpsc::Receiver<ManagerEvent>,
     pub app_command_tx: mpsc::Sender<AppCommand>,
     pub app_command_rx: mpsc::Receiver<AppCommand>,
+    pub rss_sync_tx: mpsc::Sender<()>,
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
@@ -653,6 +730,7 @@ impl App {
 
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
+        let (rss_sync_tx, rss_sync_rx) = mpsc::channel::<()>(8);
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -704,6 +782,7 @@ impl App {
         let ul_limit = client_configs.global_upload_limit_bps as f64;
         let global_dl_bucket = Arc::new(TokenBucket::new(dl_limit, dl_limit));
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
+        let persisted_rss_state = load_rss_state();
 
         let app_state = AppState {
             system_warning,
@@ -722,6 +801,13 @@ impl App {
                 client_configs.peer_sort_column,
                 client_configs.peer_sort_direction,
             ),
+            rss_runtime: RssRuntimeState {
+                history: persisted_rss_state.history,
+                preview_items: Vec::new(),
+                last_sync_at: persisted_rss_state.last_sync_at,
+                next_sync_at: None,
+                feed_errors: persisted_rss_state.feed_errors,
+            },
             lifetime_downloaded_from_config: client_configs.lifetime_downloaded,
             lifetime_uploaded_from_config: client_configs.lifetime_uploaded,
             minute_disk_backoff_history_ms: VecDeque::with_capacity(24 * 60),
@@ -752,6 +838,7 @@ impl App {
             manager_event_rx,
             app_command_tx,
             app_command_rx,
+            rss_sync_tx,
             tui_event_tx,
             tui_event_rx,
             shutdown_tx,
@@ -759,6 +846,13 @@ impl App {
             watcher,
             notify_rx,
         };
+
+        let _rss_service_task = rss_service::spawn_rss_service(
+            app.client_configs.clone(),
+            app.app_command_tx.clone(),
+            rss_sync_rx,
+            app.shutdown_tx.clone(),
+        );
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
@@ -1530,6 +1624,78 @@ impl App {
                     self.app_state.ui.needs_redraw = true;
                 }
             }
+            AppCommand::RssSyncNow => {
+                let _ = self.rss_sync_tx.try_send(());
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssPreviewUpdated(preview_items) => {
+                self.app_state.rss_runtime.preview_items = preview_items;
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssSyncStatusUpdated {
+                last_sync_at,
+                next_sync_at,
+            } => {
+                self.app_state.rss_runtime.last_sync_at = last_sync_at;
+                self.app_state.rss_runtime.next_sync_at = next_sync_at;
+                self.save_state_to_disk();
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssFeedErrorUpdated { feed_url, error } => {
+                if let Some(err) = error {
+                    self.app_state.rss_runtime.feed_errors.insert(feed_url, err);
+                } else {
+                    self.app_state.rss_runtime.feed_errors.remove(&feed_url);
+                }
+                self.save_state_to_disk();
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssDownloadSelected(entry) => {
+                let exists = self
+                    .app_state
+                    .rss_runtime
+                    .history
+                    .iter()
+                    .any(|existing| existing.dedupe_key == entry.dedupe_key);
+                if !exists {
+                    self.app_state.rss_runtime.history.push(entry);
+                    self.save_state_to_disk();
+                }
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssManualAddSelected(item) => {
+                match rss_service::manual_ingest_preview_item(&self.client_configs, &item).await {
+                    Ok(entry) => {
+                        let exists = self
+                            .app_state
+                            .rss_runtime
+                            .history
+                            .iter()
+                            .any(|existing| existing.dedupe_key == entry.dedupe_key);
+                        if !exists {
+                            self.app_state.rss_runtime.history.push(entry);
+                            self.save_state_to_disk();
+                        }
+                        if let Some(preview) = self
+                            .app_state
+                            .rss_runtime
+                            .preview_items
+                            .iter_mut()
+                            .find(|p| p.dedupe_key == item.dedupe_key)
+                        {
+                            preview.is_downloaded = true;
+                        }
+                    }
+                    Err(e) => {
+                        self.app_state.system_error = Some(format!("RSS manual add failed: {}", e));
+                    }
+                }
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssConfigUpdated => {
+                self.save_state_to_disk();
+                self.app_state.ui.needs_redraw = true;
+            }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
@@ -2008,6 +2174,24 @@ impl App {
             tracing_event!(Level::ERROR, "Failed to auto-save settings: {}", e);
         } else {
             tracing_event!(Level::DEBUG, "Settings auto-saved successfully.");
+        }
+
+        const RSS_HISTORY_LIMIT: usize = 1000;
+        if self.app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
+            let overflow = self.app_state.rss_runtime.history.len() - RSS_HISTORY_LIMIT;
+            self.app_state.rss_runtime.history.drain(0..overflow);
+        }
+
+        let rss_state = RssPersistedState {
+            history: self.app_state.rss_runtime.history.clone(),
+            last_sync_at: self.app_state.rss_runtime.last_sync_at.clone(),
+            feed_errors: self.app_state.rss_runtime.feed_errors.clone(),
+        };
+
+        if let Err(e) = save_rss_state(&rss_state) {
+            tracing_event!(Level::ERROR, "Failed to auto-save RSS state: {}", e);
+        } else {
+            tracing_event!(Level::DEBUG, "RSS state auto-saved successfully.");
         }
     }
 

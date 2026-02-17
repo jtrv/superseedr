@@ -283,6 +283,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
+                        "r",
+                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                    )),
+                    Cell::from("Open RSS screen"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
                         "z",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
@@ -568,6 +575,46 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         level_text,
                         Style::default().fg(ctx.state_warning()).bold(),
                     )),
+                ]),
+            ],
+        ),
+        AppMode::Rss => (
+            " Help / RSS ",
+            vec![
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Esc / q",
+                        ctx.apply(Style::default().fg(ctx.state_error())),
+                    )),
+                    Cell::from("Exit RSS mode"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "f / l / e / h",
+                        ctx.apply(Style::default().fg(ctx.state_selected())),
+                    )),
+                    Cell::from("Switch RSS sub-screen (Feeds/FiLters/Explorer/History)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "S",
+                        ctx.apply(Style::default().fg(ctx.state_warning())),
+                    )),
+                    Cell::from("Sync now"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "↑ / ↓ / k / j",
+                        ctx.apply(Style::default().fg(ctx.state_info())),
+                    )),
+                    Cell::from("Move selection in active RSS sub-screen"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Tab / Shift+Tab",
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                    )),
+                    Cell::from("Not used in RSS mode"),
                 ]),
             ],
         ),

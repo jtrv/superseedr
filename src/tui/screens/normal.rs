@@ -8,7 +8,9 @@ use crate::app::BrowserPane;
 use crate::app::FileBrowserMode;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
-use crate::app::{App, AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{
+    App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
+};
 use crate::config::Settings;
 use crate::config::SortDirection;
 use crate::theme::ThemeContext;
@@ -72,6 +74,7 @@ pub enum UiAction {
         with_files: bool,
     },
     OpenConfig,
+    OpenRss,
     DataRateSlower,
     DataRateFaster,
     ThemePrev,
@@ -90,6 +93,7 @@ pub enum UiEffect {
     ToDeleteConfirm,
     OpenAddTorrentFileBrowser,
     OpenConfigScreen,
+    OpenRssScreen,
     BroadcastManagerDataRate(u64),
     ApplyThemePrev,
     ApplyThemeNext,
@@ -311,6 +315,10 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             redraw: true,
             effects: vec![UiEffect::OpenHelpScreen],
         },
+        UiAction::OpenRss => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::OpenRssScreen],
+        },
         UiAction::PasteText(text) => ReduceResult {
             redraw: true,
             effects: vec![UiEffect::HandlePastedText(text)],
@@ -336,6 +344,7 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('d') => Some(UiAction::OpenDeleteConfirm { with_files: false }),
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
+        KeyCode::Char('r') => Some(UiAction::OpenRss),
         KeyCode::Char('m') => Some(UiAction::OpenHelp),
         #[cfg(windows)]
         KeyCode::Char('v') => Some(UiAction::PasteFromClipboard),
@@ -865,6 +874,11 @@ pub fn draw_footer(
         "[c]",
         "onfig",
         ctx.apply(Style::default().fg(ctx.state_complete())),
+    );
+    push_if_fits(
+        "[r]",
+        "ss",
+        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
     );
     push_if_fits(
         "[d]",
@@ -3567,6 +3581,10 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
         }
         UiEffect::OpenHelpScreen => {
             app.app_state.mode = AppMode::Help;
+        }
+        UiEffect::OpenRssScreen => {
+            app.app_state.ui.rss.active_screen = RssScreen::Feeds;
+            app.app_state.mode = AppMode::Rss;
         }
         UiEffect::HandlePastedText(text) => {
             handle_pasted_text(app, &text).await;
