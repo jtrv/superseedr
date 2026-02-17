@@ -29,6 +29,7 @@ pub enum RssAction {
     DeleteEntry,
     ToggleFeedEnabled,
     StartSearch,
+    DownloadSelectedExplorer,
 }
 
 #[derive(Default)]
@@ -64,6 +65,7 @@ fn map_key_to_rss_action(
         KeyCode::Char('d') => Some(RssAction::DeleteEntry),
         KeyCode::Char(' ') => Some(RssAction::ToggleFeedEnabled),
         KeyCode::Char('/') => Some(RssAction::StartSearch),
+        KeyCode::Char('Y') => Some(RssAction::DownloadSelectedExplorer),
         KeyCode::Up | KeyCode::Char('k') => Some(RssAction::MoveUp),
         KeyCode::Down | KeyCode::Char('j') => Some(RssAction::MoveDown),
         _ => None,
@@ -418,6 +420,37 @@ fn execute_rss_effects(
                     set_rss_status(app_state, "Search mode");
                 }
             }
+            RssAction::DownloadSelectedExplorer => {
+                if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+                    && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
+                {
+                    let enabled_filters = enabled_filter_queries(settings);
+                    let is_creating_filter = app_state.ui.rss.is_editing
+                        && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters);
+                    let filter_query = active_filter_query(app_state, settings);
+                    let (items, _, _) = compute_explorer_items(
+                        &app_state.rss_runtime.preview_items,
+                        &app_state.ui.rss.search_query,
+                        &enabled_filters,
+                        &filter_query,
+                        is_creating_filter,
+                    );
+
+                    let idx = app_state.ui.rss.selected_explorer_index;
+                    if let Some(item) = items.get(idx) {
+                        if item.is_downloaded {
+                            set_rss_status(app_state, "Already downloaded");
+                        } else if app_command_tx
+                            .try_send(AppCommand::RssDownloadPreview(item.clone()))
+                            .is_err()
+                        {
+                            set_rss_status(app_state, "RSS download enqueue failed");
+                        } else {
+                            set_rss_status(app_state, "RSS download requested");
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -546,6 +579,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 }
                 RssSectionFocus::Explorer => {
                     push_action("/", "search", ctx.accent_sapphire());
+                    push_action("Y", "download", ctx.state_success());
                 }
             },
             RssScreen::History => {}
@@ -1669,6 +1703,73 @@ mod tests {
             AppCommand::UpdateConfig(s) => assert!(!s.rss.filters[0].enabled),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn shift_y_downloads_selected_explorer_item_when_not_downloaded() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "Ubuntu ISO".to_string(),
+            link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            dedupe_key: "guid:ubuntu".to_string(),
+            is_downloaded: false,
+            ..Default::default()
+        });
+
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('Y'),
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        let cmd = rx.try_recv().expect("expected RSS download command");
+        match cmd {
+            AppCommand::RssDownloadPreview(item) => {
+                assert_eq!(item.title, "Ubuntu ISO");
+                assert_eq!(item.dedupe_key, "guid:ubuntu");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn shift_y_ignores_selected_explorer_item_when_already_downloaded() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "Ubuntu ISO".to_string(),
+            link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            dedupe_key: "guid:ubuntu".to_string(),
+            is_downloaded: true,
+            ..Default::default()
+        });
+
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('Y'),
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Already downloaded")
+        );
     }
 
     #[test]

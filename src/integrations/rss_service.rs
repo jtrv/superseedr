@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{AppCommand, RssPreviewItem};
-use crate::config::{get_watch_path, RssAddedVia, RssHistoryEntry, Settings};
+use crate::config::{RssAddedVia, RssHistoryEntry, Settings};
+use crate::integrations::rss_ingest;
 use crate::persistence::rss::load_rss_state;
 use chrono::{Duration as ChronoDuration, Utc};
 use feed_rs::parser;
@@ -11,9 +12,6 @@ use fuzzy_matcher::FuzzyMatcher;
 use reqwest::Client;
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
@@ -432,7 +430,7 @@ async fn auto_ingest_item(settings: &Settings, client: &Client, item: &Candidate
     };
 
     if link.starts_with("magnet:") {
-        return write_magnet(settings, link.as_str()).is_ok();
+        return rss_ingest::write_magnet(settings, link.as_str()).is_ok();
     }
 
     if !(link.starts_with("http://") || link.starts_with("https://")) {
@@ -440,7 +438,7 @@ async fn auto_ingest_item(settings: &Settings, client: &Client, item: &Candidate
     }
 
     match fetch_torrent_bytes(client, link).await {
-        Ok(bytes) => write_torrent_bytes(settings, link.as_str(), &bytes).is_ok(),
+        Ok(bytes) => rss_ingest::write_torrent_bytes(settings, link.as_str(), &bytes).is_ok(),
         Err(_) => false,
     }
 }
@@ -466,50 +464,6 @@ async fn fetch_torrent_bytes(client: &Client, url: &str) -> Result<Vec<u8>, Stri
     }
 
     Ok(bytes.to_vec())
-}
-
-fn write_magnet(settings: &Settings, magnet_link: &str) -> io::Result<PathBuf> {
-    let watch_dir = rss_watch_dir(settings)?;
-    let hash = hex::encode(Sha1::digest(magnet_link.as_bytes()));
-    let final_path = watch_dir.join(format!("{}.magnet", hash));
-    let temp_path = watch_dir.join(format!("{}.magnet.tmp", hash));
-
-    atomic_write(&temp_path, &final_path, magnet_link.as_bytes())?;
-    Ok(final_path)
-}
-
-fn write_torrent_bytes(settings: &Settings, source_url: &str, bytes: &[u8]) -> io::Result<PathBuf> {
-    let watch_dir = rss_watch_dir(settings)?;
-    let hash = hex::encode(Sha1::digest(source_url.as_bytes()));
-    let final_path = watch_dir.join(format!("{}.torrent", hash));
-    let temp_path = watch_dir.join(format!("{}.torrent.tmp", hash));
-
-    atomic_write(&temp_path, &final_path, bytes)?;
-    Ok(final_path)
-}
-
-fn atomic_write(temp_path: &Path, final_path: &Path, payload: &[u8]) -> io::Result<()> {
-    if let Some(parent) = final_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(temp_path, payload)?;
-    fs::rename(temp_path, final_path)?;
-    Ok(())
-}
-
-fn rss_watch_dir(settings: &Settings) -> io::Result<PathBuf> {
-    if let Some(path) = settings.watch_folder.clone() {
-        return Ok(path);
-    }
-
-    let (watch_path, _) = get_watch_path().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "watch path unavailable for RSS auto-ingest",
-        )
-    })?;
-    Ok(watch_path)
 }
 
 #[cfg(test)]

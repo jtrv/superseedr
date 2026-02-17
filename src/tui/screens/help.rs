@@ -634,6 +634,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
+                        "Y",
+                        ctx.apply(Style::default().fg(ctx.state_success())),
+                    )),
+                    Cell::from("Download selected Explorer item (if not downloaded)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
                         "j / k / ↑ / ↓",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),

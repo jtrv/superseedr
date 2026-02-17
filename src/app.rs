@@ -38,7 +38,7 @@ use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
 
 use crate::integrations::status::AppOutputState;
-use crate::integrations::{rss_service, status, watcher};
+use crate::integrations::{rss_ingest, rss_service, status, watcher};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
@@ -388,6 +388,7 @@ pub enum AppCommand {
         error: Option<FeedSyncError>,
     },
     RssDownloadSelected(RssHistoryEntry),
+    RssDownloadPreview(RssPreviewItem),
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
 }
@@ -1667,6 +1668,10 @@ impl App {
                 }
                 self.app_state.ui.needs_redraw = true;
             }
+            AppCommand::RssDownloadPreview(item) => {
+                self.download_rss_preview_item(item).await;
+                self.app_state.ui.needs_redraw = true;
+            }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
@@ -2656,6 +2661,166 @@ impl App {
                 );
             }
         }
+    }
+
+    async fn download_rss_preview_item(&mut self, item: RssPreviewItem) {
+        if item.is_downloaded {
+            return;
+        }
+
+        let Some(link) = item.link.clone() else {
+            tracing_event!(Level::INFO, "Skipping RSS manual download: item has no link");
+            return;
+        };
+
+        let added = if link.starts_with("magnet:") {
+            rss_ingest::write_magnet(&self.client_configs, link.as_str()).is_ok()
+        } else if link.starts_with("http://") || link.starts_with("https://") {
+            self.download_rss_torrent_from_url(link.as_str()).await
+        } else {
+            tracing_event!(
+                Level::INFO,
+                "Skipping RSS manual download: unsupported link scheme '{}'",
+                link
+            );
+            false
+        };
+
+        if !added {
+            return;
+        }
+
+        for preview in &mut self.app_state.rss_runtime.preview_items {
+            if preview.dedupe_key == item.dedupe_key {
+                preview.is_downloaded = true;
+            }
+        }
+
+        let entry = RssHistoryEntry {
+            dedupe_key: item.dedupe_key.clone(),
+            guid: item.guid.clone(),
+            link: item.link.clone(),
+            title: item.title.clone(),
+            source: item.source.clone(),
+            date_iso: item
+                .date_iso
+                .clone()
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            added_via: crate::config::RssAddedVia::Manual,
+        };
+        let exists = self
+            .app_state
+            .rss_runtime
+            .history
+            .iter()
+            .any(|existing| existing.dedupe_key == entry.dedupe_key);
+        if !exists {
+            self.app_state.rss_runtime.history.push(entry);
+            self.save_state_to_disk();
+        }
+    }
+
+    async fn download_rss_torrent_from_url(&mut self, url: &str) -> bool {
+        const MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+        let client = match reqwest::Client::builder()
+            .user_agent("superseedr (https://github.com/Jagalite/superseedr)")
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "RSS manual download failed to build HTTP client: {}",
+                    e
+                );
+                return false;
+            }
+        };
+
+        let response = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "RSS manual download request failed for {}: {}",
+                    url,
+                    e
+                );
+                return false;
+            }
+        };
+        if !response.status().is_success() {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download HTTP status {} for {}",
+                response.status(),
+                url
+            );
+            return false;
+        }
+
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "RSS manual download body read failed for {}: {}",
+                    url,
+                    e
+                );
+                return false;
+            }
+        };
+        if bytes.len() > MAX_TORRENT_DOWNLOAD_BYTES {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download exceeded max size for {} ({} bytes)",
+                url,
+                bytes.len()
+            );
+            return false;
+        }
+        if from_bytes(bytes.as_ref()).is_err() {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download produced invalid torrent payload for {}",
+                url
+            );
+            return false;
+        }
+
+        let file_hash = hex::encode(sha1::Sha1::digest(url.as_bytes()));
+        let temp_path = std::env::temp_dir().join(format!("superseedr-rss-{}.torrent", file_hash));
+        if let Err(e) = fs::write(&temp_path, bytes.as_ref()) {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download failed to write temp file {:?}: {}",
+                temp_path,
+                e
+            );
+            return false;
+        }
+
+        self.add_torrent_from_file(
+            temp_path.clone(),
+            self.client_configs.default_download_folder.clone(),
+            false,
+            TorrentControlState::Running,
+            HashMap::new(),
+            None,
+        )
+        .await;
+
+        if let Err(e) = fs::remove_file(&temp_path) {
+            tracing_event!(
+                Level::DEBUG,
+                "RSS manual download temp cleanup skipped for {:?}: {}",
+                temp_path,
+                e
+            );
+        }
+        true
     }
 
     async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
