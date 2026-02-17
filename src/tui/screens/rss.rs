@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{AppCommand, AppMode, AppState, RssScreen};
+use crate::app::{AppCommand, AppMode, AppState, RssScreen, RssSectionFocus};
 use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 pub enum RssAction {
     ToNormal,
     SwitchScreen(RssScreen),
+    FocusNext,
+    FocusPrev,
     MoveUp,
     MoveDown,
     TriggerSync,
@@ -54,22 +56,15 @@ fn map_key_to_rss_action(
 
     match key_code {
         KeyCode::Esc | KeyCode::Char('q') => Some(RssAction::ToNormal),
-        KeyCode::Char('F') => {
-            if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
-                Some(RssAction::SeedFilterFromSelectedTitle)
-            } else {
-                None
-            }
-        }
-        KeyCode::Char('l') => Some(RssAction::SwitchScreen(RssScreen::Feeds)),
-        KeyCode::Char('f') => Some(RssAction::SwitchScreen(RssScreen::Filters)),
-        KeyCode::Char('e') => Some(RssAction::SwitchScreen(RssScreen::Explorer)),
         KeyCode::Char('h') => Some(RssAction::SwitchScreen(RssScreen::History)),
+        KeyCode::Tab => Some(RssAction::FocusNext),
+        KeyCode::BackTab => Some(RssAction::FocusPrev),
         KeyCode::Char('S') => Some(RssAction::TriggerSync),
         KeyCode::Char('a') => Some(RssAction::AddEntry),
         KeyCode::Char('d') => Some(RssAction::DeleteEntry),
         KeyCode::Char('x') => Some(RssAction::ToggleFeedEnabled),
         KeyCode::Char('/') => Some(RssAction::StartSearch),
+        KeyCode::Char('F') => Some(RssAction::SeedFilterFromSelectedTitle),
         KeyCode::Up | KeyCode::Char('k') => Some(RssAction::MoveUp),
         KeyCode::Down | KeyCode::Char('j') => Some(RssAction::MoveDown),
         _ => None,
@@ -82,21 +77,43 @@ fn reduce_rss_action(action: RssAction) -> RssReduceResult {
     }
 }
 
+fn next_focus(current: RssSectionFocus) -> RssSectionFocus {
+    match current {
+        RssSectionFocus::Links => RssSectionFocus::Filters,
+        RssSectionFocus::Filters => RssSectionFocus::Explorer,
+        RssSectionFocus::Explorer => RssSectionFocus::Links,
+    }
+}
+
+fn prev_focus(current: RssSectionFocus) -> RssSectionFocus {
+    match current {
+        RssSectionFocus::Links => RssSectionFocus::Explorer,
+        RssSectionFocus::Filters => RssSectionFocus::Links,
+        RssSectionFocus::Explorer => RssSectionFocus::Filters,
+    }
+}
+
 fn selected_index_mut(app_state: &mut AppState) -> &mut usize {
-    match app_state.ui.rss.active_screen {
-        RssScreen::Feeds => &mut app_state.ui.rss.selected_feed_index,
-        RssScreen::Filters => &mut app_state.ui.rss.selected_filter_index,
-        RssScreen::Explorer => &mut app_state.ui.rss.selected_explorer_index,
-        RssScreen::History => &mut app_state.ui.rss.selected_history_index,
+    if matches!(app_state.ui.rss.active_screen, RssScreen::History) {
+        return &mut app_state.ui.rss.selected_history_index;
+    }
+
+    match app_state.ui.rss.focused_section {
+        RssSectionFocus::Links => &mut app_state.ui.rss.selected_feed_index,
+        RssSectionFocus::Filters => &mut app_state.ui.rss.selected_filter_index,
+        RssSectionFocus::Explorer => &mut app_state.ui.rss.selected_explorer_index,
     }
 }
 
 fn current_list_len(app_state: &AppState, settings: &crate::config::Settings) -> usize {
-    match app_state.ui.rss.active_screen {
-        RssScreen::Feeds => settings.rss.feeds.len(),
-        RssScreen::Filters => settings.rss.filters.len(),
-        RssScreen::Explorer => app_state.rss_runtime.preview_items.len(),
-        RssScreen::History => app_state.rss_runtime.history.len(),
+    if matches!(app_state.ui.rss.active_screen, RssScreen::History) {
+        return app_state.rss_runtime.history.len();
+    }
+
+    match app_state.ui.rss.focused_section {
+        RssSectionFocus::Links => settings.rss.feeds.len(),
+        RssSectionFocus::Filters => settings.rss.filters.len(),
+        RssSectionFocus::Explorer => app_state.rss_runtime.preview_items.len(),
     }
 }
 
@@ -115,6 +132,16 @@ fn execute_rss_effects(
             RssAction::ToNormal => app_state.mode = AppMode::Normal,
             RssAction::SwitchScreen(screen) => {
                 app_state.ui.rss.active_screen = screen;
+            }
+            RssAction::FocusNext => {
+                if matches!(app_state.ui.rss.active_screen, RssScreen::Unified) {
+                    app_state.ui.rss.focused_section = next_focus(app_state.ui.rss.focused_section);
+                }
+            }
+            RssAction::FocusPrev => {
+                if matches!(app_state.ui.rss.active_screen, RssScreen::Unified) {
+                    app_state.ui.rss.focused_section = prev_focus(app_state.ui.rss.focused_section);
+                }
             }
             RssAction::MoveUp => {
                 let len = current_list_len(app_state, settings);
@@ -149,7 +176,7 @@ fn execute_rss_effects(
             RssAction::InsertChar(c) => {
                 if app_state.ui.rss.is_editing {
                     app_state.ui.rss.edit_buffer.push(c);
-                    if matches!(app_state.ui.rss.active_screen, RssScreen::Filters) {
+                    if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
                         app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
                     }
                 } else if app_state.ui.rss.is_searching {
@@ -159,7 +186,7 @@ fn execute_rss_effects(
             RssAction::Backspace => {
                 if app_state.ui.rss.is_editing {
                     app_state.ui.rss.edit_buffer.pop();
-                    if matches!(app_state.ui.rss.active_screen, RssScreen::Filters) {
+                    if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
                         app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
                     }
                 } else if app_state.ui.rss.is_searching {
@@ -171,8 +198,8 @@ fn execute_rss_effects(
                     let value = app_state.ui.rss.edit_buffer.trim().to_string();
                     if !value.is_empty() {
                         let mut new_settings = settings.clone();
-                        match app_state.ui.rss.active_screen {
-                            RssScreen::Feeds => {
+                        match app_state.ui.rss.focused_section {
+                            RssSectionFocus::Links => {
                                 new_settings.rss.enabled = true;
                                 new_settings.rss.feeds.push(crate::config::RssFeed {
                                     url: value,
@@ -180,7 +207,7 @@ fn execute_rss_effects(
                                 });
                                 set_rss_status(app_state, "Link added");
                             }
-                            RssScreen::Filters => {
+                            RssSectionFocus::Filters => {
                                 new_settings.rss.filters.push(crate::config::RssFilter {
                                     regex: value,
                                     enabled: true,
@@ -188,7 +215,7 @@ fn execute_rss_effects(
                                 app_state.ui.rss.filter_draft.clear();
                                 set_rss_status(app_state, "Filter added");
                             }
-                            _ => {}
+                            RssSectionFocus::Explorer => {}
                         }
                         let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
                     }
@@ -214,19 +241,25 @@ fn execute_rss_effects(
                 }
             }
             RssAction::AddEntry => {
-                if matches!(
-                    app_state.ui.rss.active_screen,
-                    RssScreen::Feeds | RssScreen::Filters
-                ) {
+                if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+                    && matches!(
+                        app_state.ui.rss.focused_section,
+                        RssSectionFocus::Links | RssSectionFocus::Filters
+                    )
+                {
                     app_state.ui.rss.is_editing = true;
                     app_state.ui.rss.edit_buffer.clear();
                     set_rss_status(app_state, "Editing new entry");
                 }
             }
             RssAction::DeleteEntry => {
+                if !matches!(app_state.ui.rss.active_screen, RssScreen::Unified) {
+                    continue;
+                }
+
                 let mut new_settings = settings.clone();
-                match app_state.ui.rss.active_screen {
-                    RssScreen::Feeds => {
+                match app_state.ui.rss.focused_section {
+                    RssSectionFocus::Links => {
                         if !new_settings.rss.feeds.is_empty() {
                             let idx = app_state
                                 .ui
@@ -240,7 +273,7 @@ fn execute_rss_effects(
                             set_rss_status(app_state, "Link deleted");
                         }
                     }
-                    RssScreen::Filters => {
+                    RssSectionFocus::Filters => {
                         if !new_settings.rss.filters.is_empty() {
                             let idx = app_state
                                 .ui
@@ -254,43 +287,51 @@ fn execute_rss_effects(
                             set_rss_status(app_state, "Filter deleted");
                         }
                     }
-                    _ => {}
+                    RssSectionFocus::Explorer => {}
                 }
             }
             RssAction::ToggleFeedEnabled => {
-                if matches!(app_state.ui.rss.active_screen, RssScreen::Feeds) {
-                    let mut new_settings = settings.clone();
-                    if !new_settings.rss.feeds.is_empty() {
-                        let idx = app_state
-                            .ui
-                            .rss
-                            .selected_feed_index
-                            .min(new_settings.rss.feeds.len() - 1);
-                        new_settings.rss.feeds[idx].enabled = !new_settings.rss.feeds[idx].enabled;
-                        let enabled = new_settings.rss.feeds[idx].enabled;
-                        let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
-                        set_rss_status(
-                            app_state,
-                            if enabled {
-                                "Link enabled"
-                            } else {
-                                "Link disabled"
-                            },
-                        );
-                    }
+                if !matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+                    || !matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links)
+                {
+                    continue;
+                }
+
+                let mut new_settings = settings.clone();
+                if !new_settings.rss.feeds.is_empty() {
+                    let idx = app_state
+                        .ui
+                        .rss
+                        .selected_feed_index
+                        .min(new_settings.rss.feeds.len() - 1);
+                    new_settings.rss.feeds[idx].enabled = !new_settings.rss.feeds[idx].enabled;
+                    let enabled = new_settings.rss.feeds[idx].enabled;
+                    let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                    set_rss_status(
+                        app_state,
+                        if enabled {
+                            "Link enabled"
+                        } else {
+                            "Link disabled"
+                        },
+                    );
                 }
             }
             RssAction::StartSearch => {
-                if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
+                if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+                    && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
+                {
                     app_state.ui.rss.is_searching = true;
                     set_rss_status(app_state, "Search mode");
                 }
             }
             RssAction::SeedFilterFromSelectedTitle => {
-                if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
+                if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+                    && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
+                {
                     let idx = app_state.ui.rss.selected_explorer_index;
                     if let Some(item) = app_state.rss_runtime.preview_items.get(idx) {
-                        app_state.ui.rss.active_screen = RssScreen::Filters;
+                        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
                         app_state.ui.rss.is_editing = true;
                         app_state.ui.rss.edit_buffer = item.title.clone();
                         app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
@@ -310,7 +351,7 @@ fn apply_pasted_text(app_state: &mut AppState, pasted_text: &str) {
 
     if app_state.ui.rss.is_editing {
         app_state.ui.rss.edit_buffer.push_str(trimmed);
-        if matches!(app_state.ui.rss.active_screen, RssScreen::Filters) {
+        if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
             app_state.ui.rss.filter_draft = app_state.ui.rss.edit_buffer.clone();
         }
         app_state.ui.rss.status_message = Some("Pasted input".to_string());
@@ -346,19 +387,21 @@ pub fn handle_event(
     }
 }
 
-fn screen_name(screen: RssScreen) -> &'static str {
-    match screen {
-        RssScreen::Feeds => "Links",
-        RssScreen::Filters => "Filters",
-        RssScreen::Explorer => "Explorer",
-        RssScreen::History => "History",
+fn focus_name(focus: RssSectionFocus) -> &'static str {
+    match focus {
+        RssSectionFocus::Links => "Links",
+        RssSectionFocus::Filters => "Filters",
+        RssSectionFocus::Explorer => "Explorer",
     }
 }
 
 fn draw_shared_header(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let ctx = screen.theme;
-    let current = screen_name(app_state.ui.rss.active_screen);
+    let current = match app_state.ui.rss.active_screen {
+        RssScreen::Unified => "Unified",
+        RssScreen::History => "History",
+    };
     let last_sync = app_state
         .rss_runtime
         .last_sync_at
@@ -383,6 +426,8 @@ fn draw_shared_header(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
             ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
         ),
         Span::raw("  |  "),
+        Span::raw(format!("Focus: {}", focus_name(app_state.ui.rss.focused_section))),
+        Span::raw("  |  "),
         Span::raw(format!("Mode: {}", mode)),
         Span::raw("  |  "),
         Span::raw(format!("Last: {}", last_sync)),
@@ -401,12 +446,8 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let mut footer_spans = vec![
         Span::styled(
-            "[l]inks [f]ilters [e]xplorer [h]istory ",
+            "[Tab/Shift+Tab] focus [h] history [S]yncNow ",
             ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-        ),
-        Span::styled(
-            "[S]yncNow ",
-            ctx.apply(Style::default().fg(ctx.state_warning())),
         ),
     ];
 
@@ -422,20 +463,22 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         ));
     } else {
         match app_state.ui.rss.active_screen {
-            RssScreen::Feeds => footer_spans.push(Span::styled(
-                "[a] add [d] delete [x] toggle [j/k] move ",
-                ctx.apply(Style::default().fg(ctx.state_info())),
-            )),
-            RssScreen::Filters => footer_spans.push(Span::styled(
-                "[a] add [d] delete [j/k] move ",
-                ctx.apply(Style::default().fg(ctx.state_info())),
-            )),
-            RssScreen::Explorer => footer_spans.push(Span::styled(
-                "[/] search [j/k] move [F] seed filter ",
-                ctx.apply(Style::default().fg(ctx.state_info())),
-            )),
+            RssScreen::Unified => match app_state.ui.rss.focused_section {
+                RssSectionFocus::Links => footer_spans.push(Span::styled(
+                    "Links: [a] add [d] delete [x] toggle [j/k] move ",
+                    ctx.apply(Style::default().fg(ctx.state_info())),
+                )),
+                RssSectionFocus::Filters => footer_spans.push(Span::styled(
+                    "Filters: [a] add [d] delete [j/k] move ",
+                    ctx.apply(Style::default().fg(ctx.state_info())),
+                )),
+                RssSectionFocus::Explorer => footer_spans.push(Span::styled(
+                    "Explorer: [/] search [j/k] move [F] seed filter ",
+                    ctx.apply(Style::default().fg(ctx.state_info())),
+                )),
+            },
             RssScreen::History => footer_spans.push(Span::styled(
-                "[j/k] move ",
+                "History: [j/k] move ",
                 ctx.apply(Style::default().fg(ctx.state_info())),
             )),
         }
@@ -461,27 +504,25 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     f.render_widget(p, area);
 }
 
-fn build_rows(
-    lines: Vec<Line<'static>>,
-    title: &str,
-    ctx: &crate::theme::ThemeContext,
-) -> List<'static> {
-    let items: Vec<ListItem<'static>> = lines.into_iter().map(ListItem::new).collect();
-    List::new(items).block(
-        Block::default()
-            .title(format!(" {} ", title))
-            .borders(Borders::ALL)
-            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-    )
+fn pane_block<'a>(title: &'a str, active: bool, ctx: &crate::theme::ThemeContext) -> Block<'a> {
+    let border_style = if active {
+        ctx.apply(Style::default().fg(ctx.state_selected()))
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.border))
+    };
+
+    Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .border_style(border_style)
 }
 
-fn draw_feeds(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
+fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: bool) {
     let app_state = screen.app.state;
     let settings = screen.settings;
-    let ctx = screen.theme;
     let selected = app_state.ui.rss.selected_feed_index;
 
-    let lines: Vec<Line<'static>> = settings
+    let mut lines: Vec<Line<'static>> = settings
         .rss
         .feeds
         .iter()
@@ -493,67 +534,22 @@ fn draw_feeds(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         })
         .collect();
 
-    let mut lines = lines;
-    if app_state.ui.rss.is_editing {
+    if app_state.ui.rss.is_editing && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links)
+    {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!(
-            "Input: {}",
-            app_state.ui.rss.edit_buffer
-        )));
+        lines.push(Line::from(format!("Draft: {}", app_state.ui.rss.edit_buffer)));
     }
 
-    f.render_widget(build_rows(lines, "Links", ctx), area);
-}
-
-fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
-    let app_state = screen.app.state;
-    let settings = screen.settings;
-    let ctx = screen.theme;
-    let selected = app_state.ui.rss.selected_filter_index;
-
-    let mut lines: Vec<Line<'static>> = settings
-        .rss
-        .filters
-        .iter()
-        .enumerate()
-        .map(|(i, filter)| {
-            let cursor = if i == selected { "> " } else { "  " };
-            Line::from(format!("{}{}", cursor, filter.regex))
-        })
-        .collect();
-
-    let draft = active_filter_query(app_state, settings);
-    let ranked_preview = compute_filter_preview_items(&app_state.rss_runtime.preview_items, &draft);
-    let match_count = ranked_preview
-        .iter()
-        .filter(|(_, is_match)| *is_match)
-        .count();
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(format!("Draft: {}", draft)));
-    lines.push(Line::from(format!("Live matches: {}", match_count)));
-    if !ranked_preview.is_empty() {
-        lines.push(Line::from("Live preview (all items):"));
-        for (item, is_match) in ranked_preview {
-            let source = item.source.unwrap_or_else(|| "unknown".to_string());
-            let badge = if is_match { "[M]" } else { "[ ]" };
-            let style = if is_match {
-                ctx.apply(Style::default().fg(ctx.theme.semantic.text))
-            } else {
-                ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0))
-            };
-            lines.push(Line::from(vec![Span::styled(
-                format!("{} {} ({})", badge, item.title, source),
-                style,
-            )]));
-        }
-    }
-
-    f.render_widget(build_rows(lines, "Filters", ctx), area);
+    let items: Vec<ListItem<'static>> = lines.into_iter().map(ListItem::new).collect();
+    f.render_widget(
+        List::new(items).block(pane_block("Links", active, screen.theme)),
+        area,
+    );
 }
 
 fn active_filter_query(app_state: &AppState, settings: &crate::config::Settings) -> String {
-    if app_state.ui.rss.is_editing {
+    if app_state.ui.rss.is_editing && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
+    {
         return app_state.ui.rss.edit_buffer.clone();
     }
 
@@ -600,21 +596,64 @@ fn compute_filter_preview_items(
     ranked
 }
 
+fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: bool) {
+    let app_state = screen.app.state;
+    let settings = screen.settings;
+    let selected = app_state.ui.rss.selected_filter_index;
+
+    let mut lines: Vec<Line<'static>> = settings
+        .rss
+        .filters
+        .iter()
+        .enumerate()
+        .map(|(i, filter)| {
+            let cursor = if i == selected { "> " } else { "  " };
+            Line::from(format!("{}{}", cursor, filter.regex))
+        })
+        .collect();
+
+    let draft = active_filter_query(app_state, settings);
+    let ranked_preview = compute_filter_preview_items(&app_state.rss_runtime.preview_items, &draft);
+    let match_count = ranked_preview
+        .iter()
+        .filter(|(_, is_match)| *is_match)
+        .count();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!("Draft: {}", draft)));
+    lines.push(Line::from(format!("Live matches: {}", match_count)));
+
+    let items: Vec<ListItem<'static>> = lines.into_iter().map(ListItem::new).collect();
+    f.render_widget(
+        List::new(items).block(pane_block("Filters", active, screen.theme)),
+        area,
+    );
+}
+
 fn compute_explorer_items(
     preview_items: &[crate::app::RssPreviewItem],
     search_query: &str,
+    filter_query: &str,
     has_filters: bool,
 ) -> (Vec<crate::app::RssPreviewItem>, Vec<bool>, bool) {
     let search = search_query.to_lowercase();
     let has_search = !search.is_empty();
-    let prioritise_matches = has_search || has_filters;
+    let filter_q = filter_query.to_lowercase();
+    let has_filter_query = !filter_q.is_empty();
+    let matcher = SkimMatcherV2::default();
+
+    let prioritise_matches = has_search || has_filters || has_filter_query;
 
     let mut items = preview_items.to_vec();
     let mut combined_match: Vec<bool> = items
         .iter()
         .map(|item| {
             let search_hit = has_search && item.title.to_lowercase().contains(&search);
-            item.is_match || search_hit
+            let filter_hit = has_filter_query
+                && matcher
+                    .fuzzy_match(&item.title.to_lowercase(), &filter_q)
+                    .is_some();
+            item.is_match || search_hit || filter_hit
         })
         .collect();
 
@@ -629,7 +668,7 @@ fn compute_explorer_items(
     (items, combined_match, prioritise_matches)
 }
 
-fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
+fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: bool) {
     let app_state = screen.app.state;
     let settings = screen.settings;
     let ctx = screen.theme;
@@ -640,19 +679,27 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         .min(app_state.rss_runtime.preview_items.len().saturating_sub(1));
 
     let has_filters = !settings.rss.filters.is_empty();
+    let filter_query = active_filter_query(app_state, settings);
     let (items, combined_match, prioritise_matches) = compute_explorer_items(
         &app_state.rss_runtime.preview_items,
         &app_state.ui.rss.search_query,
+        &filter_query,
         has_filters,
     );
 
-    let mut lines: Vec<Line<'static>> = items
+    let mut list_items: Vec<ListItem<'static>> = items
         .iter()
         .enumerate()
         .map(|(i, item)| {
             let cursor = if i == selected { "> " } else { "  " };
-            let mut badges = String::new();
             let is_combined_match = combined_match.get(i).copied().unwrap_or(item.is_match);
+            let style = if prioritise_matches && !is_combined_match {
+                ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0))
+            } else {
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text))
+            };
+
+            let mut badges = String::new();
             if is_combined_match {
                 badges.push('M');
             }
@@ -663,18 +710,24 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 badges.push('d');
             }
             let src = item.source.clone().unwrap_or_else(|| "unknown".to_string());
-            Line::from(format!("{}[{}] {} ({})", cursor, badges, item.title, src))
+            ListItem::new(Line::from(vec![Span::styled(
+                format!("{}[{}] {} ({})", cursor, badges, item.title, src),
+                style,
+            )]))
         })
         .collect();
 
     if app_state.ui.rss.is_searching || !app_state.ui.rss.search_query.is_empty() {
-        lines.insert(
+        list_items.insert(
             0,
-            Line::from(format!("Search: {}", app_state.ui.rss.search_query)),
+            ListItem::new(Line::from(format!("Search: {}", app_state.ui.rss.search_query))),
         );
     }
 
-    f.render_widget(build_rows(lines, "Explorer", ctx), area);
+    f.render_widget(
+        List::new(list_items).block(pane_block("Explorer", active, screen.theme)),
+        area,
+    );
 }
 
 fn draw_history(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
@@ -704,7 +757,72 @@ fn draw_history(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         })
         .collect();
 
-    f.render_widget(build_rows(lines, "History", ctx), area);
+    let items: Vec<ListItem<'static>> = lines.into_iter().map(ListItem::new).collect();
+    f.render_widget(
+        List::new(items).block(pane_block("History", true, ctx)),
+        area,
+    );
+}
+
+fn draw_unified_body(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
+    let app_state = screen.app.state;
+    if area.width >= 140 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+                Constraint::Percentage(40),
+            ])
+            .split(area);
+
+        draw_links(
+            f,
+            cols[0],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links),
+        );
+        draw_filters(
+            f,
+            cols[1],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters),
+        );
+        draw_explorer(
+            f,
+            cols[2],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer),
+        );
+    } else {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(area);
+
+        draw_explorer(
+            f,
+            rows[0],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer),
+        );
+        draw_filters(
+            f,
+            rows[1],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters),
+        );
+        draw_links(
+            f,
+            rows[2],
+            screen,
+            matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links),
+        );
+    }
 }
 
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
@@ -732,9 +850,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
     draw_shared_header(f, inner[0], screen);
     match app_state.ui.rss.active_screen {
-        RssScreen::Feeds => draw_feeds(f, inner[1], screen),
-        RssScreen::Filters => draw_filters(f, inner[1], screen),
-        RssScreen::Explorer => draw_explorer(f, inner[1], screen),
+        RssScreen::Unified => draw_unified_body(f, inner[1], screen),
         RssScreen::History => draw_history(f, inner[1], screen),
     }
     draw_shared_footer(f, inner[2], screen);
@@ -772,35 +888,41 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_switch_screens() {
+    fn tab_cycles_focus_sections() {
         let mut app_state = base_state();
         let settings = crate::config::Settings::default();
         let (tx, _rx) = mpsc::channel(2);
 
-        handle_event(
-            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Char('l'),
-                ratatui::crossterm::event::KeyModifiers::NONE,
-            )),
-            &mut app_state,
-            &settings,
-            &tx,
-        );
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Feeds));
+        assert!(matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer));
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Char('e'),
+                KeyCode::Tab,
                 ratatui::crossterm::event::KeyModifiers::NONE,
             )),
             &mut app_state,
             &settings,
             &tx,
         );
-        assert!(matches!(
-            app_state.ui.rss.active_screen,
-            RssScreen::Explorer
-        ));
+        assert!(matches!(app_state.ui.rss.focused_section, RssSectionFocus::Links));
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::BackTab,
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer));
+    }
+
+    #[test]
+    fn h_switches_to_history_screen() {
+        let mut app_state = base_state();
+        let settings = crate::config::Settings::default();
+        let (tx, _rx) = mpsc::channel(2);
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
@@ -811,18 +933,8 @@ mod tests {
             &settings,
             &tx,
         );
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::History));
 
-        handle_event(
-            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Char('f'),
-                ratatui::crossterm::event::KeyModifiers::NONE,
-            )),
-            &mut app_state,
-            &settings,
-            &tx,
-        );
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Filters));
+        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::History));
     }
 
     #[test]
@@ -877,9 +989,9 @@ mod tests {
     }
 
     #[test]
-    fn explorer_shift_f_seeds_filter_and_switches_screen() {
+    fn explorer_shift_f_seeds_filter_and_focuses_filters() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Explorer;
+        app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
         app_state.rss_runtime.preview_items.push(RssPreviewItem {
             title: "Ubuntu (LTS) [x64]".to_string(),
             ..Default::default()
@@ -898,18 +1010,17 @@ mod tests {
             &tx,
         );
 
-        assert!(matches!(app_state.ui.rss.active_screen, RssScreen::Filters));
+        assert!(matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters));
         assert_eq!(app_state.ui.rss.filter_draft, "Ubuntu (LTS) [x64]");
     }
 
     #[test]
-    fn add_feed_dispatches_update_config() {
+    fn add_link_dispatches_update_config() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
         let settings = crate::config::Settings::default();
         let (tx, mut rx) = mpsc::channel(8);
 
-        // Start add mode.
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::Char('a'),
@@ -955,9 +1066,9 @@ mod tests {
     }
 
     #[test]
-    fn paste_feed_url_in_edit_mode_dispatches_update_config() {
+    fn paste_link_in_edit_mode_dispatches_update_config() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
         let settings = crate::config::Settings::default();
         let (tx, mut rx) = mpsc::channel(8);
 
@@ -970,7 +1081,6 @@ mod tests {
             &settings,
             &tx,
         );
-        assert!(app_state.ui.rss.is_editing);
 
         handle_event(
             CrosstermEvent::Paste("https://subsplease.org/rss/?t&r=1080".to_string()),
@@ -1000,9 +1110,9 @@ mod tests {
     }
 
     #[test]
-    fn delete_feed_dispatches_update_config() {
+    fn delete_link_dispatches_update_config() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
         let mut settings = crate::config::Settings::default();
         settings.rss.feeds.push(crate::config::RssFeed {
             url: "https://a.test/rss".to_string(),
@@ -1028,9 +1138,9 @@ mod tests {
     }
 
     #[test]
-    fn toggle_feed_dispatches_update_config() {
+    fn toggle_link_dispatches_update_config() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Feeds;
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
         let mut settings = crate::config::Settings::default();
         settings.rss.feeds.push(crate::config::RssFeed {
             url: "https://a.test/rss".to_string(),
@@ -1058,7 +1168,7 @@ mod tests {
     #[test]
     fn explorer_search_mode_sets_and_clears_status() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Explorer;
+        app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
         let settings = crate::config::Settings::default();
         let (tx, _rx) = mpsc::channel(8);
 
@@ -1108,7 +1218,7 @@ mod tests {
             },
         ];
 
-        let (sorted, combined, prioritise) = compute_explorer_items(&items, "ubuntu", false);
+        let (sorted, combined, prioritise) = compute_explorer_items(&items, "ubuntu", "", false);
         assert!(prioritise);
         assert_eq!(sorted.len(), 2);
         assert_eq!(combined.len(), 2);
@@ -1129,11 +1239,11 @@ mod tests {
             },
         ];
 
-        let (inactive_sorted, _, inactive_prioritise) = compute_explorer_items(&items, "", false);
+        let (inactive_sorted, _, inactive_prioritise) = compute_explorer_items(&items, "", "", false);
         assert!(!inactive_prioritise);
         assert_eq!(inactive_sorted[0].title, "Non match");
 
-        let (active_sorted, _, active_prioritise) = compute_explorer_items(&items, "", true);
+        let (active_sorted, _, active_prioritise) = compute_explorer_items(&items, "", "", true);
         assert!(active_prioritise);
         assert_eq!(active_sorted[0].title, "Match");
     }
@@ -1180,7 +1290,8 @@ mod tests {
     #[test]
     fn active_filter_query_uses_selected_filter_in_nav_mode() {
         let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Filters;
+        app_state.ui.rss.active_screen = RssScreen::Unified;
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
         app_state.ui.rss.is_editing = false;
         app_state.ui.rss.filter_draft.clear();
         app_state.ui.rss.selected_filter_index = 1;

@@ -590,10 +590,10 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "l / f / e / h",
+                        "Tab / Shift+Tab / h",
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     )),
-                    Cell::from("Switch RSS sub-screen (Links/Filters/Explorer/History)"),
+                    Cell::from("Cycle focus panes (Links/Filters/Explorer) / open History"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -614,7 +614,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "a / d / x",
                         ctx.apply(Style::default().fg(ctx.state_complete())),
                     )),
-                    Cell::from("Links: add/delete/toggle. Filters: add/delete (no toggle key)"),
+                    Cell::from("Focused pane actions: Links add/delete/toggle; Filters add/delete"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -628,7 +628,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "/",
                         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
                     )),
-                    Cell::from("Start Explorer search mode (live as you type)"),
+                    Cell::from("Start Explorer search mode (when Explorer pane is focused)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -639,10 +639,10 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "Tab / Shift+Tab",
+                        "j / k / ↑ / ↓",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
-                    Cell::from("Not used in RSS mode"),
+                    Cell::from("Move selection in the focused pane"),
                 ]),
             ],
         ),

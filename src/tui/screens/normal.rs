@@ -3583,7 +3583,7 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
             app.app_state.mode = AppMode::Help;
         }
         UiEffect::OpenRssScreen => {
-            app.app_state.ui.rss.active_screen = RssScreen::Feeds;
+            app.app_state.ui.rss.active_screen = RssScreen::Unified;
             app.app_state.mode = AppMode::Rss;
         }
         UiEffect::HandlePastedText(text) => {

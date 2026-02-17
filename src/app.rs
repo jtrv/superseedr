@@ -427,10 +427,16 @@ pub enum AppMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RssScreen {
     #[default]
-    Feeds,
-    Filters,
-    Explorer,
+    Unified,
     History,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RssSectionFocus {
+    Links,
+    Filters,
+    #[default]
+    Explorer,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,6 +575,7 @@ pub struct FileBrowserUiState {
 #[allow(dead_code)]
 pub struct RssUiState {
     pub active_screen: RssScreen,
+    pub focused_section: RssSectionFocus,
     pub selected_feed_index: usize,
     pub selected_filter_index: usize,
     pub selected_explorer_index: usize,
