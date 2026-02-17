@@ -567,6 +567,35 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     f.render_widget(build_rows(lines, "Filters", ctx), area);
 }
 
+fn compute_explorer_items(
+    preview_items: &[crate::app::RssPreviewItem],
+    search_query: &str,
+    has_filters: bool,
+) -> (Vec<crate::app::RssPreviewItem>, Vec<bool>, bool) {
+    let search = search_query.to_lowercase();
+    let has_search = !search.is_empty();
+    let prioritise_matches = has_search || has_filters;
+
+    let mut items = preview_items.to_vec();
+    let mut combined_match: Vec<bool> = items
+        .iter()
+        .map(|item| {
+            let search_hit = has_search && item.title.to_lowercase().contains(&search);
+            item.is_match || search_hit
+        })
+        .collect();
+
+    if prioritise_matches {
+        let mut paired: Vec<(crate::app::RssPreviewItem, bool)> =
+            items.into_iter().zip(combined_match).collect();
+        paired.sort_by(|a, b| b.1.cmp(&a.1));
+        combined_match = paired.iter().map(|p| p.1).collect();
+        items = paired.into_iter().map(|p| p.0).collect();
+    }
+
+    (items, combined_match, prioritise_matches)
+}
+
 fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let settings = screen.settings;
@@ -577,26 +606,12 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         .selected_explorer_index
         .min(app_state.rss_runtime.preview_items.len().saturating_sub(1));
 
-    let search = app_state.ui.rss.search_query.to_lowercase();
-    let has_search = !search.is_empty();
     let has_filters = !settings.rss.filters.is_empty();
-    let prioritise_matches = has_search || has_filters;
-
-    let mut items = app_state.rss_runtime.preview_items.clone();
-    let mut combined_match: Vec<bool> = items
-        .iter()
-        .map(|item| {
-            let search_hit = has_search && item.title.to_lowercase().contains(&search);
-            item.is_match || search_hit
-        })
-        .collect();
-    if prioritise_matches {
-        let mut paired: Vec<(crate::app::RssPreviewItem, bool)> =
-            items.into_iter().zip(combined_match.into_iter()).collect();
-        paired.sort_by(|a, b| b.1.cmp(&a.1));
-        combined_match = paired.iter().map(|p| p.1).collect();
-        items = paired.into_iter().map(|p| p.0).collect();
-    }
+    let (items, combined_match, prioritise_matches) = compute_explorer_items(
+        &app_state.rss_runtime.preview_items,
+        &app_state.ui.rss.search_query,
+        has_filters,
+    );
 
     let mut lines: Vec<Line<'static>> = items
         .iter()
@@ -619,7 +634,7 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         })
         .collect();
 
-    if app_state.ui.rss.is_searching || has_search {
+    if app_state.ui.rss.is_searching || !app_state.ui.rss.search_query.is_empty() {
         lines.insert(
             0,
             Line::from(format!("Search: {}", app_state.ui.rss.search_query)),
@@ -964,5 +979,50 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn explorer_compute_keeps_non_matches_visible_when_search_active() {
+        let items = vec![
+            RssPreviewItem {
+                title: "Ubuntu LTS".to_string(),
+                is_match: true,
+                ..Default::default()
+            },
+            RssPreviewItem {
+                title: "Fedora".to_string(),
+                is_match: false,
+                ..Default::default()
+            },
+        ];
+
+        let (sorted, combined, prioritise) = compute_explorer_items(&items, "ubuntu", false);
+        assert!(prioritise);
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(combined.len(), 2);
+    }
+
+    #[test]
+    fn explorer_compute_sorts_matches_first_only_when_active() {
+        let items = vec![
+            RssPreviewItem {
+                title: "Non match".to_string(),
+                is_match: false,
+                ..Default::default()
+            },
+            RssPreviewItem {
+                title: "Match".to_string(),
+                is_match: true,
+                ..Default::default()
+            },
+        ];
+
+        let (inactive_sorted, _, inactive_prioritise) = compute_explorer_items(&items, "", false);
+        assert!(!inactive_prioritise);
+        assert_eq!(inactive_sorted[0].title, "Non match");
+
+        let (active_sorted, _, active_prioritise) = compute_explorer_items(&items, "", true);
+        assert!(active_prioritise);
+        assert_eq!(active_sorted[0].title, "Match");
     }
 }
