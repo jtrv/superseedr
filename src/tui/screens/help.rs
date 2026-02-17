@@ -621,7 +621,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "Enter",
                         ctx.apply(Style::default().fg(ctx.state_warning())),
                     )),
-                    Cell::from("Confirm add/search input; in Explorer triggers manual add"),
+                    Cell::from("Confirm add/search input"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -629,13 +629,6 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
                     )),
                     Cell::from("Start Explorer search mode (live as you type)"),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        "y",
-                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-                    )),
-                    Cell::from("Copy selected Explorer link to clipboard"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

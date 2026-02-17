@@ -4,15 +4,9 @@
 use crate::app::{AppCommand, AppMode, AppState, RssScreen};
 use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
-#[cfg(windows)]
-use clipboard::{ClipboardContext, ClipboardProvider};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
 use regex::Regex;
-#[cfg(not(windows))]
-use std::io::Write;
-#[cfg(not(windows))]
-use std::process::{Command, Stdio};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,8 +24,6 @@ pub enum RssAction {
     DeleteEntry,
     ToggleFeedEnabled,
     StartSearch,
-    ManualAddSelected,
-    CopySelectedLink,
     SeedFilterFromSelectedTitle,
 }
 
@@ -76,8 +68,6 @@ fn map_key_to_rss_action(
         KeyCode::Char('d') => Some(RssAction::DeleteEntry),
         KeyCode::Char('x') => Some(RssAction::ToggleFeedEnabled),
         KeyCode::Char('/') => Some(RssAction::StartSearch),
-        KeyCode::Enter => Some(RssAction::ManualAddSelected),
-        KeyCode::Char('y') => Some(RssAction::CopySelectedLink),
         KeyCode::Up | KeyCode::Char('k') => Some(RssAction::MoveUp),
         KeyCode::Down | KeyCode::Char('j') => Some(RssAction::MoveDown),
         _ => None,
@@ -298,37 +288,6 @@ fn execute_rss_effects(
                     set_rss_status(app_state, "Search mode");
                 }
             }
-            RssAction::ManualAddSelected => {
-                if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
-                    let idx = app_state.ui.rss.selected_explorer_index;
-                    if let Some(item) = app_state.rss_runtime.preview_items.get(idx) {
-                        let _ =
-                            app_command_tx.try_send(AppCommand::RssManualAddSelected(item.clone()));
-                        set_rss_status(app_state, "Manual add requested");
-                    }
-                }
-            }
-            RssAction::CopySelectedLink => {
-                if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
-                    let idx = app_state.ui.rss.selected_explorer_index;
-                    if let Some(link) = app_state
-                        .rss_runtime
-                        .preview_items
-                        .get(idx)
-                        .and_then(|item| item.link.clone())
-                    {
-                        match copy_to_clipboard(link.as_str()) {
-                            Ok(()) => {
-                                set_rss_status(app_state, "Copied link to clipboard");
-                            }
-                            Err(e) => {
-                                app_state.system_warning =
-                                    Some(format!("Clipboard copy failed: {} (link: {})", e, link));
-                            }
-                        }
-                    }
-                }
-            }
             RssAction::SeedFilterFromSelectedTitle => {
                 if matches!(app_state.ui.rss.active_screen, RssScreen::Explorer) {
                     let idx = app_state.ui.rss.selected_explorer_index;
@@ -361,67 +320,6 @@ fn apply_pasted_text(app_state: &mut AppState, pasted_text: &str) {
         app_state.ui.rss.search_query.push_str(trimmed);
         app_state.ui.rss.status_message = Some("Pasted search".to_string());
     }
-}
-
-#[cfg(windows)]
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut ctx =
-        ClipboardContext::new().map_err(|e| format!("clipboard initialization error: {}", e))?;
-    ctx.set_contents(text.to_string())
-        .map_err(|e| format!("clipboard write error: {}", e))
-}
-
-#[cfg(target_os = "macos")]
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut child = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to spawn pbcopy: {}", e))?;
-
-    if let Some(stdin) = &mut child.stdin {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("failed to write to pbcopy stdin: {}", e))?;
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("failed to wait for pbcopy: {}", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("pbcopy exited with status {}", status))
-    }
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
-        if let Some(stdin) = &mut child.stdin {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        if child.wait().map(|s| s.success()).unwrap_or(false) {
-            return Ok(());
-        }
-    }
-
-    for args in [["-selection", "clipboard"], ["-selection", "primary"]] {
-        if let Ok(mut child) = Command::new("xclip")
-            .args(args)
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = &mut child.stdin {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if child.wait().map(|s| s.success()).unwrap_or(false) {
-                return Ok(());
-            }
-        }
-    }
-
-    Err("no supported clipboard command found (tried wl-copy and xclip)".to_string())
 }
 
 pub fn handle_event(
@@ -535,7 +433,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 ctx.apply(Style::default().fg(ctx.state_info())),
             )),
             RssScreen::Explorer => footer_spans.push(Span::styled(
-                "[/] search [Enter] manual add [y] copy link [f] to filter ",
+                "[/] search [j/k] move [f] to filter ",
                 ctx.apply(Style::default().fg(ctx.state_info())),
             )),
             RssScreen::History => footer_spans.push(Span::styled(
@@ -1127,43 +1025,6 @@ mod tests {
             AppCommand::UpdateConfig(s) => assert!(!s.rss.feeds[0].enabled),
             _ => panic!("unexpected command"),
         }
-    }
-
-    #[test]
-    fn enter_on_explorer_dispatches_manual_add() {
-        let mut app_state = base_state();
-        app_state.ui.rss.active_screen = RssScreen::Explorer;
-        app_state.rss_runtime.preview_items.push(RssPreviewItem {
-            dedupe_key: "guid:123".to_string(),
-            title: "Ubuntu".to_string(),
-            link: Some("magnet:?xt=urn:btih:abcd".to_string()),
-            ..Default::default()
-        });
-        let settings = crate::config::Settings::default();
-        let (tx, mut rx) = mpsc::channel(8);
-
-        handle_event(
-            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Enter,
-                ratatui::crossterm::event::KeyModifiers::NONE,
-            )),
-            &mut app_state,
-            &settings,
-            &tx,
-        );
-
-        let cmd = rx.try_recv().expect("expected manual add dispatch");
-        match cmd {
-            AppCommand::RssManualAddSelected(item) => {
-                assert_eq!(item.dedupe_key, "guid:123");
-                assert_eq!(item.title, "Ubuntu");
-            }
-            _ => panic!("unexpected command"),
-        }
-        assert_eq!(
-            app_state.ui.rss.status_message.as_deref(),
-            Some("Manual add requested")
-        );
     }
 
     #[test]
