@@ -831,16 +831,8 @@ fn draw_unified_body(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let area = centered_rect(88, 86, f.area());
     let app_state = screen.app.state;
-    let ctx = screen.theme;
 
     f.render_widget(Clear, area);
-    f.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" RSS ")
-            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-        area,
-    );
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
