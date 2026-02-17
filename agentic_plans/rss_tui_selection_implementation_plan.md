@@ -6,7 +6,7 @@ Add native RSS automation into Superseedr TUI while preserving the current file-
 - Use an item title to seed regex filtering.
 - Manually trigger one-off download for a selected item.
 - Visually distinguish potential matches and already-downloaded items.
-- Expose sync controls and download history in-screen.
+- Expose sync controls and history in-screen.
 
 ## Parity Contract (MVP)
 Webapp-visible behavior is the source of truth for MVP parity. Enhancements are deferred unless explicitly marked.
@@ -14,7 +14,7 @@ Webapp-visible behavior is the source of truth for MVP parity. Enhancements are 
 1. Match-priority sorting is automatic only when search/filter is active.
 2. Preview explorer dedupes by normalized item title.
 3. Filters are add/delete in MVP (no per-filter UI toggle).
-4. RSS screen includes `Sync Now`, sync status, and a history table.
+4. RSS mode includes `Sync Now`, sync status, and a dedicated history sub-screen.
 
 ## Current Behavior to Mirror
 1. Multi-feed management with enable/disable per feed.
@@ -40,79 +40,71 @@ Webapp-visible behavior is the source of truth for MVP parity. Enhancements are 
 
 ## Target TUI UX (Selection Experience)
 
-### WebUI layout reference (panel placement + rough sizing)
-Note: this section is reference-only; terminal geometry and panel ratios will differ from browser layout constraints.
-
-Reference shape from `plugins/RSS/superseedr-rss/public/index.html` and CSS (`style.css`, `ui-refactor.css`):
-
-1. App frame
-- Centered container with `max-width: 1200px`, full-width below that, with about `2rem` page padding.
-
-2. Header strip
-- Single row, left/right split.
-- Left cluster: logo + title (`Superseedr RSS`).
-- Right cluster: `Sync Now` button, sync countdown, connection badge.
-- Visual spacing: header has bottom border and large bottom margin (`~3rem`) before content.
-
-3. Top primary card (full width)
-- Occupies full content width above any lower grid.
-- Header row: `Live Feed Explorer` title on left, refresh action on right.
-- Subtitle line under header.
-- Config row directly under subtitle with two equal columns:
-  - Left column: `RSS Sources` list + add-feed form.
-  - Right column: `Content Filters` list + add-filter form.
-- Explorer panel sits below config row in same card:
-  - Match-count text aligned to top-right of explorer area.
-  - Scrollable preview list with fixed desktop height around `400px`.
-
-4. Lower secondary grid
-- Two columns with asymmetric widths: roughly `1fr` (left) and `1.5fr` (right), with about `2rem` gap.
-- In the webapp this area holds non-core controls/history; for TUI RSS parity, keep focus on history in this lower zone and do not treat output-path or manual magnet-link entry as required parity targets.
-
-5. Mobile behavior
-- At widths `<= 768px`, lower grid collapses to a single vertical column.
-- Top full-width explorer card stays first; lower content stacks below.
-
 ### Screen model
-Add a dedicated `AppMode::Rss` screen, accessible from normal mode keybinding `r`.
+Keep one mode: `AppMode::Rss` (opened from normal mode key `r`), with four internal RSS sub-screens:
+1. Feeds
+2. Filters
+3. Explorer
+4. History
 
-### Layout
-Four logical sections:
-1. Feeds (URL + enabled toggle).
-2. Filters (regex list; add/delete only in MVP).
-3. Feed Explorer list (title, source, date, badges).
-4. History table (added/downloaded items with timestamp + source + mode).
+Default sub-screen on open: **Feeds**.
 
-Footer includes context-sensitive keys and sync metadata.
-
-### Explorer row states
-- `Downloaded` badge if row is present in RSS history.
-- `Match` style if row matches active search regex or any saved filter.
-- `Dim` style for non-match rows when filter/search is active.
-
-### Sorting behavior (parity)
-- No manual sort toggle in MVP.
-- If no search/filter is active: chronological order.
-- If search/filter is active: matching rows float to top automatically.
-
-### Key interactions
-When focus is on explorer list:
-- `f`: Use selected title as escaped regex seed in filter input buffer (not auto-save yet).
-- `A`: add filter from current input buffer.
-- `Enter`: one-off Send to Client for selected item (manual add bypasses filters).
-- `y`: copy selected link to clipboard.
-- `/`: start inline regex search buffer.
-
-Global RSS controls:
+### Global RSS navigation
+- `f`: switch to Feeds sub-screen.
+- `l`: switch to Filters sub-screen.
+- `e`: switch to Explorer sub-screen.
+- `h`: switch to History sub-screen.
 - `S`: Sync Now.
+- `Esc` / `q`: exit RSS mode.
 
-### Pane navigation
-- `Tab`/`Shift+Tab` cycle panes.
-- `j/k` and arrows navigate rows.
-- `x` toggles enabled state on selected feed.
-- `d` deletes selected feed/filter.
+Rules:
+- `Tab` / `Shift+Tab` are disabled in RSS mode.
+- While typing in add/search/edit buffers, sub-screen switch keys are treated as text only if the input capture mode is active.
+
+### Shared header/footer
+All RSS sub-screens render a shared header/footer shell containing:
+- Current sub-screen label.
+- Last sync / next sync.
+- Key hints for global RSS actions.
+
+### Feeds sub-screen
+- Feed list with enabled state.
+- `j/k` + arrows to move.
+- `x` toggles selected feed enabled state.
 - `a` opens add-feed prompt.
-- `Esc` exits RSS mode (persisting committed changes).
+- `d` deletes selected feed.
+
+### Filters sub-screen
+- Filter list + add/delete controls.
+- `j/k` + arrows to move.
+- `a` opens add-filter prompt.
+- `d` deletes selected filter.
+- Live draft behavior while typing filter text:
+- Draft regex is compiled and applied as-you-type.
+- Match count updates as-you-type.
+- Inline live preview list updates as-you-type so user sees affected explorer items immediately.
+- Invalid draft regex shows non-blocking inline error without losing input buffer.
+
+### Explorer sub-screen
+- Aggregated feed items list (`title`, `source`, `date`, badges).
+- Row states:
+- `Downloaded` badge if present in RSS history.
+- `Match` style if item matches active search or saved filters.
+- `Dim` style for non-matches when filter/search active.
+- Sorting behavior:
+- No manual sort toggle.
+- Chronological when no search/filter active.
+- Matches-first automatically when search/filter active.
+- Actions:
+- `Enter`: one-off Send to Client for selected item (manual add bypasses filters).
+- `f`: use selected title as escaped regex seed (writes to filter draft buffer).
+- `y`: copy selected link.
+- `/`: start inline explorer search.
+
+### History sub-screen
+- Table of RSS history entries (manual + auto adds) with timestamp/source/mode.
+- Navigation with `j/k` + arrows.
+- Read-only in MVP (no destructive actions).
 
 ## Data Model and Persistence
 
@@ -183,10 +175,9 @@ Persist these values:
 - Evict oldest first when inserting past cap.
 
 ### Non-persistent (session-only)
-- Current pane focus.
-- Current selected row indices.
-- Search input draft.
-- Temporary add-feed/add-filter text buffers.
+- Current RSS sub-screen.
+- Current selected row indices per RSS sub-screen.
+- Search/edit input drafts.
 - Cached preview rows.
 
 ### Migration
@@ -226,8 +217,9 @@ Implement a shared helper for manual and auto flows:
 ## App/Event Architecture Changes
 
 ### App state
-- Add `rss_ui` to `UiState` for screen-local state.
-- Add `rss_runtime` app state for latest fetched rows and sync metadata.
+- Add `rss_ui` to `UiState` for RSS sub-screen-local state.
+- Add `rss_runtime` app state for fetched rows and sync metadata.
+- Add `RssScreen` enum for active RSS sub-screen (`Feeds|Filters|Explorer|History`).
 
 ### New app commands/events
 Add async/runtime commands:
@@ -238,31 +230,32 @@ Add async/runtime commands:
 - `RssDownloadSelected`
 - `RssConfigUpdated`
 
-Keep mode transitions in TUI screen handlers, consistent with existing architecture.
+Keep top-level mode transitions in TUI screen handlers.
 
 ### Keymap updates
 - Add normal-mode keybinding (`r`) to open RSS mode.
-- Add help screen entries in `tui/screens/help.rs`.
+- Add RSS sub-screen keymap (`f/l/e/h`) to help screen.
 - Add footer hint for RSS key in normal footer.
 
 ## Render Plan
 
-### New screen module
-Create `src/tui/screens/rss.rs` with:
-- `draw(...)`
-- `handle_event(...)`
-- reducer/effect helpers for testability.
+### RSS screen module
+`src/tui/screens/rss.rs` contains:
+- `draw(...)` (shared shell + sub-screen dispatch)
+- `handle_event(...)` (global keys + sub-screen dispatch)
+- reducer/effect helpers for testability
 
 ### Visual parity targets
-- Explorer dominates width.
+- Explorer remains the primary item browsing surface.
 - Match highlighting + dimming mirrors webapp.
 - Downloaded badge displayed inline.
 - Match count shown in explorer header (`N potential matches`).
 - Sync status shown (`Last sync`, `Next sync`) and `Sync Now` action visible.
-- History table visible in RSS screen.
+- History is visible as its own RSS sub-screen.
+- Filters sub-screen live preview updates while typing filter drafts.
 
 ## Failure Handling
-- Invalid regex: reject add with non-blocking error message.
+- Invalid regex draft: non-blocking inline error, keep draft text.
 - Feed fetch failures: keep last good preview; annotate per-feed error status.
 - Write/download failures: surface in `system_error` and append to RSS diagnostics.
 - Clipboard failure (`y` or paste): soft error; allow manual input fallback.
@@ -271,12 +264,15 @@ Create `src/tui/screens/rss.rs` with:
 
 ### Unit tests
 1. Regex compile/validation behavior.
-2. Automatic match-priority sorting only when filter/search active.
-3. Match/dim logic for explorer rows.
-4. Preview title-dedupe behavior.
-5. Ingest dedupe key behavior (`guid -> link -> title+source`).
-6. History cap + insertion/eviction order.
-7. Reducer coverage for RSS key actions.
+2. RSS sub-screen switching (`f/l/e/h`) behavior.
+3. Key capture precedence while editing/searching.
+4. Automatic match-priority sorting only when filter/search active.
+5. Match/dim logic for explorer rows.
+6. Preview title-dedupe behavior.
+7. Ingest dedupe key behavior (`guid -> link -> title+source`).
+8. History cap + insertion/eviction order.
+9. Reducer coverage for RSS key actions per sub-screen.
+10. Filters live draft preview updates as-you-type.
 
 ### Integration tests
 1. Poll feed fixture -> matched item writes atomic `.magnet`/`.torrent`.
@@ -293,15 +289,16 @@ Create `src/tui/screens/rss.rs` with:
 - Matches float to top only when search/filter active.
 - No manual sort toggle exists in MVP.
 - Sync Now control works and updates sync status.
-- History table renders and reflects persisted history.
+- History sub-screen renders and reflects persisted history.
+- Filters live preview and match counts update during draft typing.
 
 ## Implementation Phases
-1. **Parity contract + data semantics**: lock behavior rules, add settings schema, dedupe definitions.
-2. **Persistence + runtime wiring**: add `src/persistence/`, implement `rss.toml` load/save/recovery, dedicated `rss_service` lifecycle, command bus plumbing.
-3. **Worker + ingest path**: polling, parsing, filter application, shared atomic writer, fetch policy.
-4. **RSS screen MVP**: mode switch, feeds/filters/explorer/history UI, key interactions, Sync Now, quick link paste.
-5. **Help/footer/status integration**: key hints, parity docs, sync metadata display.
-6. **Hardening + regression**: failure paths, parity tests, retention limits.
+1. **RSS IA refactor**: introduce sub-screen model in `AppMode::Rss` (`Feeds|Filters|Explorer|History`), global key routing (`f/l/e/h`), shared shell.
+2. **Feeds/Filters screens**: CRUD interactions, selection state, validation, and filters live draft preview.
+3. **Explorer screen**: list rendering, match/dim/sort behavior, manual add/copy/use-as-filter actions.
+4. **History screen**: table rendering + navigation, persisted state binding.
+5. **Worker + ingest hardening**: polling/fetch/atomic writes/failure handling polish.
+6. **Help/footer/status integration + regression tests**: key hints, sync metadata, parity verification.
 
 ## Scope Control
 Initial in-TUI RSS ships without external web service. Sidecar plugin may coexist, but core TUI RSS is self-contained, persisted via `settings.toml` (config) + `persistence/rss.toml` (runtime state), and operates through Superseedr's existing file-based ingest model.
