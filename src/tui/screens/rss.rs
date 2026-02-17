@@ -590,6 +590,15 @@ fn draw_feeds(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         })
         .collect();
 
+    let mut lines = lines;
+    if app_state.ui.rss.is_editing {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "Input: {}",
+            app_state.ui.rss.edit_buffer
+        )));
+    }
+
     f.render_widget(build_rows(lines, "Feeds", ctx), area);
 }
 
@@ -611,6 +620,13 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         .collect();
 
     let draft = app_state.ui.rss.filter_draft.clone();
+    if app_state.ui.rss.is_editing {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "Input: {}",
+            app_state.ui.rss.edit_buffer
+        )));
+    }
     if !draft.is_empty() {
         let mut live_preview_titles: Vec<String> = Vec::new();
         let match_count = match Regex::new(&draft) {
