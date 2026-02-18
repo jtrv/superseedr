@@ -2070,6 +2070,24 @@ fn rss_sync_countdown_label(next_sync_at: &str) -> Option<String> {
     Some(label)
 }
 
+fn peer_stream_smoothed_activity(data_slice: &[u64], i: usize) -> f64 {
+    let current = data_slice.get(i).copied().unwrap_or(0) as f64;
+    let prev = if i > 0 {
+        data_slice.get(i - 1).copied().unwrap_or(0) as f64
+    } else {
+        current
+    };
+    let next = data_slice.get(i + 1).copied().unwrap_or(0) as f64;
+    (prev * 0.25) + (current * 0.5) + (next * 0.25)
+}
+
+fn peer_stream_wave_amplitude(smoothed_activity: f64) -> f64 {
+    let min_amp = 0.10;
+    let max_amp = 0.28;
+    let normalized = (smoothed_activity / 10.0).clamp(0.0, 1.0);
+    min_amp + (max_amp - min_amp) * normalized
+}
+
 pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     if area.height < 3 || area.width < 10 {
         return;
@@ -2161,28 +2179,42 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let mut generate_points = |data_slice: &[u64],
                                small_points: &mut Vec<(f64, f64)>,
                                large_points: &mut Vec<(f64, f64)>,
-                               base_y: f64| {
+                               base_y: f64,
+                               lane_phase: f64| {
+        let wave_frequency = 0.45;
         for (i, &val) in data_slice.iter().enumerate() {
             if val == 0 {
                 continue;
             }
             let val_f = val as f64;
             let is_heavy = val > 3;
+            let smoothed_activity = peer_stream_smoothed_activity(data_slice, i);
+            let wave_amp = peer_stream_wave_amplitude(smoothed_activity);
+            let wave_center = base_y + wave_amp * ((i as f64 * wave_frequency) + lane_phase).sin();
 
             let small_dot_count = (val_f.sqrt().ceil() as usize).clamp(1, 6);
             let activity_spread = (val_f * 0.08).min(0.6);
             let base_jitter = 0.05;
             let intensity = base_jitter + activity_spread;
+            let x_intensity = (intensity * 0.90).max(0.02);
+            let y_intensity = (intensity * 0.65).max(0.015);
 
             for _ in 0..small_dot_count {
-                let x_jitter = rng.random_range(-intensity..intensity);
-                let y_jitter = rng.random_range(-intensity..intensity);
-                small_points.push((i as f64 + x_jitter, base_y + y_jitter));
+                let x_jitter = rng.random_range(-x_intensity..x_intensity);
+                let y_jitter = rng.random_range(-y_intensity..y_intensity);
+                small_points.push((
+                    i as f64 + x_jitter,
+                    (wave_center + y_jitter).clamp(0.6, 3.4),
+                ));
             }
 
             if is_heavy {
-                let heavy_jitter = rng.random_range(-0.1..0.1);
-                large_points.push((i as f64 + heavy_jitter, base_y + heavy_jitter));
+                let heavy_x_jitter = rng.random_range(-0.08..0.08);
+                let heavy_y_jitter = rng.random_range(-0.05..0.05);
+                large_points.push((
+                    i as f64 + heavy_x_jitter,
+                    (wave_center + heavy_y_jitter).clamp(0.6, 3.4),
+                ));
             }
         }
     };
@@ -2192,18 +2224,21 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         &mut conn_points_small,
         &mut conn_points_large,
         3.0,
+        0.0,
     );
     generate_points(
         disc_slice,
         &mut disc_points_small,
         &mut disc_points_large,
         2.0,
+        1.7,
     );
     generate_points(
         disconn_slice,
         &mut disconn_points_small,
         &mut disconn_points_large,
         1.0,
+        3.4,
     );
 
     let datasets = vec![
@@ -3984,6 +4019,25 @@ mod tests {
                 "magnet:?xt=urn:btih:test".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn peer_stream_wave_amplitude_scales_with_activity() {
+        let low = peer_stream_wave_amplitude(0.0);
+        let mid = peer_stream_wave_amplitude(5.0);
+        let high = peer_stream_wave_amplitude(20.0);
+
+        assert!(low < mid);
+        assert!(mid < high);
+        assert!((low - 0.10).abs() < f64::EPSILON);
+        assert!((high - 0.28).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn peer_stream_smoothed_activity_blends_neighbors() {
+        let data = [0_u64, 10, 0];
+        let smoothed = peer_stream_smoothed_activity(&data, 1);
+        assert!((smoothed - 5.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
