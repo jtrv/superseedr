@@ -97,6 +97,7 @@ use rlimit::Resource;
 
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
+pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
 struct CratesResponse {
@@ -720,9 +721,17 @@ pub struct App {
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
+    pub persistence_tx: Option<mpsc::UnboundedSender<PersistPayload>>,
+    pub persistence_task: Option<tokio::task::JoinHandle<()>>,
     pub tui_task: Option<tokio::task::JoinHandle<()>>,
     pub notify_rx: mpsc::Receiver<Result<Event, NotifyError>>,
     pub watcher: RecommendedWatcher,
+}
+
+#[derive(Clone)]
+pub struct PersistPayload {
+    pub settings: Settings,
+    pub rss_state: RssPersistedState,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -736,6 +745,29 @@ impl App {
         let (rss_settings_tx, rss_settings_rx) = watch::channel(client_configs.clone());
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
+        let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistPayload>();
+        let persistence_task = tokio::spawn(async move {
+            // If persistence write frequency becomes a bottleneck, introduce a short debounce
+            // window (e.g. 200-500ms) before each flush to coalesce bursts.
+            while let Some(payload) = persistence_rx.recv().await {
+                let write_result = tokio::task::spawn_blocking(move || {
+                    save_settings(&payload.settings)
+                        .map_err(|e| format!("Failed to auto-save settings: {}", e))?;
+                    save_rss_state(&payload.rss_state)
+                        .map_err(|e| format!("Failed to auto-save RSS state: {}", e))?;
+                    Ok::<(), String>(())
+                })
+                .await;
+
+                match write_result {
+                    Ok(Ok(())) => {
+                        tracing_event!(Level::DEBUG, "Settings/RSS state auto-saved successfully.");
+                    }
+                    Ok(Err(e)) => tracing_event!(Level::ERROR, "{}", e),
+                    Err(e) => tracing_event!(Level::ERROR, "Persistence writer join failed: {}", e),
+                }
+            }
+        });
 
         let (limits, system_warning) = calculate_adaptive_limits(&client_configs);
         tracing_event!(
@@ -846,6 +878,8 @@ impl App {
             tui_event_tx,
             tui_event_rx,
             shutdown_tx,
+            persistence_tx: Some(persistence_tx),
+            persistence_task: Some(persistence_task),
             tui_task: None,
             watcher,
             notify_rx,
@@ -1013,6 +1047,7 @@ impl App {
         self.save_state_to_disk();
 
         self.shutdown_sequence(terminal).await;
+        self.flush_persistence_writer().await;
 
         Ok(())
     }
@@ -1098,6 +1133,15 @@ impl App {
                 }
             }
         }));
+    }
+
+    async fn flush_persistence_writer(&mut self) {
+        self.persistence_tx = None;
+        if let Some(handle) = self.persistence_task.take() {
+            if let Err(e) = handle.await {
+                tracing_event!(Level::ERROR, "Error joining persistence task: {}", e);
+            }
+        }
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
@@ -1656,13 +1700,20 @@ impl App {
                 self.app_state.ui.needs_redraw = true;
             }
             AppCommand::RssDownloadSelected(entry) => {
-                let exists = self
+                let existing_idx = self
                     .app_state
                     .rss_runtime
                     .history
                     .iter()
-                    .any(|existing| existing.dedupe_key == entry.dedupe_key);
-                if !exists {
+                    .position(|existing| existing.dedupe_key == entry.dedupe_key);
+                if let Some(idx) = existing_idx {
+                    if self.app_state.rss_runtime.history[idx].info_hash.is_none()
+                        && entry.info_hash.is_some()
+                    {
+                        self.app_state.rss_runtime.history[idx].info_hash = entry.info_hash.clone();
+                        self.save_state_to_disk();
+                    }
+                } else {
                     self.app_state.rss_runtime.history.push(entry);
                     self.save_state_to_disk();
                 }
@@ -2153,12 +2204,6 @@ impl App {
             })
             .collect();
 
-        if let Err(e) = save_settings(&self.client_configs) {
-            tracing_event!(Level::ERROR, "Failed to auto-save settings: {}", e);
-        } else {
-            tracing_event!(Level::DEBUG, "Settings auto-saved successfully.");
-        }
-
         const RSS_HISTORY_LIMIT: usize = 1000;
         if self.app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
             let overflow = self.app_state.rss_runtime.history.len() - RSS_HISTORY_LIMIT;
@@ -2171,10 +2216,18 @@ impl App {
             feed_errors: self.app_state.rss_runtime.feed_errors.clone(),
         };
 
-        if let Err(e) = save_rss_state(&rss_state) {
-            tracing_event!(Level::ERROR, "Failed to auto-save RSS state: {}", e);
-        } else {
-            tracing_event!(Level::DEBUG, "RSS state auto-saved successfully.");
+        let payload = PersistPayload {
+            settings: self.client_configs.clone(),
+            rss_state,
+        };
+
+        if let Some(tx) = &self.persistence_tx {
+            if tx.send(payload).is_err() {
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to queue persistence payload: persistence task unavailable"
+                );
+            }
         }
     }
 
@@ -2673,8 +2726,12 @@ impl App {
             return;
         };
 
-        let added = if link.starts_with("magnet:") {
-            rss_ingest::write_magnet(&self.client_configs, link.as_str()).is_ok()
+        let (added, info_hash) = if link.starts_with("magnet:") {
+            let added = rss_ingest::write_magnet(&self.client_configs, link.as_str())
+                .await
+                .is_ok();
+            let (v1_hash, v2_hash) = parse_hybrid_hashes(link.as_str());
+            (added, v1_hash.or(v2_hash))
         } else if link.starts_with("http://") || link.starts_with("https://") {
             self.download_rss_torrent_from_url(link.as_str()).await
         } else {
@@ -2683,7 +2740,7 @@ impl App {
                 "Skipping RSS manual download: unsupported link scheme '{}'",
                 link
             );
-            false
+            (false, None)
         };
 
         if !added {
@@ -2698,6 +2755,7 @@ impl App {
 
         let entry = RssHistoryEntry {
             dedupe_key: item.dedupe_key.clone(),
+            info_hash: info_hash.map(hex::encode),
             guid: item.guid.clone(),
             link: item.link.clone(),
             title: item.title.clone(),
@@ -2708,21 +2766,25 @@ impl App {
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             added_via: crate::config::RssAddedVia::Manual,
         };
-        let exists = self
+        let existing_idx = self
             .app_state
             .rss_runtime
             .history
             .iter()
-            .any(|existing| existing.dedupe_key == entry.dedupe_key);
-        if !exists {
+            .position(|existing| existing.dedupe_key == entry.dedupe_key);
+        if let Some(idx) = existing_idx {
+            if self.app_state.rss_runtime.history[idx].info_hash.is_none() && entry.info_hash.is_some()
+            {
+                self.app_state.rss_runtime.history[idx].info_hash = entry.info_hash.clone();
+                self.save_state_to_disk();
+            }
+        } else {
             self.app_state.rss_runtime.history.push(entry);
             self.save_state_to_disk();
         }
     }
 
-    async fn download_rss_torrent_from_url(&mut self, url: &str) -> bool {
-        const MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
-
+    async fn download_rss_torrent_from_url(&mut self, url: &str) -> (bool, Option<Vec<u8>>) {
         let client = match reqwest::Client::builder()
             .user_agent("superseedr (https://github.com/Jagalite/superseedr)")
             .build()
@@ -2734,7 +2796,7 @@ impl App {
                     "RSS manual download failed to build HTTP client: {}",
                     e
                 );
-                return false;
+                return (false, None);
             }
         };
 
@@ -2747,7 +2809,7 @@ impl App {
                     url,
                     e
                 );
-                return false;
+                return (false, None);
             }
         };
         if !response.status().is_success() {
@@ -2757,7 +2819,7 @@ impl App {
                 response.status(),
                 url
             );
-            return false;
+            return (false, None);
         }
 
         let bytes = match response.bytes().await {
@@ -2769,26 +2831,26 @@ impl App {
                     url,
                     e
                 );
-                return false;
+                return (false, None);
             }
         };
-        if bytes.len() > MAX_TORRENT_DOWNLOAD_BYTES {
+        if bytes.len() > RSS_MAX_TORRENT_DOWNLOAD_BYTES {
             tracing_event!(
                 Level::ERROR,
                 "RSS manual download exceeded max size for {} ({} bytes)",
                 url,
                 bytes.len()
             );
-            return false;
+            return (false, None);
         }
-        if from_bytes(bytes.as_ref()).is_err() {
+        let Some(info_hash) = info_hash_from_torrent_bytes(bytes.as_ref()) else {
             tracing_event!(
                 Level::ERROR,
                 "RSS manual download produced invalid torrent payload for {}",
                 url
             );
-            return false;
-        }
+            return (false, None);
+        };
 
         let file_hash = hex::encode(sha1::Sha1::digest(url.as_bytes()));
         let temp_path = std::env::temp_dir().join(format!("superseedr-rss-{}.torrent", file_hash));
@@ -2799,7 +2861,7 @@ impl App {
                 temp_path,
                 e
             );
-            return false;
+            return (false, None);
         }
 
         self.add_torrent_from_file(
@@ -2820,7 +2882,7 @@ impl App {
                 e
             );
         }
-        true
+        (true, Some(info_hash))
     }
 
     async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -3091,19 +3153,64 @@ pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let v1 = magnet_link
-        .split('&')
-        .find(|part| part.contains("xt=urn:btih:"))
-        .and_then(|part| part.split(':').next_back())
-        .and_then(|h| decode_info_hash(h).ok());
+    let query = magnet_link
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or(magnet_link);
+    let mut v1: Option<Vec<u8>> = None;
+    let mut v2: Option<Vec<u8>> = None;
 
-    let v2 = magnet_link
-        .split('&')
-        .find(|part| part.contains("xt=urn:btmh:"))
-        .and_then(|part| part.split(':').next_back())
-        .and_then(|h| decode_info_hash(h).ok());
+    for part in query.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if !key.eq_ignore_ascii_case("xt") {
+            continue;
+        }
 
+        const BTIH_PREFIX: &str = "urn:btih:";
+        const BTMH_PREFIX: &str = "urn:btmh:";
+        if value.len() > BTIH_PREFIX.len()
+            && value
+                .get(..BTIH_PREFIX.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(BTIH_PREFIX))
+        {
+            v1 = value
+                .get(BTIH_PREFIX.len()..)
+                .and_then(|h| decode_info_hash(h).ok());
+        } else if value.len() > BTMH_PREFIX.len()
+            && value
+                .get(..BTMH_PREFIX.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(BTMH_PREFIX))
+        {
+            v2 = value
+                .get(BTMH_PREFIX.len()..)
+                .and_then(|h| decode_info_hash(h).ok());
+        }
+    }
     (v1, v2)
+}
+
+pub fn info_hash_from_torrent_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let torrent = from_bytes(bytes).ok()?;
+
+    let hash = if torrent.info.meta_version == Some(2) {
+        if !torrent.info.pieces.is_empty() {
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize()[0..20].to_vec()
+        }
+    } else {
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&torrent.info_dict_bencode);
+        hasher.finalize().to_vec()
+    };
+
+    Some(hash)
 }
 
 fn resolve_magnet_torrent_name(
@@ -3258,7 +3365,7 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_selected_indices_in_state, extract_magnet_display_name,
+        clamp_selected_indices_in_state, extract_magnet_display_name, parse_hybrid_hashes,
         persisted_validation_status_from_piece_completion, resolve_magnet_torrent_name,
         rss_settings_changed, sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
@@ -3437,6 +3544,14 @@ mod tests {
             extract_magnet_display_name(magnet),
             Some("Debian Netinst".to_string())
         );
+    }
+
+    #[test]
+    fn parse_hybrid_hashes_handles_case_insensitive_xt_and_urn_prefixes() {
+        let magnet = "magnet:?XT=URN:BTIH:1111111111111111111111111111111111111111&xT=urn:BTMH:12201111111111111111111111111111111111111111111111111111111111111111";
+        let (v1, v2) = parse_hybrid_hashes(magnet);
+        assert_eq!(v1, Some(vec![0x11; 20]));
+        assert_eq!(v2, Some(vec![0x11; 20]));
     }
 
     #[test]

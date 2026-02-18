@@ -118,6 +118,7 @@ impl Default for RssSettings {
 #[serde(default)]
 pub struct RssHistoryEntry {
     pub dedupe_key: String,
+    pub info_hash: Option<String>,
     pub guid: Option<String>,
     pub link: Option<String>,
     pub title: String,
@@ -130,6 +131,7 @@ impl Default for RssHistoryEntry {
     fn default() -> Self {
         Self {
             dedupe_key: String::new(),
+            info_hash: None,
             guid: None,
             link: None,
             title: String::new(),

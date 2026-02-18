@@ -13,11 +13,10 @@ use reqwest::Client;
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
 use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{self, Duration};
 
 const MIN_POLL_INTERVAL_SECS: u64 = 30;
-const MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 const FEED_FETCH_MAX_ATTEMPTS: u32 = 3;
 const FEED_RETRY_BASE_DELAY_MS: u64 = 400;
@@ -131,8 +130,14 @@ async fn run_sync(
     app_command_tx: &mpsc::Sender<AppCommand>,
     downloaded_keys: &mut HashSet<String>,
 ) {
-    let enabled_feeds: Vec<_> = settings.rss.feeds.iter().filter(|f| f.enabled).collect();
-    if enabled_feeds.is_empty() {
+    let enabled_feed_urls: Vec<String> = settings
+        .rss
+        .feeds
+        .iter()
+        .filter(|f| f.enabled)
+        .map(|f| f.url.clone())
+        .collect();
+    if enabled_feed_urls.is_empty() {
         let _ = app_command_tx
             .send(AppCommand::RssPreviewUpdated(Vec::new()))
             .await;
@@ -144,21 +149,38 @@ async fn run_sync(
 
     let mut aggregated = Vec::new();
 
-    for feed in enabled_feeds {
-        match fetch_and_parse_feed_with_retry(client, &feed.url, FEED_FETCH_MAX_ATTEMPTS).await {
-            Ok(mut items) => {
+    const FEED_FETCH_CONCURRENCY: usize = 6;
+    let mut pending = enabled_feed_urls.into_iter();
+    let mut fetches = JoinSet::new();
+
+    for _ in 0..FEED_FETCH_CONCURRENCY {
+        let Some(feed_url) = pending.next() else {
+            break;
+        };
+        let client_cloned = client.clone();
+        fetches.spawn(async move {
+            let result =
+                fetch_and_parse_feed_with_retry(&client_cloned, &feed_url, FEED_FETCH_MAX_ATTEMPTS)
+                    .await;
+            (feed_url, result)
+        });
+    }
+
+    while let Some(task_result) = fetches.join_next().await {
+        match task_result {
+            Ok((feed_url, Ok(mut items))) => {
                 let _ = app_command_tx
                     .send(AppCommand::RssFeedErrorUpdated {
-                        feed_url: feed.url.clone(),
+                        feed_url,
                         error: None,
                     })
                     .await;
                 aggregated.append(&mut items);
             }
-            Err(e) => {
+            Ok((feed_url, Err(e))) => {
                 let _ = app_command_tx
                     .send(AppCommand::RssFeedErrorUpdated {
-                        feed_url: feed.url.clone(),
+                        feed_url,
                         error: Some(crate::config::FeedSyncError {
                             message: e,
                             occurred_at_iso: Utc::now().to_rfc3339(),
@@ -166,6 +188,19 @@ async fn run_sync(
                     })
                     .await;
             }
+            Err(e) => {
+                tracing::error!("RSS feed fetch task join error: {}", e);
+            }
+        }
+
+        if let Some(feed_url) = pending.next() {
+            let client_cloned = client.clone();
+            fetches.spawn(async move {
+                let result =
+                    fetch_and_parse_feed_with_retry(&client_cloned, &feed_url, FEED_FETCH_MAX_ATTEMPTS)
+                        .await;
+                (feed_url, result)
+            });
         }
     }
 
@@ -191,7 +226,7 @@ async fn run_sync(
         let mut is_downloaded = identity_keys.iter().any(|k| downloaded_keys.contains(k));
 
         if is_match && !is_downloaded {
-            let added = auto_ingest_item(settings, client, &item).await;
+            let (added, info_hash) = auto_ingest_item(settings, client, &item).await;
             if added {
                 is_downloaded = true;
                 for key in &identity_keys {
@@ -200,6 +235,7 @@ async fn run_sync(
 
                 let entry = RssHistoryEntry {
                     dedupe_key: item.dedupe_key.clone(),
+                    info_hash: info_hash.map(hex::encode),
                     guid: item.guid.clone(),
                     link: item.link.clone(),
                     title: item.title.clone(),
@@ -244,7 +280,7 @@ fn enabled_filters(settings: &Settings) -> Vec<String> {
         .filters
         .iter()
         .filter(|f| f.enabled)
-        .map(|f| f.query.trim().to_string())
+        .map(|f| f.query.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -254,11 +290,9 @@ fn title_matches_filters(title: &str, filters: &[String], matcher: &SkimMatcherV
         return false;
     }
     let title_lc = title.to_lowercase();
-    filters.iter().any(|filter| {
-        matcher
-            .fuzzy_match(&title_lc, &filter.to_lowercase())
-            .is_some()
-    })
+    filters
+        .iter()
+        .any(|filter| matcher.fuzzy_match(&title_lc, filter).is_some())
 }
 
 async fn fetch_and_parse_feed(
@@ -424,22 +458,34 @@ fn normalize_title(input: &str) -> String {
         .to_lowercase()
 }
 
-async fn auto_ingest_item(settings: &Settings, client: &Client, item: &CandidateItem) -> bool {
+async fn auto_ingest_item(
+    settings: &Settings,
+    client: &Client,
+    item: &CandidateItem,
+) -> (bool, Option<Vec<u8>>) {
     let Some(link) = &item.link else {
-        return false;
+        return (false, None);
     };
 
     if link.starts_with("magnet:") {
-        return rss_ingest::write_magnet(settings, link.as_str()).is_ok();
+        let added = rss_ingest::write_magnet(settings, link.as_str()).await.is_ok();
+        let (v1_hash, v2_hash) = crate::app::parse_hybrid_hashes(link.as_str());
+        return (added, v1_hash.or(v2_hash));
     }
 
     if !(link.starts_with("http://") || link.starts_with("https://")) {
-        return false;
+        return (false, None);
     }
 
     match fetch_torrent_bytes(client, link).await {
-        Ok(bytes) => rss_ingest::write_torrent_bytes(settings, link.as_str(), &bytes).is_ok(),
-        Err(_) => false,
+        Ok(bytes) => {
+            let info_hash = crate::app::info_hash_from_torrent_bytes(&bytes);
+            let added = rss_ingest::write_torrent_bytes(settings, link.as_str(), &bytes)
+                .await
+                .is_ok();
+            (added, info_hash)
+        }
+        Err(_) => (false, None),
     }
 }
 
@@ -459,7 +505,7 @@ async fn fetch_torrent_bytes(client: &Client, url: &str) -> Result<Vec<u8>, Stri
         .await
         .map_err(|e| format!("torrent body read failed: {e}"))?;
 
-    if bytes.len() > MAX_TORRENT_DOWNLOAD_BYTES {
+    if bytes.len() > crate::app::RSS_MAX_TORRENT_DOWNLOAD_BYTES {
         return Err("torrent payload exceeds max allowed size".to_string());
     }
 

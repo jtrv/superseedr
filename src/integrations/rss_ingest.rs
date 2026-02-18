@@ -3,37 +3,40 @@
 
 use crate::config::{get_watch_path, Settings};
 use sha1::{Digest, Sha1};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub fn write_magnet(settings: &Settings, magnet_link: &str) -> io::Result<PathBuf> {
+pub async fn write_magnet(settings: &Settings, magnet_link: &str) -> io::Result<PathBuf> {
     let watch_dir = rss_watch_dir(settings)?;
     let hash = hex::encode(Sha1::digest(magnet_link.as_bytes()));
     let final_path = watch_dir.join(format!("{}.magnet", hash));
     let temp_path = watch_dir.join(format!("{}.magnet.tmp", hash));
 
-    atomic_write(&temp_path, &final_path, magnet_link.as_bytes())?;
+    atomic_write(&temp_path, &final_path, magnet_link.as_bytes()).await?;
     Ok(final_path)
 }
 
-pub fn write_torrent_bytes(settings: &Settings, source_url: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+pub async fn write_torrent_bytes(
+    settings: &Settings,
+    source_url: &str,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
     let watch_dir = rss_watch_dir(settings)?;
     let hash = hex::encode(Sha1::digest(source_url.as_bytes()));
     let final_path = watch_dir.join(format!("{}.torrent", hash));
     let temp_path = watch_dir.join(format!("{}.torrent.tmp", hash));
 
-    atomic_write(&temp_path, &final_path, bytes)?;
+    atomic_write(&temp_path, &final_path, bytes).await?;
     Ok(final_path)
 }
 
-fn atomic_write(temp_path: &Path, final_path: &Path, payload: &[u8]) -> io::Result<()> {
+async fn atomic_write(temp_path: &Path, final_path: &Path, payload: &[u8]) -> io::Result<()> {
     if let Some(parent) = final_path.parent() {
-        fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
-    fs::write(temp_path, payload)?;
-    fs::rename(temp_path, final_path)?;
+    tokio::fs::write(temp_path, payload).await?;
+    tokio::fs::rename(temp_path, final_path).await?;
     Ok(())
 }
 

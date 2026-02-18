@@ -136,6 +136,7 @@ mod tests {
         let state = RssPersistedState {
             history: vec![RssHistoryEntry {
                 dedupe_key: "guid:123".to_string(),
+                info_hash: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
                 guid: Some("123".to_string()),
                 link: Some("https://example.com/item.torrent".to_string()),
                 title: "Ubuntu ISO".to_string(),

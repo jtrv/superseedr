@@ -10,6 +10,8 @@ use fuzzy_matcher::FuzzyMatcher;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::{prelude::*, widgets::*};
 use reqwest::Url;
+use std::collections::HashSet;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -170,9 +172,66 @@ fn explorer_should_be_greyed_out(settings: &crate::config::Settings) -> bool {
 }
 
 fn is_valid_feed_url(value: &str) -> bool {
-    Url::parse(value)
-        .ok()
-        .is_some_and(|u| matches!(u.scheme(), "http" | "https"))
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    if let Some(host) = url.host_str() {
+        if host.eq_ignore_ascii_case("localhost") {
+            return false;
+        }
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            match ip {
+                IpAddr::V4(v4) => {
+                    if v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4.is_multicast()
+                        || v4.is_broadcast()
+                        || v4.is_documentation()
+                        || v4.is_unspecified()
+                    {
+                        return false;
+                    }
+                }
+                IpAddr::V6(v6) => {
+                    if v6.is_loopback()
+                        || v6.is_multicast()
+                        || v6.is_unspecified()
+                        || v6.is_unique_local()
+                        || v6.is_unicast_link_local()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = input.chars().count();
+    if char_count <= max_chars {
+        return input.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut out = String::new();
+    for ch in input.chars().take(max_chars - 3) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
 }
 
 fn execute_rss_effects(
@@ -580,7 +639,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 }
                 RssSectionFocus::Explorer => {
                     push_action("/", "search", ctx.accent_sapphire());
-                    push_action("Y", "download", ctx.state_success());
+                    push_action("Shift+Y", "download", ctx.state_success());
                 }
             },
             RssScreen::History => {}
@@ -654,6 +713,46 @@ fn human_readable_history_time(date_iso: &str) -> String {
         .unwrap_or_else(|_| date_iso.to_string())
 }
 
+fn link_matches_selected_explorer_item(
+    feed_url: &str,
+    item: &crate::app::RssPreviewItem,
+) -> bool {
+    let feed_url_lc = feed_url.to_lowercase();
+
+    if let Some(link) = &item.link {
+        let link_lc = link.to_lowercase();
+        if feed_url_lc.contains(&link_lc) || link_lc.contains(&feed_url_lc) {
+            return true;
+        }
+
+        let feed_host = Url::parse(feed_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
+        let link_host = Url::parse(link)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
+        if let (Some(fh), Some(lh)) = (feed_host.clone(), link_host) {
+            if fh == lh {
+                return true;
+            }
+        }
+
+        if let (Some(fh), Some(source)) = (feed_host, item.source.as_ref()) {
+            let host_root = fh
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            if !host_root.is_empty() && source.to_lowercase().contains(&host_root) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn pane_block<'a>(title: &'a str, active: bool, ctx: &crate::theme::ThemeContext) -> Block<'a> {
     let border_style = if active {
         ctx.apply(Style::default().fg(ctx.state_selected()))
@@ -673,6 +772,31 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
     let settings = screen.settings;
     let ctx = screen.theme;
     let selected = app_state.ui.rss.selected_feed_index;
+    let selected_explorer_item = if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+        && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
+    {
+        let enabled_filters = enabled_filter_queries(settings);
+        let filter_query = active_filter_query(app_state, settings);
+        let (items, _, _) = compute_explorer_items(
+            &app_state.rss_runtime.preview_items,
+            &app_state.ui.rss.search_query,
+            &enabled_filters,
+            &filter_query,
+            false,
+        );
+        if items.is_empty() {
+            None
+        } else {
+            let idx = app_state
+                .ui
+                .rss
+                .selected_explorer_index
+                .min(items.len().saturating_sub(1));
+            items.get(idx).cloned()
+        }
+    } else {
+        None
+    };
 
     let sorted_indices = sorted_feed_indices(settings);
     let sync_countdown = app_state
@@ -684,14 +808,19 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
         .iter()
         .map(|idx| {
             let feed = &settings.rss.feeds[*idx];
-            let style = if feed.enabled {
-                ctx.apply(Style::default().fg(ctx.theme.semantic.text))
-            } else {
+            let is_explorer_link_match = selected_explorer_item
+                .as_ref()
+                .is_some_and(|item| link_matches_selected_explorer_item(&feed.url, item));
+            let style = if !feed.enabled {
                 ctx.apply(
                     Style::default()
                         .fg(ctx.theme.semantic.overlay0)
                         .add_modifier(Modifier::CROSSED_OUT),
                 )
+            } else if is_explorer_link_match {
+                ctx.apply(Style::default().fg(ctx.state_selected()).bold())
+            } else {
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text))
             };
             let mut spans = vec![Span::styled(feed.url.clone(), style)];
             if let Some(countdown) = &sync_countdown {
@@ -717,13 +846,22 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
             "Feed errors:",
             ctx.apply(Style::default().fg(ctx.state_error()).bold()),
         )]));
+        let max_line_chars = area.width.saturating_sub(4) as usize;
         for (url, message) in feed_error_rows {
+            let max_url_chars = (max_line_chars / 3).max(12);
+            let url_text = truncate_with_ellipsis(&url, max_url_chars);
+            let prefix = format!("{}: ", url_text);
+            let remaining = max_line_chars.saturating_sub(prefix.chars().count());
+            let message_text = truncate_with_ellipsis(&message, remaining);
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}: ", url),
+                    prefix,
                     ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
-                Span::styled(message, ctx.apply(Style::default().fg(ctx.state_error()))),
+                Span::styled(
+                    message_text,
+                    ctx.apply(Style::default().fg(ctx.state_error())),
+                ),
             ]));
         }
     }
@@ -738,9 +876,7 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
             .theme
             .apply(Style::default().fg(screen.theme.state_selected()).bold())
     } else {
-        screen
-            .theme
-            .apply(Style::default().fg(screen.theme.theme.semantic.text).bold())
+        screen.theme.apply(Style::default())
     };
     f.render_stateful_widget(
         List::new(items)
@@ -823,6 +959,73 @@ fn compute_filter_preview_items(
     ranked
 }
 
+fn compute_filter_match_counts(
+    app_state: &AppState,
+    filter_text: &str,
+    matcher: &SkimMatcherV2,
+) -> (usize, usize) {
+    let filter_lc = filter_text.trim().to_lowercase();
+    if filter_lc.is_empty() {
+        return (0, 0);
+    }
+
+    let matched_items: Vec<&crate::app::RssPreviewItem> = app_state
+        .rss_runtime
+        .preview_items
+        .iter()
+        .filter(|item| matcher.fuzzy_match(&item.title.to_lowercase(), &filter_lc).is_some())
+        .collect();
+
+    let feed_matches = matched_items.len();
+
+    let downloaded_from_torrents = app_state
+        .torrents
+        .values()
+        .filter(|torrent| {
+            matcher
+                .fuzzy_match(
+                    &torrent.latest_state.torrent_name.to_lowercase(),
+                    &filter_lc,
+                )
+                .is_some()
+        })
+        .count();
+    let app_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
+    let app_titles: HashSet<String> = app_state
+        .torrents
+        .values()
+        .map(|torrent| normalize_title(&torrent.latest_state.torrent_name))
+        .collect();
+
+    let history_missing_from_app = app_state
+        .rss_runtime
+        .history
+        .iter()
+        .filter(|entry| matcher.fuzzy_match(&entry.title.to_lowercase(), &filter_lc).is_some())
+        .filter(|entry| {
+            let hash_in_app = entry
+                .info_hash
+                .as_deref()
+                .and_then(|hash| hex::decode(hash).ok())
+                .is_some_and(|hash| app_hashes.contains(&hash));
+            let title_in_app = app_titles.contains(&normalize_title(&entry.title));
+            !hash_in_app && !title_in_app
+        })
+        .count();
+
+    let downloaded_matches = downloaded_from_torrents + history_missing_from_app;
+
+    (feed_matches, downloaded_matches)
+}
+
+fn normalize_title(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: bool) {
     let app_state = screen.app.state;
     let settings = screen.settings;
@@ -881,7 +1084,11 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
                 && !filter_lc.is_empty()
                 && explorer_selected_title_lc
                     .as_ref()
-                    .is_some_and(|title| matcher.fuzzy_match(title, &filter_lc).is_some());
+                    .is_some_and(|title| {
+                        title.contains(&filter_lc)
+                            || filter_lc.contains(title)
+                            || matcher.fuzzy_match(title, &filter_lc).is_some()
+                    });
             let style = if !filter.enabled {
                 ctx.apply(
                     Style::default()
@@ -895,16 +1102,13 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
             } else {
                 ctx.apply(Style::default().fg(ctx.theme.semantic.text))
             };
-            let live_matches =
-                compute_filter_preview_items(&app_state.rss_runtime.preview_items, &filter_text)
-                    .into_iter()
-                    .filter(|(_, is_match)| *is_match)
-                    .count();
+            let (feed_matches, downloaded_matches) =
+                compute_filter_match_counts(app_state, &filter_text, &matcher);
 
-            ListItem::new(Line::from(vec![Span::styled(
-                format!("{} ({})", filter_text, live_matches),
-                style,
-            )]))
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{}  ({} feed) ", filter_text, feed_matches), style),
+                Span::styled(format!("({} downloaded)", downloaded_matches), style),
+            ]))
         })
         .collect();
     let mut state = ListState::default();
@@ -916,9 +1120,7 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
             .theme
             .apply(Style::default().fg(screen.theme.state_selected()).bold())
     } else {
-        screen
-            .theme
-            .apply(Style::default().fg(screen.theme.theme.semantic.text).bold())
+        screen.theme.apply(Style::default())
     };
     f.render_stateful_widget(
         List::new(items)
@@ -1081,13 +1283,15 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
             };
 
             let completion_pct = rss_item_completion_percent(item, app_state);
-            let src = item.source.clone().unwrap_or_else(|| "unknown".to_string());
-            let line_text = if let Some(pct) = completion_pct {
-                format!("{:>5.1}% {} ({})", pct, item.title, src)
+            if let Some(pct) = completion_pct {
+                let completion_style = style.patch(Style::default().fg(ctx.state_success()));
+                ListItem::new(Line::from(vec![
+                    Span::styled(item.title.clone(), style),
+                    Span::styled(format!(" ({:.1}%)", pct), completion_style),
+                ]))
             } else {
-                format!("{} ({})", item.title, src)
-            };
-            ListItem::new(Line::from(vec![Span::styled(line_text, style)]))
+                ListItem::new(Line::from(vec![Span::styled(item.title.clone(), style)]))
+            }
         })
         .collect();
 
@@ -2096,6 +2300,105 @@ mod tests {
     }
 
     #[test]
+    fn compute_filter_match_counts_counts_feed_and_downloaded_from_torrent_hash() {
+        let mut app_state = base_state();
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "Series Alpha Episode 1".to_string(),
+            link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            ..Default::default()
+        });
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            title: "Series Beta Episode 1".to_string(),
+            ..Default::default()
+        });
+
+        let mut torrent = crate::app::TorrentDisplayState::default();
+        torrent.latest_state.torrent_name = "Series Alpha Batch".to_string();
+        app_state.torrents.insert(vec![0xaa; 20], torrent);
+
+        let matcher = SkimMatcherV2::default();
+        let (feed, downloaded) = compute_filter_match_counts(&app_state, "alpha", &matcher);
+        assert_eq!(feed, 1);
+        assert_eq!(downloaded, 1);
+    }
+
+    #[test]
+    fn compute_filter_match_counts_falls_back_to_history_when_no_torrent_hash_match() {
+        let mut app_state = base_state();
+        app_state.rss_runtime.preview_items.push(RssPreviewItem {
+            dedupe_key: "guid:series-alpha-1".to_string(),
+            title: "Series Alpha Episode 1".to_string(),
+            link: Some("https://example.test/series-alpha-1.torrent".to_string()),
+            ..Default::default()
+        });
+        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
+            dedupe_key: "guid:series-alpha-1".to_string(),
+            title: "Series Alpha Episode 1".to_string(),
+            ..Default::default()
+        });
+
+        let matcher = SkimMatcherV2::default();
+        let (feed, downloaded) = compute_filter_match_counts(&app_state, "alpha", &matcher);
+        assert_eq!(feed, 1);
+        assert_eq!(downloaded, 1);
+    }
+
+    #[test]
+    fn compute_filter_match_counts_uses_history_when_no_feed_matches() {
+        let mut app_state = base_state();
+        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
+            dedupe_key: "guid:series-kaisen-1".to_string(),
+            title: "Series Kaisen Episode 54".to_string(),
+            ..Default::default()
+        });
+        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
+            dedupe_key: "guid:series-kaisen-2".to_string(),
+            title: "Series Kaisen Episode 55".to_string(),
+            ..Default::default()
+        });
+
+        let matcher = SkimMatcherV2::default();
+        let (feed, downloaded) = compute_filter_match_counts(&app_state, "kaisen", &matcher);
+        assert_eq!(feed, 0);
+        assert_eq!(downloaded, 2);
+    }
+
+    #[test]
+    fn compute_filter_match_counts_counts_app_state_and_missing_history_entries() {
+        let mut app_state = base_state();
+
+        let mut torrent_one = crate::app::TorrentDisplayState::default();
+        torrent_one.latest_state.torrent_name = "Series Kaisen Episode 1".to_string();
+        app_state.torrents.insert(vec![1; 20], torrent_one);
+        let mut torrent_two = crate::app::TorrentDisplayState::default();
+        torrent_two.latest_state.torrent_name = "Series Kaisen Episode 2".to_string();
+        app_state.torrents.insert(vec![2; 20], torrent_two);
+
+        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
+            dedupe_key: "guid:series-kaisen-1".to_string(),
+            info_hash: Some(hex::encode(vec![1; 20])),
+            title: "Series Kaisen Episode 1".to_string(),
+            ..Default::default()
+        });
+        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
+            dedupe_key: "guid:series-kaisen-2".to_string(),
+            info_hash: Some(hex::encode(vec![2; 20])),
+            title: "Series Kaisen Episode 2".to_string(),
+            ..Default::default()
+        });
+        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
+            dedupe_key: "guid:series-kaisen-3".to_string(),
+            title: "Series Kaisen Episode 3".to_string(),
+            ..Default::default()
+        });
+
+        let matcher = SkimMatcherV2::default();
+        let (feed, downloaded) = compute_filter_match_counts(&app_state, "kaisen", &matcher);
+        assert_eq!(feed, 0);
+        assert_eq!(downloaded, 3);
+    }
+
+    #[test]
     fn active_filter_query_uses_selected_filter_in_nav_mode() {
         let mut app_state = base_state();
         app_state.ui.rss.active_screen = RssScreen::Unified;
@@ -2235,6 +2538,23 @@ mod tests {
     }
 
     #[test]
+    fn is_valid_feed_url_rejects_localhost_and_private_ips() {
+        assert!(!is_valid_feed_url("http://localhost/rss"));
+        assert!(!is_valid_feed_url("https://127.0.0.1/feed.xml"));
+        assert!(!is_valid_feed_url("https://192.168.1.20/rss"));
+    }
+
+    #[test]
+    fn is_valid_feed_url_accepts_public_https_feed() {
+        assert!(is_valid_feed_url("https://example.com/rss.xml"));
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_shortens_long_text() {
+        assert_eq!(truncate_with_ellipsis("abcdefghij", 6), "abc...");
+    }
+
+    #[test]
     fn filtered_history_entries_respects_search_query() {
         let entries = vec![
             crate::config::RssHistoryEntry {
@@ -2260,6 +2580,31 @@ mod tests {
     fn human_readable_history_time_formats_rfc3339() {
         let ts = "2026-02-17T10:05:00Z";
         assert_eq!(human_readable_history_time(ts).len(), 16);
+    }
+
+    #[test]
+    fn link_matches_selected_explorer_item_matches_by_host() {
+        let item = RssPreviewItem {
+            link: Some("https://subsplease.org/item/abc".to_string()),
+            ..Default::default()
+        };
+        assert!(link_matches_selected_explorer_item(
+            "https://subsplease.org/rss/?t&r=1080",
+            &item
+        ));
+    }
+
+    #[test]
+    fn link_matches_selected_explorer_item_matches_by_source_hint() {
+        let item = RssPreviewItem {
+            link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            source: Some("SubsPlease RSS".to_string()),
+            ..Default::default()
+        };
+        assert!(link_matches_selected_explorer_item(
+            "https://subsplease.org/rss/?t&r=1080",
+            &item
+        ));
     }
 
     #[test]
