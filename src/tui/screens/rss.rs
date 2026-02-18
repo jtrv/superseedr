@@ -709,14 +709,15 @@ fn filtered_history_entries<'a>(
 
 fn human_readable_history_time(date_iso: &str) -> String {
     DateTime::parse_from_rfc3339(date_iso)
-        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|_| date_iso.to_string())
 }
 
-fn link_matches_selected_explorer_item(
-    feed_url: &str,
-    item: &crate::app::RssPreviewItem,
-) -> bool {
+fn link_matches_selected_explorer_item(feed_url: &str, item: &crate::app::RssPreviewItem) -> bool {
     let feed_url_lc = feed_url.to_lowercase();
 
     if let Some(link) = &item.link {
@@ -929,6 +930,7 @@ fn focused_filter_query(
         .filter(|q| !q.is_empty())
 }
 
+#[cfg(test)]
 fn compute_filter_preview_items(
     preview_items: &[crate::app::RssPreviewItem],
     draft: &str,
@@ -973,7 +975,11 @@ fn compute_filter_match_counts(
         .rss_runtime
         .preview_items
         .iter()
-        .filter(|item| matcher.fuzzy_match(&item.title.to_lowercase(), &filter_lc).is_some())
+        .filter(|item| {
+            matcher
+                .fuzzy_match(&item.title.to_lowercase(), &filter_lc)
+                .is_some()
+        })
         .collect();
 
     let feed_matches = matched_items.len();
@@ -1001,7 +1007,11 @@ fn compute_filter_match_counts(
         .rss_runtime
         .history
         .iter()
-        .filter(|entry| matcher.fuzzy_match(&entry.title.to_lowercase(), &filter_lc).is_some())
+        .filter(|entry| {
+            matcher
+                .fuzzy_match(&entry.title.to_lowercase(), &filter_lc)
+                .is_some()
+        })
         .filter(|entry| {
             let hash_in_app = entry
                 .info_hash
@@ -1077,18 +1087,15 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
             let filter = &settings.rss.filters[*idx];
             let filter_text = filter.query.clone();
             let filter_lc = filter_text.trim().to_lowercase();
-            let is_matching_existing = is_creating_filter
-                && !draft_lc.is_empty()
-                && filter_lc.contains(&draft_lc);
+            let is_matching_existing =
+                is_creating_filter && !draft_lc.is_empty() && filter_lc.contains(&draft_lc);
             let matches_explorer_selection = filter.enabled
                 && !filter_lc.is_empty()
-                && explorer_selected_title_lc
-                    .as_ref()
-                    .is_some_and(|title| {
-                        title.contains(&filter_lc)
-                            || filter_lc.contains(title)
-                            || matcher.fuzzy_match(title, &filter_lc).is_some()
-                    });
+                && explorer_selected_title_lc.as_ref().is_some_and(|title| {
+                    title.contains(&filter_lc)
+                        || filter_lc.contains(title)
+                        || matcher.fuzzy_match(title, &filter_lc).is_some()
+                });
             let style = if !filter.enabled {
                 ctx.apply(
                     Style::default()
@@ -1211,13 +1218,18 @@ fn compute_explorer_items(
     (items, combined_match, prioritise_matches)
 }
 
-fn rss_item_completion_percent(item: &crate::app::RssPreviewItem, app_state: &AppState) -> Option<f64> {
+fn rss_item_completion_percent(
+    item: &crate::app::RssPreviewItem,
+    app_state: &AppState,
+) -> Option<f64> {
     if let Some(link) = &item.link {
         if link.starts_with("magnet:") {
             let (v1_hash, v2_hash) = crate::app::parse_hybrid_hashes(link);
             for hash in [v1_hash, v2_hash].into_iter().flatten() {
                 if let Some(torrent) = app_state.torrents.get(&hash) {
-                    return Some(crate::app::torrent_completion_percent(&torrent.latest_state));
+                    return Some(crate::app::torrent_completion_percent(
+                        &torrent.latest_state,
+                    ));
                 }
             }
         }
@@ -2254,8 +2266,7 @@ mod tests {
         ];
 
         let enabled = vec!["series beta".to_string()];
-        let (sorted, _, prioritise) =
-            compute_explorer_items(&items, "", &enabled, "alpha", true);
+        let (sorted, _, prioritise) = compute_explorer_items(&items, "", &enabled, "alpha", true);
         assert!(prioritise);
         assert_eq!(sorted[0].title, "Series Alpha");
     }
@@ -2331,11 +2342,14 @@ mod tests {
             link: Some("https://example.test/series-alpha-1.torrent".to_string()),
             ..Default::default()
         });
-        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
-            dedupe_key: "guid:series-alpha-1".to_string(),
-            title: "Series Alpha Episode 1".to_string(),
-            ..Default::default()
-        });
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-alpha-1".to_string(),
+                title: "Series Alpha Episode 1".to_string(),
+                ..Default::default()
+            });
 
         let matcher = SkimMatcherV2::default();
         let (feed, downloaded) = compute_filter_match_counts(&app_state, "alpha", &matcher);
@@ -2346,16 +2360,22 @@ mod tests {
     #[test]
     fn compute_filter_match_counts_uses_history_when_no_feed_matches() {
         let mut app_state = base_state();
-        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
-            dedupe_key: "guid:series-kaisen-1".to_string(),
-            title: "Series Kaisen Episode 54".to_string(),
-            ..Default::default()
-        });
-        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
-            dedupe_key: "guid:series-kaisen-2".to_string(),
-            title: "Series Kaisen Episode 55".to_string(),
-            ..Default::default()
-        });
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-kaisen-1".to_string(),
+                title: "Series Kaisen Episode 54".to_string(),
+                ..Default::default()
+            });
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-kaisen-2".to_string(),
+                title: "Series Kaisen Episode 55".to_string(),
+                ..Default::default()
+            });
 
         let matcher = SkimMatcherV2::default();
         let (feed, downloaded) = compute_filter_match_counts(&app_state, "kaisen", &matcher);
@@ -2374,23 +2394,32 @@ mod tests {
         torrent_two.latest_state.torrent_name = "Series Kaisen Episode 2".to_string();
         app_state.torrents.insert(vec![2; 20], torrent_two);
 
-        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
-            dedupe_key: "guid:series-kaisen-1".to_string(),
-            info_hash: Some(hex::encode(vec![1; 20])),
-            title: "Series Kaisen Episode 1".to_string(),
-            ..Default::default()
-        });
-        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
-            dedupe_key: "guid:series-kaisen-2".to_string(),
-            info_hash: Some(hex::encode(vec![2; 20])),
-            title: "Series Kaisen Episode 2".to_string(),
-            ..Default::default()
-        });
-        app_state.rss_runtime.history.push(crate::config::RssHistoryEntry {
-            dedupe_key: "guid:series-kaisen-3".to_string(),
-            title: "Series Kaisen Episode 3".to_string(),
-            ..Default::default()
-        });
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-kaisen-1".to_string(),
+                info_hash: Some(hex::encode(vec![1; 20])),
+                title: "Series Kaisen Episode 1".to_string(),
+                ..Default::default()
+            });
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-kaisen-2".to_string(),
+                info_hash: Some(hex::encode(vec![2; 20])),
+                title: "Series Kaisen Episode 2".to_string(),
+                ..Default::default()
+            });
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-kaisen-3".to_string(),
+                title: "Series Kaisen Episode 3".to_string(),
+                ..Default::default()
+            });
 
         let matcher = SkimMatcherV2::default();
         let (feed, downloaded) = compute_filter_match_counts(&app_state, "kaisen", &matcher);

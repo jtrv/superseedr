@@ -114,7 +114,7 @@ impl Default for RssSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct RssHistoryEntry {
     pub dedupe_key: String,
@@ -127,35 +127,11 @@ pub struct RssHistoryEntry {
     pub added_via: RssAddedVia,
 }
 
-impl Default for RssHistoryEntry {
-    fn default() -> Self {
-        Self {
-            dedupe_key: String::new(),
-            info_hash: None,
-            guid: None,
-            link: None,
-            title: String::new(),
-            source: None,
-            date_iso: String::new(),
-            added_via: RssAddedVia::default(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct FeedSyncError {
     pub message: String,
     pub occurred_at_iso: String,
-}
-
-impl Default for FeedSyncError {
-    fn default() -> Self {
-        Self {
-            message: String::new(),
-            occurred_at_iso: String::new(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

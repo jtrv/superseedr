@@ -497,7 +497,6 @@ pub struct ThemeAccentSlots {
     pub peach: Color,
     pub sapphire: Color,
     pub maroon: Color,
-    pub flamingo: Color,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -617,10 +616,6 @@ impl ThemeContext {
 
     pub fn accent_maroon(&self) -> Color {
         self.theme.role_slots().accent.maroon
-    }
-
-    pub fn accent_flamingo(&self) -> Color {
-        self.theme.role_slots().accent.flamingo
     }
 
     pub fn apply_effects_to_color_at(
@@ -760,7 +755,6 @@ impl Theme {
                 peach: self.scale.categorical.peach,
                 sapphire: self.scale.categorical.sapphire,
                 maroon: self.scale.categorical.maroon,
-                flamingo: self.scale.categorical.flamingo,
             },
         }
     }

@@ -287,7 +287,12 @@ pub fn draw(
         ratatui::layout::Rect::new(area.x, footer_y, area.width, 1)
     } else {
         // Fallback for very short terminals: keep commands visible at panel bottom.
-        ratatui::layout::Rect::new(inner_area.x, inner_area.y + inner_area.height.saturating_sub(1), inner_area.width, 1)
+        ratatui::layout::Rect::new(
+            inner_area.x,
+            inner_area.y + inner_area.height.saturating_sub(1),
+            inner_area.width,
+            1,
+        )
     };
     let rows_layout = Layout::default()
         .direction(Direction::Vertical)

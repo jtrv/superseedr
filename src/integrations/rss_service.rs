@@ -196,9 +196,12 @@ async fn run_sync(
         if let Some(feed_url) = pending.next() {
             let client_cloned = client.clone();
             fetches.spawn(async move {
-                let result =
-                    fetch_and_parse_feed_with_retry(&client_cloned, &feed_url, FEED_FETCH_MAX_ATTEMPTS)
-                        .await;
+                let result = fetch_and_parse_feed_with_retry(
+                    &client_cloned,
+                    &feed_url,
+                    FEED_FETCH_MAX_ATTEMPTS,
+                )
+                .await;
                 (feed_url, result)
             });
         }
@@ -468,7 +471,9 @@ async fn auto_ingest_item(
     };
 
     if link.starts_with("magnet:") {
-        let added = rss_ingest::write_magnet(settings, link.as_str()).await.is_ok();
+        let added = rss_ingest::write_magnet(settings, link.as_str())
+            .await
+            .is_ok();
         let (v1_hash, v2_hash) = crate::app::parse_hybrid_hashes(link.as_str());
         return (added, v1_hash.or(v2_hash));
     }

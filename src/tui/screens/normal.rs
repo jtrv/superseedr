@@ -4050,7 +4050,10 @@ mod tests {
         execute_ui_effect(&mut app, UiEffect::OpenRssScreen).await;
 
         assert!(matches!(app.app_state.mode, AppMode::Rss));
-        assert!(matches!(app.app_state.ui.rss.active_screen, RssScreen::Unified));
+        assert!(matches!(
+            app.app_state.ui.rss.active_screen,
+            RssScreen::Unified
+        ));
         let _ = app.shutdown_tx.send(());
     }
 }

@@ -2722,7 +2722,10 @@ impl App {
         }
 
         let Some(link) = item.link.clone() else {
-            tracing_event!(Level::INFO, "Skipping RSS manual download: item has no link");
+            tracing_event!(
+                Level::INFO,
+                "Skipping RSS manual download: item has no link"
+            );
             return;
         };
 
@@ -2773,7 +2776,8 @@ impl App {
             .iter()
             .position(|existing| existing.dedupe_key == entry.dedupe_key);
         if let Some(idx) = existing_idx {
-            if self.app_state.rss_runtime.history[idx].info_hash.is_none() && entry.info_hash.is_some()
+            if self.app_state.rss_runtime.history[idx].info_hash.is_none()
+                && entry.info_hash.is_some()
             {
                 self.app_state.rss_runtime.history[idx].info_hash = entry.info_hash.clone();
                 self.save_state_to_disk();
