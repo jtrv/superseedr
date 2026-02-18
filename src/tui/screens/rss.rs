@@ -532,6 +532,7 @@ fn draw_input_panel(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
+        .padding(Padding::horizontal(1))
         .border_style(ctx.apply(Style::default().fg(ctx.state_selected())));
     f.render_widget(Paragraph::new(line).block(block), area);
 }
@@ -663,6 +664,7 @@ fn pane_block<'a>(title: &'a str, active: bool, ctx: &crate::theme::ThemeContext
     Block::default()
         .title(format!(" {} ", title))
         .borders(Borders::ALL)
+        .padding(Padding::horizontal(1))
         .border_style(border_style)
 }
 
@@ -1990,9 +1992,9 @@ mod tests {
             },
         ];
 
-        let enabled = vec!["jigokuraku".to_string()];
+        let enabled = vec!["series beta".to_string()];
         let (sorted, _, prioritise) =
-            compute_explorer_items(&items, "", &enabled, "juju", true);
+            compute_explorer_items(&items, "", &enabled, "alpha", true);
         assert!(prioritise);
         assert_eq!(sorted[0].title, "Series Alpha");
     }
@@ -2157,7 +2159,7 @@ mod tests {
             },
         ];
 
-        let filtered = filtered_history_entries(&entries, "juju");
+        let filtered = filtered_history_entries(&entries, "alpha");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Series Alpha");
     }
