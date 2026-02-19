@@ -743,7 +743,8 @@ impl App {
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (rss_sync_tx, rss_sync_rx) = mpsc::channel::<()>(8);
-        let (rss_downloaded_entry_tx, rss_downloaded_entry_rx) = mpsc::channel::<RssHistoryEntry>(64);
+        let (rss_downloaded_entry_tx, rss_downloaded_entry_rx) =
+            mpsc::channel::<RssHistoryEntry>(64);
         let (rss_settings_tx, rss_settings_rx) = watch::channel(client_configs.clone());
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -3516,7 +3517,7 @@ mod tests {
             ui: UiState {
                 selected_header: SelectedHeader::Torrent(0),
                 selected_torrent_index: 5,
-                search_query: "ubn".to_string(),
+                search_query: "spha".to_string(),
                 ..Default::default()
             },
             ..Default::default()
