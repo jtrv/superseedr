@@ -139,7 +139,7 @@ mod tests {
                 info_hash: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
                 guid: Some("123".to_string()),
                 link: Some("https://example.com/item.torrent".to_string()),
-                title: "Ubuntu ISO".to_string(),
+                title: "SampleAlpha ISO".to_string(),
                 source: Some("Example Feed".to_string()),
                 date_iso: "2026-02-17T10:00:00Z".to_string(),
                 added_via: RssAddedVia::Manual,

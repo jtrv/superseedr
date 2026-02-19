@@ -717,6 +717,7 @@ pub struct App {
     pub app_command_tx: mpsc::Sender<AppCommand>,
     pub app_command_rx: mpsc::Receiver<AppCommand>,
     pub rss_sync_tx: mpsc::Sender<()>,
+    pub rss_downloaded_entry_tx: mpsc::Sender<RssHistoryEntry>,
     pub rss_settings_tx: watch::Sender<Settings>,
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
@@ -742,6 +743,7 @@ impl App {
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (rss_sync_tx, rss_sync_rx) = mpsc::channel::<()>(8);
+        let (rss_downloaded_entry_tx, rss_downloaded_entry_rx) = mpsc::channel::<RssHistoryEntry>(64);
         let (rss_settings_tx, rss_settings_rx) = watch::channel(client_configs.clone());
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -874,6 +876,7 @@ impl App {
             app_command_tx,
             app_command_rx,
             rss_sync_tx,
+            rss_downloaded_entry_tx,
             rss_settings_tx,
             tui_event_tx,
             tui_event_rx,
@@ -889,6 +892,7 @@ impl App {
             app.client_configs.clone(),
             app.app_command_tx.clone(),
             rss_sync_rx,
+            rss_downloaded_entry_rx,
             rss_settings_rx,
             app.shutdown_tx.clone(),
         );
@@ -2786,6 +2790,17 @@ impl App {
             self.app_state.rss_runtime.history.push(entry);
             self.save_state_to_disk();
         }
+
+        if let Some(history_entry) = self
+            .app_state
+            .rss_runtime
+            .history
+            .iter()
+            .find(|h| h.dedupe_key == item.dedupe_key)
+            .cloned()
+        {
+            let _ = self.rss_downloaded_entry_tx.try_send(history_entry);
+        }
     }
 
     async fn download_rss_torrent_from_url(&mut self, url: &str) -> (bool, Option<Vec<u8>>) {
@@ -2868,6 +2883,7 @@ impl App {
             return (false, None);
         }
 
+        let existed_before = self.app_state.torrents.contains_key(&info_hash);
         self.add_torrent_from_file(
             temp_path.clone(),
             self.client_configs.default_download_folder.clone(),
@@ -2877,6 +2893,7 @@ impl App {
             None,
         )
         .await;
+        let exists_after = self.app_state.torrents.contains_key(&info_hash);
 
         if let Err(e) = fs::remove_file(&temp_path) {
             tracing_event!(
@@ -2886,7 +2903,16 @@ impl App {
                 e
             );
         }
-        (true, Some(info_hash))
+        if existed_before || exists_after {
+            (true, Some(info_hash))
+        } else {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download did not register torrent {} after add_torrent_from_file",
+                hex::encode(&info_hash)
+            );
+            (false, None)
+        }
     }
 
     async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -3500,10 +3526,10 @@ mod tests {
         let hash_b = b"hash_b".to_vec();
         app_state
             .torrents
-            .insert(hash_a.clone(), mock_display("ubuntu-24.04.iso", 0));
+            .insert(hash_a.clone(), mock_display("samplealpha-24.04.iso", 0));
         app_state
             .torrents
-            .insert(hash_b.clone(), mock_display("archlinux.iso", 0));
+            .insert(hash_b.clone(), mock_display("samplelinux.iso", 0));
 
         sort_and_filter_torrent_list_state(&mut app_state);
 
@@ -3514,20 +3540,20 @@ mod tests {
     #[test]
     fn extract_magnet_display_name_decodes_dn() {
         let magnet =
-            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Ubuntu+24.04+ISO";
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=SampleAlpha+24.04+ISO";
         assert_eq!(
             extract_magnet_display_name(magnet),
-            Some("Ubuntu 24.04 ISO".to_string())
+            Some("SampleAlpha 24.04 ISO".to_string())
         );
     }
 
     #[test]
     fn resolve_magnet_name_uses_dn_for_placeholder() {
         let info_hash = vec![0x11; 20];
-        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Fedora";
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=SampleBeta";
         assert_eq!(
             resolve_magnet_torrent_name("Fetching name...", magnet, &info_hash),
-            "Fedora".to_string()
+            "SampleBeta".to_string()
         );
     }
 
@@ -3543,10 +3569,10 @@ mod tests {
 
     #[test]
     fn extract_magnet_display_name_skips_malformed_segments() {
-        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&badsegment&dn=Debian+Netinst";
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&badsegment&dn=SampleGamma+Netinst";
         assert_eq!(
             extract_magnet_display_name(magnet),
-            Some("Debian Netinst".to_string())
+            Some("SampleGamma Netinst".to_string())
         );
     }
 
@@ -3563,7 +3589,7 @@ mod tests {
         let old = crate::config::Settings::default();
         let mut new = old.clone();
         new.rss.filters.push(crate::config::RssFilter {
-            query: "ubuntu".to_string(),
+            query: "samplealpha".to_string(),
             enabled: true,
         });
 

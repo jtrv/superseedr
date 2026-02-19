@@ -37,6 +37,7 @@ pub fn spawn_rss_service(
     settings: Settings,
     app_command_tx: mpsc::Sender<AppCommand>,
     mut sync_now_rx: mpsc::Receiver<()>,
+    mut downloaded_entry_rx: mpsc::Receiver<RssHistoryEntry>,
     mut settings_rx: tokio::sync::watch::Receiver<Settings>,
     shutdown_tx: broadcast::Sender<()>,
 ) -> JoinHandle<()> {
@@ -91,6 +92,19 @@ pub fn spawn_rss_service(
                         .max(MIN_POLL_INTERVAL_SECS);
                     ticker = time::interval(Duration::from_secs(poll_secs));
                     ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+                }
+                maybe_entry = downloaded_entry_rx.recv() => {
+                    if let Some(entry) = maybe_entry {
+                        for key in identity_keys_for(
+                            entry.guid.as_deref(),
+                            entry.link.as_deref(),
+                            entry.title.as_str(),
+                            entry.source.as_deref(),
+                            entry.dedupe_key.as_str(),
+                        ) {
+                            downloaded_keys.insert(key);
+                        }
+                    }
                 }
                 maybe_sync = sync_now_rx.recv() => {
                     if maybe_sync.is_none() {
@@ -535,7 +549,7 @@ mod tests {
 
     #[test]
     fn normalize_title_compacts_whitespace_and_case() {
-        assert_eq!(normalize_title("  Ubuntu   ISO  "), "ubuntu iso");
+        assert_eq!(normalize_title("  SampleAlpha   ISO  "), "samplealpha iso");
     }
 
     #[test]
@@ -562,10 +576,18 @@ mod tests {
         settings.rss.enabled = false;
         let (tx, mut rx) = mpsc::channel::<AppCommand>(2);
         let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
+        let (_downloaded_entry_tx, downloaded_entry_rx) = mpsc::channel::<RssHistoryEntry>(2);
         let (settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let handle = spawn_rss_service(settings, tx, sync_rx, settings_rx, shutdown_tx.clone());
+        let handle = spawn_rss_service(
+            settings,
+            tx,
+            sync_rx,
+            downloaded_entry_rx,
+            settings_rx,
+            shutdown_tx.clone(),
+        );
         drop(sync_tx);
         drop(settings_tx);
         tokio::task::yield_now().await;
@@ -582,10 +604,18 @@ mod tests {
         let settings = Settings::default();
         let (tx, mut rx) = mpsc::channel::<AppCommand>(8);
         let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
+        let (_downloaded_entry_tx, downloaded_entry_rx) = mpsc::channel::<RssHistoryEntry>(2);
         let (settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let handle = spawn_rss_service(settings, tx, sync_rx, settings_rx, shutdown_tx.clone());
+        let handle = spawn_rss_service(
+            settings,
+            tx,
+            sync_rx,
+            downloaded_entry_rx,
+            settings_rx,
+            shutdown_tx.clone(),
+        );
         tokio::task::yield_now().await;
 
         // Enable RSS at runtime with no feeds (network-free path):

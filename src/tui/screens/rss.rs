@@ -495,7 +495,11 @@ fn execute_rss_effects(
                         is_creating_filter,
                     );
 
-                    let idx = app_state.ui.rss.selected_explorer_index;
+                    let idx = app_state
+                        .ui
+                        .rss
+                        .selected_explorer_index
+                        .min(items.len().saturating_sub(1));
                     if let Some(item) = items.get(idx) {
                         if item.is_downloaded {
                             set_rss_status(app_state, "Already downloaded");
@@ -1870,7 +1874,7 @@ mod tests {
         );
 
         handle_event(
-            CrosstermEvent::Paste("https://subsplease.org/rss/?t&r=1080".to_string()),
+            CrosstermEvent::Paste("https://example.test/rss/?t&r=1080".to_string()),
             &mut app_state,
             &settings,
             &tx,
@@ -1890,7 +1894,7 @@ mod tests {
         match cmd {
             AppCommand::UpdateConfig(s) => {
                 assert_eq!(s.rss.feeds.len(), 1);
-                assert_eq!(s.rss.feeds[0].url, "https://subsplease.org/rss/?t&r=1080");
+                assert_eq!(s.rss.feeds[0].url, "https://example.test/rss/?t&r=1080");
             }
             _ => panic!("unexpected command"),
         }
@@ -1958,7 +1962,7 @@ mod tests {
         app_state.ui.rss.focused_section = RssSectionFocus::Filters;
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "ubuntu".to_string(),
+            query: "samplealpha".to_string(),
             enabled: true,
         });
         let (tx, mut rx) = mpsc::channel(8);
@@ -1985,9 +1989,9 @@ mod tests {
         let mut app_state = base_state();
         app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
         app_state.rss_runtime.preview_items.push(RssPreviewItem {
-            title: "Ubuntu ISO".to_string(),
+            title: "SampleAlpha ISO".to_string(),
             link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-            dedupe_key: "guid:ubuntu".to_string(),
+            dedupe_key: "guid:samplealpha".to_string(),
             is_downloaded: false,
             ..Default::default()
         });
@@ -2008,8 +2012,8 @@ mod tests {
         let cmd = rx.try_recv().expect("expected RSS download command");
         match cmd {
             AppCommand::RssDownloadPreview(item) => {
-                assert_eq!(item.title, "Ubuntu ISO");
-                assert_eq!(item.dedupe_key, "guid:ubuntu");
+                assert_eq!(item.title, "SampleAlpha ISO");
+                assert_eq!(item.dedupe_key, "guid:samplealpha");
             }
             _ => panic!("unexpected command"),
         }
@@ -2020,9 +2024,9 @@ mod tests {
         let mut app_state = base_state();
         app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
         app_state.rss_runtime.preview_items.push(RssPreviewItem {
-            title: "Ubuntu ISO".to_string(),
+            title: "SampleAlpha ISO".to_string(),
             link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-            dedupe_key: "guid:ubuntu".to_string(),
+            dedupe_key: "guid:samplealpha".to_string(),
             is_downloaded: true,
             ..Default::default()
         });
@@ -2166,23 +2170,23 @@ mod tests {
     fn explorer_compute_filters_out_non_matches_when_search_active() {
         let items = vec![
             RssPreviewItem {
-                title: "Ubuntu LTS".to_string(),
+                title: "SampleAlpha LTS".to_string(),
                 is_match: true,
                 ..Default::default()
             },
             RssPreviewItem {
-                title: "Fedora".to_string(),
+                title: "SampleBeta".to_string(),
                 is_match: false,
                 ..Default::default()
             },
         ];
 
         let (sorted, combined, prioritise) =
-            compute_explorer_items(&items, "ubuntu", &[], "", false);
+            compute_explorer_items(&items, "samplealpha", &[], "", false);
         assert!(prioritise);
         assert_eq!(sorted.len(), 1);
         assert_eq!(combined.len(), 1);
-        assert_eq!(sorted[0].title, "Ubuntu LTS");
+        assert_eq!(sorted[0].title, "SampleAlpha LTS");
     }
 
     #[test]
@@ -2275,32 +2279,32 @@ mod tests {
     fn filter_preview_keeps_all_items_and_sorts_matches_first() {
         let items = vec![
             RssPreviewItem {
-                title: "Fedora".to_string(),
+                title: "SampleBeta".to_string(),
                 ..Default::default()
             },
             RssPreviewItem {
-                title: "Ubuntu LTS".to_string(),
+                title: "SampleAlpha LTS".to_string(),
                 ..Default::default()
             },
         ];
 
-        let ranked = compute_filter_preview_items(&items, "ubuntu");
+        let ranked = compute_filter_preview_items(&items, "samplealpha");
         assert_eq!(ranked.len(), 2);
         assert!(ranked[0].1);
-        assert_eq!(ranked[0].0.title, "Ubuntu LTS");
+        assert_eq!(ranked[0].0.title, "SampleAlpha LTS");
         assert!(!ranked[1].1);
-        assert_eq!(ranked[1].0.title, "Fedora");
+        assert_eq!(ranked[1].0.title, "SampleBeta");
     }
 
     #[test]
     fn filter_preview_with_empty_draft_still_shows_full_list() {
         let items = vec![
             RssPreviewItem {
-                title: "Fedora".to_string(),
+                title: "SampleBeta".to_string(),
                 ..Default::default()
             },
             RssPreviewItem {
-                title: "Ubuntu".to_string(),
+                title: "SampleAlpha".to_string(),
                 ..Default::default()
             },
         ];
@@ -2364,21 +2368,21 @@ mod tests {
             .rss_runtime
             .history
             .push(crate::config::RssHistoryEntry {
-                dedupe_key: "guid:series-kaisen-1".to_string(),
-                title: "Series Kaisen Episode 54".to_string(),
+                dedupe_key: "guid:series-seriessigma-1".to_string(),
+                title: "Series Sigma Episode 54".to_string(),
                 ..Default::default()
             });
         app_state
             .rss_runtime
             .history
             .push(crate::config::RssHistoryEntry {
-                dedupe_key: "guid:series-kaisen-2".to_string(),
-                title: "Series Kaisen Episode 55".to_string(),
+                dedupe_key: "guid:series-seriessigma-2".to_string(),
+                title: "Series Sigma Episode 55".to_string(),
                 ..Default::default()
             });
 
         let matcher = SkimMatcherV2::default();
-        let (feed, downloaded) = compute_filter_match_counts(&app_state, "kaisen", &matcher);
+        let (feed, downloaded) = compute_filter_match_counts(&app_state, "seriessigma", &matcher);
         assert_eq!(feed, 0);
         assert_eq!(downloaded, 2);
     }
@@ -2388,41 +2392,41 @@ mod tests {
         let mut app_state = base_state();
 
         let mut torrent_one = crate::app::TorrentDisplayState::default();
-        torrent_one.latest_state.torrent_name = "Series Kaisen Episode 1".to_string();
+        torrent_one.latest_state.torrent_name = "Series Sigma Episode 1".to_string();
         app_state.torrents.insert(vec![1; 20], torrent_one);
         let mut torrent_two = crate::app::TorrentDisplayState::default();
-        torrent_two.latest_state.torrent_name = "Series Kaisen Episode 2".to_string();
+        torrent_two.latest_state.torrent_name = "Series Sigma Episode 2".to_string();
         app_state.torrents.insert(vec![2; 20], torrent_two);
 
         app_state
             .rss_runtime
             .history
             .push(crate::config::RssHistoryEntry {
-                dedupe_key: "guid:series-kaisen-1".to_string(),
+                dedupe_key: "guid:series-seriessigma-1".to_string(),
                 info_hash: Some(hex::encode(vec![1; 20])),
-                title: "Series Kaisen Episode 1".to_string(),
+                title: "Series Sigma Episode 1".to_string(),
                 ..Default::default()
             });
         app_state
             .rss_runtime
             .history
             .push(crate::config::RssHistoryEntry {
-                dedupe_key: "guid:series-kaisen-2".to_string(),
+                dedupe_key: "guid:series-seriessigma-2".to_string(),
                 info_hash: Some(hex::encode(vec![2; 20])),
-                title: "Series Kaisen Episode 2".to_string(),
+                title: "Series Sigma Episode 2".to_string(),
                 ..Default::default()
             });
         app_state
             .rss_runtime
             .history
             .push(crate::config::RssHistoryEntry {
-                dedupe_key: "guid:series-kaisen-3".to_string(),
-                title: "Series Kaisen Episode 3".to_string(),
+                dedupe_key: "guid:series-seriessigma-3".to_string(),
+                title: "Series Sigma Episode 3".to_string(),
                 ..Default::default()
             });
 
         let matcher = SkimMatcherV2::default();
-        let (feed, downloaded) = compute_filter_match_counts(&app_state, "kaisen", &matcher);
+        let (feed, downloaded) = compute_filter_match_counts(&app_state, "seriessigma", &matcher);
         assert_eq!(feed, 0);
         assert_eq!(downloaded, 3);
     }
@@ -2438,16 +2442,16 @@ mod tests {
 
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "ubuntu".to_string(),
+            query: "samplealpha".to_string(),
             enabled: true,
         });
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "fedora".to_string(),
+            query: "samplebeta".to_string(),
             enabled: true,
         });
 
         let query = active_filter_query(&app_state, &settings);
-        assert_eq!(query, "ubuntu");
+        assert_eq!(query, "samplebeta");
     }
 
     #[test]
@@ -2461,7 +2465,7 @@ mod tests {
 
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "vigilante".to_string(),
+            query: "seriesdelta".to_string(),
             enabled: false,
         });
 
@@ -2476,7 +2480,7 @@ mod tests {
         app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
         app_state.ui.rss.is_editing = false;
         app_state.ui.rss.edit_buffer.clear();
-        app_state.ui.rss.filter_draft = "jigokuraku".to_string();
+        app_state.ui.rss.filter_draft = "seriesomega".to_string();
 
         let settings = crate::config::Settings::default();
         let query = active_filter_query(&app_state, &settings);
@@ -2528,11 +2532,11 @@ mod tests {
     fn explorer_greyed_out_when_all_filters_disabled() {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "ubuntu".to_string(),
+            query: "samplealpha".to_string(),
             enabled: false,
         });
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "fedora".to_string(),
+            query: "samplebeta".to_string(),
             enabled: false,
         });
         assert!(explorer_should_be_greyed_out(&settings));
@@ -2542,11 +2546,11 @@ mod tests {
     fn explorer_not_greyed_out_when_any_filter_enabled() {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "ubuntu".to_string(),
+            query: "samplealpha".to_string(),
             enabled: false,
         });
         settings.rss.filters.push(crate::config::RssFilter {
-            query: "fedora".to_string(),
+            query: "samplebeta".to_string(),
             enabled: true,
         });
         assert!(!explorer_should_be_greyed_out(&settings));
@@ -2614,11 +2618,11 @@ mod tests {
     #[test]
     fn link_matches_selected_explorer_item_matches_by_host() {
         let item = RssPreviewItem {
-            link: Some("https://subsplease.org/item/abc".to_string()),
+            link: Some("https://example.test/item/abc".to_string()),
             ..Default::default()
         };
         assert!(link_matches_selected_explorer_item(
-            "https://subsplease.org/rss/?t&r=1080",
+            "https://example.test/rss/?t&r=1080",
             &item
         ));
     }
@@ -2627,11 +2631,11 @@ mod tests {
     fn link_matches_selected_explorer_item_matches_by_source_hint() {
         let item = RssPreviewItem {
             link: Some("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-            source: Some("SubsPlease RSS".to_string()),
+            source: Some("ExampleFeed RSS".to_string()),
             ..Default::default()
         };
         assert!(link_matches_selected_explorer_item(
-            "https://subsplease.org/rss/?t&r=1080",
+            "https://example.test/rss/?t&r=1080",
             &item
         ));
     }
