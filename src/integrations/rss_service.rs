@@ -4,14 +4,14 @@
 use crate::app::{AppCommand, RssPreviewItem};
 use crate::config::{RssAddedVia, RssHistoryEntry, Settings};
 use crate::integrations::rss_ingest;
-use crate::persistence::rss::load_rss_state;
 use chrono::{Duration as ChronoDuration, Utc};
 use feed_rs::parser;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
+use std::net::IpAddr;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{self, Duration};
@@ -35,6 +35,7 @@ struct CandidateItem {
 
 pub fn spawn_rss_service(
     settings: Settings,
+    initial_history: Vec<RssHistoryEntry>,
     app_command_tx: mpsc::Sender<AppCommand>,
     mut sync_now_rx: mpsc::Receiver<()>,
     mut downloaded_entry_rx: mpsc::Receiver<RssHistoryEntry>,
@@ -51,19 +52,7 @@ pub fn spawn_rss_service(
         let mut ticker = time::interval(Duration::from_secs(poll_secs));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
-        let client = match Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("RSS service startup failed: HTTP client build error: {}", e);
-                return;
-            }
-        };
-
-        let mut downloaded_keys: HashSet<String> = load_rss_state()
-            .history
+        let mut downloaded_keys: HashSet<String> = initial_history
             .iter()
             .flat_map(|h| {
                 identity_keys_for(
@@ -113,7 +102,7 @@ pub fn spawn_rss_service(
                     if !current_settings.rss.enabled {
                         continue;
                     }
-                    run_sync(&current_settings, &client, &app_command_tx, &mut downloaded_keys).await;
+                    run_sync(&current_settings, &app_command_tx, &mut downloaded_keys).await;
                     let now = Utc::now();
                     let next = now + ChronoDuration::seconds(poll_secs as i64);
                     let _ = app_command_tx.send(AppCommand::RssSyncStatusUpdated {
@@ -125,7 +114,7 @@ pub fn spawn_rss_service(
                     if !current_settings.rss.enabled {
                         continue;
                     }
-                    run_sync(&current_settings, &client, &app_command_tx, &mut downloaded_keys).await;
+                    run_sync(&current_settings, &app_command_tx, &mut downloaded_keys).await;
                     let now = Utc::now();
                     let next = now + ChronoDuration::seconds(poll_secs as i64);
                     let _ = app_command_tx.send(AppCommand::RssSyncStatusUpdated {
@@ -140,7 +129,6 @@ pub fn spawn_rss_service(
 
 async fn run_sync(
     settings: &Settings,
-    client: &Client,
     app_command_tx: &mpsc::Sender<AppCommand>,
     downloaded_keys: &mut HashSet<String>,
 ) {
@@ -157,6 +145,21 @@ async fn run_sync(
             .await;
         return;
     }
+    let client = match std::panic::catch_unwind(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .build()
+    }) {
+        Ok(Ok(client)) => client,
+        Ok(Err(e)) => {
+            tracing::error!("RSS sync skipped: HTTP client build error: {}", e);
+            return;
+        }
+        Err(_) => {
+            tracing::error!("RSS sync skipped: HTTP client build panicked");
+            return;
+        }
+    };
 
     let matcher = SkimMatcherV2::default();
     let enabled_filters = enabled_filters(settings);
@@ -243,7 +246,7 @@ async fn run_sync(
         let mut is_downloaded = identity_keys.iter().any(|k| downloaded_keys.contains(k));
 
         if is_match && !is_downloaded {
-            let (added, info_hash) = auto_ingest_item(settings, client, &item).await;
+            let (added, info_hash) = auto_ingest_item(settings, &client, &item).await;
             if added {
                 is_downloaded = true;
                 for key in &identity_keys {
@@ -498,17 +501,23 @@ async fn auto_ingest_item(
 
     match fetch_torrent_bytes(client, link).await {
         Ok(bytes) => {
-            let info_hash = crate::app::info_hash_from_torrent_bytes(&bytes);
+            let Some(info_hash) = crate::app::info_hash_from_torrent_bytes(&bytes) else {
+                return (false, None);
+            };
             let added = rss_ingest::write_torrent_bytes(settings, link.as_str(), &bytes)
                 .await
                 .is_ok();
-            (added, info_hash)
+            (added, Some(info_hash))
         }
         Err(_) => (false, None),
     }
 }
 
 async fn fetch_torrent_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
+    if !is_safe_rss_item_url(url) {
+        return Err("torrent URL blocked by RSS network safety policy".to_string());
+    }
+
     let response = client
         .get(url)
         .send()
@@ -529,6 +538,54 @@ async fn fetch_torrent_bytes(client: &Client, url: &str) -> Result<Vec<u8>, Stri
     }
 
     Ok(bytes.to_vec())
+}
+
+fn is_safe_rss_item_url(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+
+    let host = match url.host_str() {
+        Some(host) => host,
+        None => return false,
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(v4) => {
+                if v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                    || v4.is_unspecified()
+                {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_loopback()
+                    || v6.is_multicast()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -570,6 +627,22 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    #[test]
+    fn rss_item_url_guard_rejects_localhost_and_private_literal_ips() {
+        assert!(!is_safe_rss_item_url("http://localhost/file.torrent"));
+        assert!(!is_safe_rss_item_url("https://127.0.0.1/file.torrent"));
+        assert!(!is_safe_rss_item_url("https://192.168.10.5/file.torrent"));
+        assert!(!is_safe_rss_item_url("https://[::1]/file.torrent"));
+    }
+
+    #[test]
+    fn rss_item_url_guard_accepts_public_http_hosts() {
+        assert!(is_safe_rss_item_url("https://example.com/file.torrent"));
+        assert!(is_safe_rss_item_url(
+            "http://downloads.example.net/a.torrent"
+        ));
+    }
+
     #[tokio::test]
     async fn rss_service_disabled_waits_for_shutdown() {
         let mut settings = Settings::default();
@@ -582,6 +655,7 @@ mod tests {
 
         let handle = spawn_rss_service(
             settings,
+            Vec::new(),
             tx,
             sync_rx,
             downloaded_entry_rx,
@@ -610,6 +684,7 @@ mod tests {
 
         let handle = spawn_rss_service(
             settings,
+            Vec::new(),
             tx,
             sync_rx,
             downloaded_entry_rx,

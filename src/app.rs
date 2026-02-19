@@ -722,7 +722,7 @@ pub struct App {
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
-    pub persistence_tx: Option<mpsc::UnboundedSender<PersistPayload>>,
+    pub persistence_tx: Option<watch::Sender<Option<PersistPayload>>>,
     pub persistence_task: Option<tokio::task::JoinHandle<()>>,
     pub tui_task: Option<tokio::task::JoinHandle<()>>,
     pub notify_rx: mpsc::Receiver<Result<Event, NotifyError>>,
@@ -748,11 +748,12 @@ impl App {
         let (rss_settings_tx, rss_settings_rx) = watch::channel(client_configs.clone());
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
-        let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistPayload>();
+        let (persistence_tx, mut persistence_rx) = watch::channel::<Option<PersistPayload>>(None);
         let persistence_task = tokio::spawn(async move {
-            // If persistence write frequency becomes a bottleneck, introduce a short debounce
-            // window (e.g. 200-500ms) before each flush to coalesce bursts.
-            while let Some(payload) = persistence_rx.recv().await {
+            while persistence_rx.changed().await.is_ok() {
+                let Some(payload) = persistence_rx.borrow().clone() else {
+                    continue;
+                };
                 let write_result = tokio::task::spawn_blocking(move || {
                     save_settings(&payload.settings)
                         .map_err(|e| format!("Failed to auto-save settings: {}", e))?;
@@ -891,6 +892,7 @@ impl App {
 
         let _rss_service_task = rss_service::spawn_rss_service(
             app.client_configs.clone(),
+            app.app_state.rss_runtime.history.clone(),
             app.app_command_tx.clone(),
             rss_sync_rx,
             rss_downloaded_entry_rx,
@@ -1775,6 +1777,10 @@ impl App {
 
                 // Refresh RSS preview immediately when feed/filter config changes.
                 if rss_changed {
+                    prune_rss_feed_errors(
+                        &mut self.app_state.rss_runtime.feed_errors,
+                        &self.client_configs,
+                    );
                     let _ = self.rss_sync_tx.try_send(());
                 }
 
@@ -2227,7 +2233,8 @@ impl App {
         };
 
         if let Some(tx) = &self.persistence_tx {
-            if tx.send(payload).is_err() {
+            tx.send_replace(Some(payload));
+            if tx.is_closed() {
                 tracing_event!(
                     Level::ERROR,
                     "Failed to queue persistence payload: persistence task unavailable"
@@ -2805,6 +2812,15 @@ impl App {
     }
 
     async fn download_rss_torrent_from_url(&mut self, url: &str) -> (bool, Option<Vec<u8>>) {
+        if !Self::is_safe_rss_item_url(url) {
+            tracing_event!(
+                Level::WARN,
+                "RSS manual download blocked URL by network safety policy: {}",
+                url
+            );
+            return (false, None);
+        }
+
         let client = match reqwest::Client::builder()
             .user_agent("superseedr (https://github.com/Jagalite/superseedr)")
             .build()
@@ -2914,6 +2930,54 @@ impl App {
             );
             (false, None)
         }
+    }
+
+    fn is_safe_rss_item_url(value: &str) -> bool {
+        let Ok(url) = reqwest::Url::parse(value) else {
+            return false;
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            return false;
+        }
+        if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+            return false;
+        }
+
+        let host = match url.host_str() {
+            Some(host) => host,
+            None => return false,
+        };
+        if host.eq_ignore_ascii_case("localhost") {
+            return false;
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    if v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4.is_multicast()
+                        || v4.is_broadcast()
+                        || v4.is_documentation()
+                        || v4.is_unspecified()
+                    {
+                        return false;
+                    }
+                }
+                std::net::IpAddr::V6(v6) => {
+                    if v6.is_loopback()
+                        || v6.is_multicast()
+                        || v6.is_unspecified()
+                        || v6.is_unique_local()
+                        || v6.is_unicast_link_local()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
     }
 
     async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -3393,15 +3457,30 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
     new_settings.rss != old_settings.rss
 }
 
+fn prune_rss_feed_errors(
+    feed_errors: &mut HashMap<String, FeedSyncError>,
+    settings: &Settings,
+) -> bool {
+    let configured_feed_urls: std::collections::HashSet<&str> = settings
+        .rss
+        .feeds
+        .iter()
+        .map(|feed| feed.url.as_str())
+        .collect();
+    let before = feed_errors.len();
+    feed_errors.retain(|feed_url, _| configured_feed_urls.contains(feed_url.as_str()));
+    feed_errors.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         clamp_selected_indices_in_state, extract_magnet_display_name, parse_hybrid_hashes,
-        persisted_validation_status_from_piece_completion, resolve_magnet_torrent_name,
-        rss_settings_changed, sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
-        SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
-        UiState,
+        persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
+        resolve_magnet_torrent_name, rss_settings_changed, sort_and_filter_torrent_list_state,
+        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppMode, AppState,
+        FilePriority, PeerInfo, SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics,
+        TorrentSortColumn, UiState,
     };
     use std::collections::HashMap;
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
@@ -3604,5 +3683,77 @@ mod tests {
         new.global_download_limit_bps += 1;
 
         assert!(!rss_settings_changed(&old, &new));
+    }
+
+    #[test]
+    fn prune_rss_feed_errors_removes_deleted_feed_urls() {
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://active.example/rss.xml".to_string(),
+            enabled: true,
+        });
+
+        let mut feed_errors = HashMap::new();
+        feed_errors.insert(
+            "https://active.example/rss.xml".to_string(),
+            crate::config::FeedSyncError {
+                message: "timeout".to_string(),
+                occurred_at_iso: "2026-02-18T10:00:00Z".to_string(),
+            },
+        );
+        feed_errors.insert(
+            "https://removed.example/rss.xml".to_string(),
+            crate::config::FeedSyncError {
+                message: "403".to_string(),
+                occurred_at_iso: "2026-02-18T10:01:00Z".to_string(),
+            },
+        );
+
+        let changed = prune_rss_feed_errors(&mut feed_errors, &settings);
+        assert!(changed);
+        assert_eq!(feed_errors.len(), 1);
+        assert!(feed_errors.contains_key("https://active.example/rss.xml"));
+    }
+
+    #[test]
+    fn prune_rss_feed_errors_is_noop_when_all_urls_still_configured() {
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://active.example/rss.xml".to_string(),
+            enabled: true,
+        });
+
+        let mut feed_errors = HashMap::new();
+        feed_errors.insert(
+            "https://active.example/rss.xml".to_string(),
+            crate::config::FeedSyncError {
+                message: "timeout".to_string(),
+                occurred_at_iso: "2026-02-18T10:00:00Z".to_string(),
+            },
+        );
+
+        let changed = prune_rss_feed_errors(&mut feed_errors, &settings);
+        assert!(!changed);
+        assert_eq!(feed_errors.len(), 1);
+    }
+
+    #[test]
+    fn is_safe_rss_item_url_rejects_localhost_and_private_literal_ips() {
+        assert!(!App::is_safe_rss_item_url("http://localhost/file.torrent"));
+        assert!(!App::is_safe_rss_item_url("https://127.0.0.1/file.torrent"));
+        assert!(!App::is_safe_rss_item_url(
+            "https://192.168.1.40/file.torrent"
+        ));
+        assert!(!App::is_safe_rss_item_url("https://[::1]/file.torrent"));
+    }
+
+    #[test]
+    fn is_safe_rss_item_url_accepts_public_hosts() {
+        assert!(App::is_safe_rss_item_url(
+            "https://downloads.example.com/file.torrent"
+        ));
+        assert!(App::is_safe_rss_item_url(
+            "http://cdn.example.net/archive.torrent"
+        ));
     }
 }

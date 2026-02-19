@@ -243,6 +243,24 @@ fn execute_rss_effects(
     fn set_rss_status(app_state: &mut AppState, message: impl Into<String>) {
         app_state.ui.rss.status_message = Some(message.into());
     }
+    fn try_update_config(
+        app_state: &mut AppState,
+        app_command_tx: &mpsc::Sender<AppCommand>,
+        new_settings: crate::config::Settings,
+        success_message: Option<&str>,
+    ) -> bool {
+        if app_command_tx
+            .try_send(AppCommand::UpdateConfig(new_settings))
+            .is_err()
+        {
+            set_rss_status(app_state, "RSS settings enqueue failed");
+            return false;
+        }
+        if let Some(message) = success_message {
+            set_rss_status(app_state, message);
+        }
+        true
+    }
 
     for effect in effects {
         match effect {
@@ -291,7 +309,9 @@ fn execute_rss_effects(
                 if !settings.rss.enabled {
                     let mut new_settings = settings.clone();
                     new_settings.rss.enabled = true;
-                    let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                    if !try_update_config(app_state, app_command_tx, new_settings, None) {
+                        continue;
+                    }
                 }
                 if app_command_tx.try_send(AppCommand::RssSyncNow).is_err() {
                     set_rss_status(app_state, "RSS sync enqueue failed");
@@ -337,7 +357,6 @@ fn execute_rss_effects(
                                     url: value,
                                     enabled: true,
                                 });
-                                set_rss_status(app_state, "Link added");
                             }
                             RssSectionFocus::Filters => {
                                 new_settings.rss.filters.push(crate::config::RssFilter {
@@ -345,11 +364,20 @@ fn execute_rss_effects(
                                     enabled: true,
                                 });
                                 app_state.ui.rss.filter_draft.clear();
-                                set_rss_status(app_state, "Filter added");
                             }
                             RssSectionFocus::Explorer => {}
                         }
-                        let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
+                        let success_message = match app_state.ui.rss.focused_section {
+                            RssSectionFocus::Links => Some("Link added"),
+                            RssSectionFocus::Filters => Some("Filter added"),
+                            RssSectionFocus::Explorer => None,
+                        };
+                        let _ = try_update_config(
+                            app_state,
+                            app_command_tx,
+                            new_settings,
+                            success_message,
+                        );
                     }
                     app_state.ui.rss.is_editing = false;
                     app_state.ui.rss.edit_buffer.clear();
@@ -403,8 +431,12 @@ fn execute_rss_effects(
                             new_settings.rss.feeds.remove(idx);
                             app_state.ui.rss.selected_feed_index =
                                 app_state.ui.rss.selected_feed_index.saturating_sub(1);
-                            let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
-                            set_rss_status(app_state, "Link deleted");
+                            let _ = try_update_config(
+                                app_state,
+                                app_command_tx,
+                                new_settings,
+                                Some("Link deleted"),
+                            );
                         }
                     }
                     RssSectionFocus::Filters => {
@@ -415,8 +447,12 @@ fn execute_rss_effects(
                             new_settings.rss.filters.remove(idx);
                             app_state.ui.rss.selected_filter_index =
                                 app_state.ui.rss.selected_filter_index.saturating_sub(1);
-                            let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
-                            set_rss_status(app_state, "Filter deleted");
+                            let _ = try_update_config(
+                                app_state,
+                                app_command_tx,
+                                new_settings,
+                                Some("Filter deleted"),
+                            );
                         }
                     }
                     RssSectionFocus::Explorer => {}
@@ -437,14 +473,15 @@ fn execute_rss_effects(
                             new_settings.rss.feeds[idx].enabled =
                                 !new_settings.rss.feeds[idx].enabled;
                             let enabled = new_settings.rss.feeds[idx].enabled;
-                            let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
-                            set_rss_status(
+                            let _ = try_update_config(
                                 app_state,
-                                if enabled {
+                                app_command_tx,
+                                new_settings,
+                                Some(if enabled {
                                     "Link enabled"
                                 } else {
                                     "Link disabled"
-                                },
+                                }),
                             );
                         }
                     }
@@ -456,14 +493,15 @@ fn execute_rss_effects(
                             new_settings.rss.filters[idx].enabled =
                                 !new_settings.rss.filters[idx].enabled;
                             let enabled = new_settings.rss.filters[idx].enabled;
-                            let _ = app_command_tx.try_send(AppCommand::UpdateConfig(new_settings));
-                            set_rss_status(
+                            let _ = try_update_config(
                                 app_state,
-                                if enabled {
+                                app_command_tx,
+                                new_settings,
+                                Some(if enabled {
                                     "Filter enabled"
                                 } else {
                                     "Filter disabled"
-                                },
+                                }),
                             );
                         }
                     }
@@ -1809,6 +1847,56 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn add_link_reports_failure_when_update_config_enqueue_fails() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        tx.try_send(AppCommand::RssSyncNow)
+            .expect("prefill channel to force enqueue failure");
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        for c in "https://example.com/rss.xml".chars() {
+            handle_event(
+                CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                    KeyCode::Char(c),
+                    ratatui::crossterm::event::KeyModifiers::NONE,
+                )),
+                &mut app_state,
+                &settings,
+                &tx,
+            );
+        }
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("RSS settings enqueue failed")
+        );
+        assert!(matches!(rx.try_recv(), Ok(AppCommand::RssSyncNow)));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
