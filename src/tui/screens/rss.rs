@@ -1588,6 +1588,7 @@ fn rss_item_completion_percent(
     item: &crate::app::RssPreviewItem,
     app_state: &AppState,
     history_hash_map: &HashMap<String, Vec<u8>>,
+    completion_by_title: &HashMap<String, f64>,
 ) -> Option<f64> {
     if app_state.torrents.is_empty() {
         return None;
@@ -1614,7 +1615,37 @@ fn rss_item_completion_percent(
         }
     }
 
-    None
+    let normalized_title = normalize_title(&item.title);
+    completion_by_title.get(&normalized_title).copied()
+}
+
+fn build_completion_by_normalized_title(app_state: &AppState) -> HashMap<String, f64> {
+    let mut completion_by_title: HashMap<String, f64> = HashMap::new();
+    for torrent in app_state.torrents.values() {
+        let normalized = normalize_title(&torrent.latest_state.torrent_name);
+        let completion = crate::app::torrent_completion_percent(&torrent.latest_state);
+        completion_by_title
+            .entry(normalized)
+            .and_modify(|existing| *existing = existing.max(completion))
+            .or_insert(completion);
+    }
+    completion_by_title
+}
+
+fn format_completion_prefix(pct: f64) -> String {
+    if (pct - 100.0).abs() < f64::EPSILON {
+        "100.0% ".to_string()
+    } else {
+        format!("{:.1}% ", pct)
+    }
+}
+
+fn completion_color_for_pct(ctx: &crate::theme::ThemeContext, pct: f64) -> ratatui::style::Color {
+    if pct >= 100.0 {
+        ctx.state_success()
+    } else {
+        ctx.state_selected()
+    }
 }
 
 fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: bool) {
@@ -1639,6 +1670,7 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
     let prioritise_matches = app_state.rss_derived.explorer_prioritise_matches;
     let compute_ms = compute_start.elapsed().as_millis();
     let history_hash_map = &app_state.rss_derived.history_hash_by_dedupe;
+    let completion_by_title = build_completion_by_normalized_title(app_state);
     let draft_filter = prepare_filter(
         &app_state.ui.rss.edit_buffer,
         app_state.ui.rss.add_filter_mode,
@@ -1682,11 +1714,17 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
                 ctx.apply(Style::default().fg(ctx.theme.semantic.text))
             };
 
-            let completion_pct = rss_item_completion_percent(item, app_state, history_hash_map);
+            let completion_pct = rss_item_completion_percent(
+                item,
+                app_state,
+                history_hash_map,
+                &completion_by_title,
+            );
             if let Some(pct) = completion_pct {
-                let completion_style = style.patch(Style::default().fg(ctx.state_success()));
+                let completion_style =
+                    style.patch(Style::default().fg(completion_color_for_pct(ctx, pct)));
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:.1}% ", pct), completion_style),
+                    Span::styled(format_completion_prefix(pct), completion_style),
                     Span::styled(item.title.clone(), style),
                 ]))
             } else {
@@ -3263,7 +3301,14 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(rss_item_completion_percent(&item, &app_state, &history_hash_map).is_none());
+        let completion_by_title = HashMap::new();
+        assert!(rss_item_completion_percent(
+            &item,
+            &app_state,
+            &history_hash_map,
+            &completion_by_title
+        )
+        .is_none());
     }
 
     #[test]
@@ -3295,8 +3340,9 @@ mod tests {
         };
 
         let history_hash_map = build_history_hash_by_dedupe(&app_state.rss_runtime.history);
+        let completion_by_title = HashMap::new();
         assert_eq!(
-            rss_item_completion_percent(&item, &app_state, &history_hash_map),
+            rss_item_completion_percent(&item, &app_state, &history_hash_map, &completion_by_title),
             Some(100.0)
         );
     }
@@ -3329,8 +3375,9 @@ mod tests {
         };
 
         let history_hash_map = build_history_hash_by_dedupe(&app_state.rss_runtime.history);
+        let completion_by_title = HashMap::new();
         assert_eq!(
-            rss_item_completion_percent(&item, &app_state, &history_hash_map),
+            rss_item_completion_percent(&item, &app_state, &history_hash_map, &completion_by_title),
             Some(100.0)
         );
     }
