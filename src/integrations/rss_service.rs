@@ -230,6 +230,10 @@ async fn run_sync(
     let mut preview_items = Vec::new();
 
     for item in aggregated {
+        if preview_items.len() >= settings.rss.max_preview_items {
+            break;
+        }
+
         let title_key = normalize_title(&item.title);
         if !title_seen.insert(title_key) {
             continue;
@@ -283,10 +287,6 @@ async fn run_sync(
             is_match,
             is_downloaded,
         });
-
-        if preview_items.len() >= settings.rss.max_preview_items {
-            break;
-        }
     }
 
     let _ = app_command_tx
@@ -525,7 +525,7 @@ async fn auto_ingest_item(
 }
 
 async fn fetch_torrent_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
-    if !is_safe_rss_item_url(url) {
+    if !is_safe_rss_item_url(url).await {
         return Err("torrent URL blocked by RSS network safety policy".to_string());
     }
 
@@ -771,6 +771,111 @@ mod tests {
         );
         let written = std::fs::read_to_string(entries[0].path()).expect("read written magnet");
         assert_eq!(written, magnet);
+
+        server.await.expect("join server");
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn rss_max_preview_items_zero_skips_processing_and_auto_ingest() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let addr = listener.local_addr().expect("listener addr");
+        let feed_url = format!("http://{}/rss.xml", addr);
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=SampleBeta%20Episode%2001";
+        let magnet_xml = magnet.replace('&', "&amp;");
+        let feed_body = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Sample Feed</title>
+    <item>
+      <title>SampleBeta Episode 01</title>
+      <guid>guid-samplebeta-1</guid>
+      <link>{}</link>
+      <pubDate>Fri, 20 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>"#,
+            magnet_xml
+        );
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/rss+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                feed_body.len(),
+                feed_body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let watch_folder = temp.path().join("watch");
+
+        let mut settings = Settings::default();
+        settings.rss.enabled = true;
+        settings.rss.max_preview_items = 0;
+        settings.watch_folder = Some(watch_folder.clone());
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: feed_url,
+            enabled: true,
+        });
+        settings.rss.filters.push(crate::config::RssFilter {
+            query: "samplebeta".to_string(),
+            mode: RssFilterMode::Fuzzy,
+            enabled: true,
+        });
+
+        let (tx, mut rx) = mpsc::channel::<AppCommand>(16);
+        let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
+        let (_downloaded_entry_tx, downloaded_entry_rx) = mpsc::channel::<RssHistoryEntry>(2);
+        let (_settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let handle = spawn_rss_service(
+            settings,
+            Vec::new(),
+            tx,
+            sync_rx,
+            downloaded_entry_rx,
+            settings_rx,
+            shutdown_tx.clone(),
+        );
+
+        sync_tx.send(()).await.expect("send sync trigger");
+
+        let mut got_preview: Option<Vec<RssPreviewItem>> = None;
+        let mut got_download = false;
+        let deadline = time::Instant::now() + Duration::from_secs(3);
+        while time::Instant::now() < deadline && got_preview.is_none() {
+            let recv = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+            let Some(cmd) = recv.ok().flatten() else {
+                continue;
+            };
+            match cmd {
+                AppCommand::RssDownloadSelected(_) => got_download = true,
+                AppCommand::RssPreviewUpdated(items) => got_preview = Some(items),
+                _ => {}
+            }
+        }
+
+        let preview = got_preview.expect("expected RssPreviewUpdated");
+        assert!(preview.is_empty());
+        assert!(
+            !got_download,
+            "must not auto-ingest when preview cap is zero"
+        );
+        assert!(
+            std::fs::read_dir(&watch_folder).is_err(),
+            "watch folder should remain untouched"
+        );
 
         server.await.expect("join server");
         let _ = shutdown_tx.send(());

@@ -99,6 +99,7 @@ use rlimit::Resource;
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 
 #[derive(serde::Deserialize)]
 struct CratesResponse {
@@ -582,6 +583,7 @@ pub struct RssUiState {
     pub add_feed_buffer: String,
     pub add_filter_buffer: String,
     pub add_filter_mode: RssFilterMode,
+    pub delete_confirm_armed: bool,
     pub status_message: Option<String>,
     pub last_sync_request_at: Option<Instant>,
 }
@@ -2848,7 +2850,7 @@ impl App {
     }
 
     async fn download_rss_torrent_from_url(&mut self, url: &str) -> (bool, Option<Vec<u8>>) {
-        if !is_safe_rss_item_url(url) {
+        if !is_safe_rss_item_url(url).await {
             tracing_event!(
                 Level::WARN,
                 "RSS manual download blocked URL by network safety policy: {}",
@@ -2859,6 +2861,7 @@ impl App {
 
         let client = match reqwest::Client::builder()
             .user_agent("superseedr (https://github.com/Jagalite/superseedr)")
+            .timeout(Duration::from_secs(RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS))
             .build()
         {
             Ok(c) => c,

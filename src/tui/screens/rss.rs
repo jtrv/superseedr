@@ -30,6 +30,8 @@ pub enum RssAction {
     CancelInput,
     AddEntry,
     DeleteEntry,
+    ConfirmDeleteEntry,
+    CancelDeleteEntry,
     ToggleFeedEnabled,
     StartSearch,
     DownloadSelectedExplorer,
@@ -48,6 +50,14 @@ fn map_key_to_rss_action(
 ) -> Option<RssAction> {
     if key_kind != KeyEventKind::Press {
         return None;
+    }
+
+    if app_state.ui.rss.delete_confirm_armed {
+        return match key_code {
+            KeyCode::Char('Y') => Some(RssAction::ConfirmDeleteEntry),
+            KeyCode::Esc | KeyCode::Char('q') => Some(RssAction::CancelDeleteEntry),
+            _ => None,
+        };
     }
 
     if app_state.ui.rss.is_editing || app_state.ui.rss.is_searching {
@@ -529,7 +539,36 @@ fn execute_rss_effects(
                 if !matches!(app_state.ui.rss.active_screen, RssScreen::Unified) {
                     continue;
                 }
-
+                match app_state.ui.rss.focused_section {
+                    RssSectionFocus::Links => {
+                        if selected_feed_actual_idx(settings, app_state.ui.rss.selected_feed_index)
+                            .is_some()
+                        {
+                            app_state.ui.rss.delete_confirm_armed = true;
+                            set_rss_status(app_state, "Press Shift+Y to confirm delete");
+                        }
+                    }
+                    RssSectionFocus::Filters => {
+                        if selected_filter_actual_idx(
+                            settings,
+                            app_state.ui.rss.selected_filter_index,
+                        )
+                        .is_some()
+                        {
+                            app_state.ui.rss.delete_confirm_armed = true;
+                            set_rss_status(app_state, "Press Shift+Y to confirm delete");
+                        }
+                    }
+                    RssSectionFocus::Explorer => {}
+                }
+            }
+            RssAction::ConfirmDeleteEntry => {
+                if !app_state.ui.rss.delete_confirm_armed
+                    || !matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
+                {
+                    continue;
+                }
+                app_state.ui.rss.delete_confirm_armed = false;
                 let mut new_settings = settings.clone();
                 match app_state.ui.rss.focused_section {
                     RssSectionFocus::Links => {
@@ -567,6 +606,12 @@ fn execute_rss_effects(
                         }
                     }
                     RssSectionFocus::Explorer => {}
+                }
+            }
+            RssAction::CancelDeleteEntry => {
+                if app_state.ui.rss.delete_confirm_armed {
+                    app_state.ui.rss.delete_confirm_armed = false;
+                    set_rss_status(app_state, "Delete cancelled");
                 }
             }
             RssAction::ToggleFeedEnabled => {
@@ -783,7 +828,10 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         ));
     };
 
-    if app_state.ui.rss.is_editing {
+    if app_state.ui.rss.delete_confirm_armed {
+        push_action("Shift+Y", "confirm-delete", ctx.state_error());
+        push_action("Esc", "cancel", ctx.state_selected());
+    } else if app_state.ui.rss.is_editing {
         push_action("Enter", "save", ctx.state_success());
         push_action("Esc", "cancel", ctx.state_error());
         if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
@@ -828,6 +876,106 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)))
         .alignment(Alignment::Center);
     f.render_widget(p, area);
+}
+
+fn selected_delete_label(
+    app_state: &AppState,
+    settings: &crate::config::Settings,
+) -> Option<String> {
+    if !matches!(app_state.ui.rss.active_screen, RssScreen::Unified) {
+        return None;
+    }
+    match app_state.ui.rss.focused_section {
+        RssSectionFocus::Links => {
+            selected_feed_actual_idx(settings, app_state.ui.rss.selected_feed_index)
+                .and_then(|idx| settings.rss.feeds.get(idx))
+                .map(|feed| truncate_with_ellipsis(&feed.url, 72))
+        }
+        RssSectionFocus::Filters => {
+            selected_filter_actual_idx(settings, app_state.ui.rss.selected_filter_index)
+                .and_then(|idx| settings.rss.filters.get(idx))
+                .map(|filter| truncate_with_ellipsis(&filter.query, 72))
+        }
+        RssSectionFocus::Explorer => None,
+    }
+}
+
+fn draw_delete_confirm_dialog(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
+    let app_state = screen.app.state;
+    let settings = screen.settings;
+    let ctx = screen.theme;
+    let target =
+        selected_delete_label(app_state, settings).unwrap_or_else(|| "selected item".to_string());
+    let rect_width = if area.width < 60 { 90 } else { 50 };
+    let rect_height = if area.height < 20 { 95 } else { 18 };
+    let dialog = centered_rect(rect_width, rect_height, area);
+    f.render_widget(Clear, dialog);
+    let vert_padding = if dialog.height < 10 { 0 } else { 1 };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .padding(Padding::new(2, 2, vert_padding, vert_padding))
+        .border_style(ctx.apply(Style::default().fg(ctx.state_error())));
+    let inner = block.inner(dialog);
+    f.render_widget(block, dialog);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Delete RSS Entry",
+                ctx.apply(Style::default().fg(ctx.state_warning()).bold().underlined()),
+            )),
+            Line::from(Span::styled(
+                target,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+            )),
+        ])
+        .alignment(Alignment::Center),
+        chunks[0],
+    );
+
+    if chunks[1].height > 0 {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "This removes the selected RSS link/filter.",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                )),
+                Line::from(Span::styled(
+                    "This action cannot be undone.",
+                    ctx.apply(Style::default().fg(ctx.state_error()).bold()),
+                )),
+            ])
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+
+    let actions = Line::from(vec![
+        Span::styled(
+            "[Shift+Y]",
+            ctx.apply(Style::default().fg(ctx.state_success()).bold()),
+        ),
+        Span::raw(" Confirm  "),
+        Span::styled(
+            "[Esc]",
+            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
+        ),
+        Span::raw(" Cancel"),
+    ]);
+    f.render_widget(
+        Paragraph::new(actions).alignment(Alignment::Center),
+        chunks[3],
+    );
 }
 
 fn sync_countdown_label(next_sync_at: &str) -> Option<String> {
@@ -1924,6 +2072,9 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
         matches!(app_state.ui.rss.active_screen, RssScreen::History),
     );
     draw_shared_footer(f, inner[footer_idx], screen);
+    if app_state.ui.rss.delete_confirm_armed {
+        draw_delete_confirm_dialog(f, area, screen);
+    }
 }
 
 #[cfg(test)]
@@ -2380,7 +2531,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_link_dispatches_update_config() {
+    fn delete_link_requires_confirmation_then_dispatches_update_config() {
         let mut app_state = base_state();
         app_state.ui.rss.focused_section = RssSectionFocus::Links;
         let mut settings = crate::config::Settings::default();
@@ -2400,11 +2551,65 @@ mod tests {
             &tx,
         );
 
+        assert!(app_state.ui.rss.delete_confirm_armed);
+        assert!(rx.try_recv().is_err());
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('Y'),
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(!app_state.ui.rss.delete_confirm_armed);
         let cmd = rx.try_recv().expect("expected UpdateConfig dispatch");
         match cmd {
             AppCommand::UpdateConfig(s) => assert!(s.rss.feeds.is_empty()),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn delete_link_confirmation_can_be_cancelled_with_escape() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://a.test/rss".to_string(),
+            enabled: true,
+        });
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('d'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(app_state.ui.rss.delete_confirm_armed);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(!app_state.ui.rss.delete_confirm_armed);
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Delete cancelled")
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
