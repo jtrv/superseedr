@@ -145,8 +145,8 @@ GitHub Actions workflow:
 Behavior:
 
 - Runs matrix over scenarios and modes:
-  - scenarios: `superseedr_to_superseedr`, `superseedr_to_qbittorrent`
-  - modes: `v1`, `v2`, `hybrid`
+  - full modes (`v1`, `v2`, `hybrid`): `superseedr_to_superseedr`, `superseedr_to_qbittorrent`, `qbittorrent_to_superseedr`
+  - `v1` only: `superseedr_to_transmission`, `transmission_to_superseedr`
 - Supports manual `workflow_dispatch` inputs:
   - `mode` (`all|v1|v2|hybrid`)
   - `timeout_secs`
@@ -163,11 +163,11 @@ As of February 21, 2026:
 - CI interop matrix now enforces all three scenarios (`superseedr_to_superseedr`, `superseedr_to_qbittorrent`, `qbittorrent_to_superseedr`) across all three modes.
 - qBittorrent and tracker host ports are dynamically allocated in qBittorrent scenarios/tests to reduce local port-collision flakes.
 - Transmission adapter now supports auth/session handshake, torrent add, status polling, and log collection.
-- Transmission scenario/test scaffolding has been added for both directions (currently validated on `v1`) but is not yet in CI matrix.
+- Transmission scenarios now run in CI for `v1` (`superseedr_to_transmission`, `transmission_to_superseedr`).
 - Transmission `v2`/`hybrid` adds currently fail with RPC result `unrecognized info` on the linuxserver image.
 
 ## Plan / Next Tasks
 
 1. Validate Transmission `v2`/`hybrid` compatibility and enable non-`v1` modes when supported.
 2. Add focused diagnostics for reverse failures (piece-level mapping/torrent-level correlation) to shorten triage loops.
-3. Extend CI matrix with transmission scenarios once mode support and runtime budget are accepted.
+3. Extend transmission CI coverage to `v2`/`hybrid` once compatibility is available.
