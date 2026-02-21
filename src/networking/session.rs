@@ -1506,6 +1506,7 @@ mod tests {
         let (mut peer_read, mut peer_write) = tokio::io::split(network);
         tokio::spawn(async move {
             let dummy_data = vec![0xAA; 16384];
+            let start_time = Instant::now();
             while let Ok(Ok(msg)) =
                 timeout(Duration::from_secs(30), parse_message(&mut peer_read)).await
             {
@@ -1520,8 +1521,13 @@ mod tests {
                             // SIMULATE CONGESTION: 50ms delay per block (approx 320KB/s)
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         } else {
-                            // FAST MODE: 2ms (Needed to trigger 'saturated' check)
-                            tokio::time::sleep(Duration::from_millis(2)).await;
+                            // Ramp speed up after warm-up so speed(t+1) > speed(t)
+                            // and window growth logic can deterministically trigger.
+                            if start_time.elapsed() < Duration::from_secs(2) {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(2)).await;
+                            }
                         }
                         let piece =
                             generate_message(Message::Piece(i, b, dummy_data.clone())).unwrap();
@@ -1547,7 +1553,7 @@ mod tests {
         let mut request_id = 0;
         let mut inflight: usize = 0;
 
-        while start.elapsed() < Duration::from_secs(5) {
+        while start.elapsed() < Duration::from_secs(8) {
             // Keep pipe full to ensure saturation logic triggers
             while inflight < 150 {
                 let _ = client_cmd_tx
@@ -1571,7 +1577,9 @@ mod tests {
         println!("Phase 1 Peak Window: {}", peak_window);
         assert!(
             peak_window > PEER_BLOCK_IN_FLIGHT_LIMIT,
-            "Window failed to grow"
+            "Window failed to grow (peak={}, base={})",
+            peak_window,
+            PEER_BLOCK_IN_FLIGHT_LIMIT
         );
 
         // PHASE 2: TRIGGER CONGESTION

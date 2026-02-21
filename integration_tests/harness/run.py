@@ -7,12 +7,22 @@ import time
 from pathlib import Path
 
 from integration_tests.harness.config import HarnessDefaults, resolve_paths
-from integration_tests.harness.scenarios.superseedr_to_superseedr import (
-    generate_fixtures_and_torrents,
-    run_mode,
+from integration_tests.harness.scenarios import (
+    qbittorrent_to_superseedr,
+    superseedr_to_transmission,
+    superseedr_to_qbittorrent,
+    superseedr_to_superseedr,
+    transmission_to_superseedr,
 )
 
 ALL_MODES = ("v1", "v2", "hybrid")
+SCENARIOS = {
+    "superseedr_to_superseedr": superseedr_to_superseedr,
+    "superseedr_to_qbittorrent": superseedr_to_qbittorrent,
+    "qbittorrent_to_superseedr": qbittorrent_to_superseedr,
+    "superseedr_to_transmission": superseedr_to_transmission,
+    "transmission_to_superseedr": transmission_to_superseedr,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--scenario",
         default="superseedr_to_superseedr",
-        choices=["superseedr_to_superseedr"],
+        choices=sorted(SCENARIOS.keys()),
     )
     p.add_argument("--mode", default="all", choices=["all", *ALL_MODES])
     p.add_argument("--timeout-secs", type=int, default=300)
@@ -33,6 +43,7 @@ def main() -> int:
     args = parse_args()
     paths = resolve_paths()
     defaults = HarnessDefaults()
+    scenario_mod = SCENARIOS[args.scenario]
 
     run_id = args.run_id or time.strftime("run_%Y%m%d_%H%M%S")
     run_root = paths.artifacts_root / "runs" / run_id
@@ -40,13 +51,21 @@ def main() -> int:
 
     torrents_root = paths.torrents_root
     if not args.skip_generation:
-        torrents_root = generate_fixtures_and_torrents(paths.root, defaults.announce_url)
+        torrents_root = scenario_mod.generate_fixtures_and_torrents(paths.root, defaults.announce_url)
 
-    modes = list(ALL_MODES) if args.mode == "all" else [args.mode]
+    scenario_supported_modes = tuple(getattr(scenario_mod, "SUPPORTED_MODES", ALL_MODES))
+    modes = list(scenario_supported_modes) if args.mode == "all" else [args.mode]
+
+    if args.mode != "all" and args.mode not in scenario_supported_modes:
+        supported = ",".join(scenario_supported_modes)
+        raise SystemExit(
+            f"Scenario {args.scenario} does not support mode={args.mode}. "
+            f"Supported modes: {supported}"
+        )
     results = []
 
     for mode in modes:
-        result = run_mode(
+        result = scenario_mod.run_mode(
             mode=mode,
             timeout_secs=args.timeout_secs,
             run_root=run_root,

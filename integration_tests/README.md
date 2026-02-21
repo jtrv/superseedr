@@ -2,8 +2,14 @@
 
 Dockerized integration harness for cross-client torrent interoperability.
 
-Current Phase 1 scope: `superseedr -> superseedr` (seed + leech).
-Planned next scope: `superseedr <-> qbittorrent`, `superseedr <-> transmission`.
+Current stable scope:
+- `superseedr -> superseedr` (seed + leech)
+- `superseedr -> qbittorrent` (seed + leech)
+- `qbittorrent -> superseedr` (seed + leech)
+
+Experimental scope:
+- `superseedr -> transmission` (seed + leech, currently `v1` only)
+- `transmission -> superseedr` (seed + leech, currently `v1` only)
 
 ## Purpose
 
@@ -55,17 +61,24 @@ python3 -m pip install -r requirements-integration.txt
 ### Main local entrypoint
 
 ```bash
-./integration_tests/run_interop.sh [all|v1|v2|hybrid]
+./integration_tests/run_interop.sh [all|v1|v2|hybrid] [scenario]
 ```
 
 Environment variables:
 
 - `INTEROP_TIMEOUT_SECS` (default `300`): per-mode timeout
+- `INTEROP_SCENARIO` (default `superseedr_to_superseedr`): scenario name when not passed as arg 2
 
 Example:
 
 ```bash
 INTEROP_TIMEOUT_SECS=300 ./integration_tests/run_interop.sh all
+```
+
+Example (mixed client):
+
+```bash
+INTEROP_TIMEOUT_SECS=300 ./integration_tests/run_interop.sh all superseedr_to_qbittorrent
 ```
 
 ### Direct Python harness entrypoint
@@ -81,7 +94,12 @@ python3 -m integration_tests.harness.run \
 
 Accepted arguments:
 
-- `--scenario`: currently only `superseedr_to_superseedr`
+- `--scenario`: one of:
+  - `superseedr_to_superseedr`
+  - `superseedr_to_qbittorrent`
+  - `qbittorrent_to_superseedr`
+  - `superseedr_to_transmission` (experimental)
+  - `transmission_to_superseedr` (experimental)
 - `--mode`: `all`, `v1`, `v2`, `hybrid`
 - `--timeout-secs`: timeout per mode in seconds
 - `--run-id`: optional explicit run id
@@ -126,7 +144,9 @@ GitHub Actions workflow:
 
 Behavior:
 
-- Runs matrix modes: `v1`, `v2`, `hybrid`
+- Runs matrix over scenarios and modes:
+  - full modes (`v1`, `v2`, `hybrid`): `superseedr_to_superseedr`, `superseedr_to_qbittorrent`, `qbittorrent_to_superseedr`
+  - `v1` only: `superseedr_to_transmission`, `transmission_to_superseedr`
 - Supports manual `workflow_dispatch` inputs:
   - `mode` (`all|v1|v2|hybrid`)
   - `timeout_secs`
@@ -134,18 +154,20 @@ Behavior:
 
 ## Current Status
 
-As of February 12, 2026:
+As of February 21, 2026:
 
-- Phase 1 (`superseedr -> superseedr`) harness is implemented.
-- Modes `v1`, `v2`, and `hybrid` pass in local reruns.
-- Hybrid startup race was mitigated by tracker-first startup + readiness wait.
-- qBittorrent/Transmission adapters are present as explicit stubs (`NotImplementedError`).
+- `superseedr -> superseedr` passes for `v1`, `v2`, and `hybrid`.
+- `superseedr -> qbittorrent` passes for `v1`, `v2`, and `hybrid`, with manifest/hash validation.
+- `qbittorrent -> superseedr` now runs ungated in pytest and passes for `v1`, `v2`, and `hybrid` in local validation.
+- qBittorrent container/auth/add/polling/log collection are implemented in `integration_tests/harness/clients/qbittorrent.py`.
+- CI interop matrix now enforces all three scenarios (`superseedr_to_superseedr`, `superseedr_to_qbittorrent`, `qbittorrent_to_superseedr`) across all three modes.
+- qBittorrent and tracker host ports are dynamically allocated in qBittorrent scenarios/tests to reduce local port-collision flakes.
+- Transmission adapter now supports auth/session handshake, torrent add, status polling, and log collection.
+- Transmission scenarios now run in CI for `v1` (`superseedr_to_transmission`, `transmission_to_superseedr`).
+- Transmission `v2`/`hybrid` adds currently fail with RPC result `unrecognized info` on the linuxserver image.
 
 ## Plan / Next Tasks
 
-1. Implement qBittorrent adapter (`integration_tests/harness/clients/qbittorrent.py`) with API auth, add torrent, status polling, and log collection.
-2. Implement Transmission adapter (`integration_tests/harness/clients/transmission.py`) with RPC session handling, add torrent, status polling, and log collection.
-3. Add mixed-client scenario modules under `integration_tests/harness/scenarios/`.
-4. Extend compose stack for multi-client runs and keep deterministic fixture generation.
-5. Add client-specific telemetry normalization and richer failure diagnostics.
-6. Expand CI matrix to cover mixed-client scenarios once adapters are live.
+1. Validate Transmission `v2`/`hybrid` compatibility and enable non-`v1` modes when supported.
+2. Add focused diagnostics for reverse failures (piece-level mapping/torrent-level correlation) to shorten triage loops.
+3. Extend transmission CI coverage to `v2`/`hybrid` once compatibility is available.
