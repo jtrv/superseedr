@@ -171,7 +171,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
         let actions = Line::from(vec![
             Span::styled(
-                "[Shift+Y]",
+                "[Y]",
                 ctx.apply(Style::default().fg(ctx.state_success()).bold()),
             ),
             Span::raw(" Confirm  "),

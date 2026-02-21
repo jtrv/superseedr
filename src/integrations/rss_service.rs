@@ -102,7 +102,16 @@ pub fn spawn_rss_service(
                     if !current_settings.rss.enabled {
                         continue;
                     }
-                    run_sync(&current_settings, &app_command_tx, &mut downloaded_keys).await;
+                    if !run_sync_until_shutdown(
+                        &current_settings,
+                        &app_command_tx,
+                        &mut downloaded_keys,
+                        &mut shutdown_rx,
+                    )
+                    .await
+                    {
+                        break;
+                    }
                     let now = Utc::now();
                     let next = now + ChronoDuration::seconds(poll_secs as i64);
                     let _ = app_command_tx.send(AppCommand::RssSyncStatusUpdated {
@@ -114,7 +123,16 @@ pub fn spawn_rss_service(
                     if !current_settings.rss.enabled {
                         continue;
                     }
-                    run_sync(&current_settings, &app_command_tx, &mut downloaded_keys).await;
+                    if !run_sync_until_shutdown(
+                        &current_settings,
+                        &app_command_tx,
+                        &mut downloaded_keys,
+                        &mut shutdown_rx,
+                    )
+                    .await
+                    {
+                        break;
+                    }
                     let now = Utc::now();
                     let next = now + ChronoDuration::seconds(poll_secs as i64);
                     let _ = app_command_tx.send(AppCommand::RssSyncStatusUpdated {
@@ -125,6 +143,18 @@ pub fn spawn_rss_service(
             }
         }
     })
+}
+
+async fn run_sync_until_shutdown(
+    settings: &Settings,
+    app_command_tx: &mpsc::Sender<AppCommand>,
+    downloaded_keys: &mut HashSet<String>,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+) -> bool {
+    tokio::select! {
+        _ = run_sync(settings, app_command_tx, downloaded_keys) => true,
+        _ = shutdown_rx.recv() => false,
+    }
 }
 
 async fn run_sync(
@@ -775,6 +805,55 @@ mod tests {
         server.await.expect("join server");
         let _ = shutdown_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn rss_service_shutdown_interrupts_inflight_sync() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let feed_url = format!("http://{}/rss.xml", addr);
+
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept request");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let mut settings = Settings::default();
+        settings.rss.enabled = true;
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: feed_url,
+            enabled: true,
+        });
+
+        let (tx, _rx) = mpsc::channel::<AppCommand>(8);
+        let (sync_tx, sync_rx) = mpsc::channel::<()>(2);
+        let (_downloaded_entry_tx, downloaded_entry_rx) = mpsc::channel::<RssHistoryEntry>(2);
+        let (_settings_tx, settings_rx) = tokio::sync::watch::channel(settings.clone());
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let handle = spawn_rss_service(
+            settings,
+            Vec::new(),
+            tx,
+            sync_rx,
+            downloaded_entry_rx,
+            settings_rx,
+            shutdown_tx.clone(),
+        );
+
+        sync_tx.send(()).await.expect("send sync trigger");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = shutdown_tx.send(());
+
+        let join_result = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(
+            join_result.is_ok(),
+            "shutdown should interrupt in-flight sync without waiting for request timeout"
+        );
+
+        server.abort();
     }
 
     #[tokio::test]

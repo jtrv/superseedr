@@ -82,7 +82,7 @@ fn map_key_to_rss_action(
         KeyCode::Tab => Some(RssAction::FocusNext),
         KeyCode::Char('s') => Some(RssAction::TriggerSync),
         KeyCode::Char('a') => Some(RssAction::AddEntry),
-        KeyCode::Char('d') => Some(RssAction::DeleteEntry),
+        KeyCode::Char('D') => Some(RssAction::DeleteEntry),
         KeyCode::Char(' ') => Some(RssAction::ToggleFeedEnabled),
         KeyCode::Char('/') => Some(RssAction::StartSearch),
         KeyCode::Char('Y') => Some(RssAction::DownloadSelectedExplorer),
@@ -545,7 +545,7 @@ fn execute_rss_effects(
                             .is_some()
                         {
                             app_state.ui.rss.delete_confirm_armed = true;
-                            set_rss_status(app_state, "Press Shift+Y to confirm delete");
+                            set_rss_status(app_state, "Press Y to confirm delete");
                         }
                     }
                     RssSectionFocus::Filters => {
@@ -556,7 +556,7 @@ fn execute_rss_effects(
                         .is_some()
                         {
                             app_state.ui.rss.delete_confirm_armed = true;
-                            set_rss_status(app_state, "Press Shift+Y to confirm delete");
+                            set_rss_status(app_state, "Press Y to confirm delete");
                         }
                     }
                     RssSectionFocus::Explorer => {}
@@ -829,7 +829,7 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     };
 
     if app_state.ui.rss.delete_confirm_armed {
-        push_action("Shift+Y", "confirm-delete", ctx.state_error());
+        push_action("Y", "confirm-delete", ctx.state_error());
         push_action("Esc", "cancel", ctx.state_selected());
     } else if app_state.ui.rss.is_editing {
         push_action("Enter", "save", ctx.state_success());
@@ -848,17 +848,17 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
             RssScreen::Unified => match app_state.ui.rss.focused_section {
                 RssSectionFocus::Links => {
                     push_action("a", "dd", ctx.state_success());
-                    push_action("d", "elete", ctx.state_error());
+                    push_action("D", "elete", ctx.state_error());
                     push_action("Space", "toggle", ctx.state_info());
                 }
                 RssSectionFocus::Filters => {
                     push_action("a", "dd", ctx.state_success());
-                    push_action("d", "elete", ctx.state_error());
+                    push_action("D", "elete", ctx.state_error());
                     push_action("Space", "toggle", ctx.state_info());
                 }
                 RssSectionFocus::Explorer => {
                     push_action("/", "search", ctx.accent_sapphire());
-                    push_action("Shift+Y", "download", ctx.state_success());
+                    push_action("Y", "download", ctx.state_success());
                 }
             },
             RssScreen::History => {}
@@ -962,7 +962,7 @@ fn draw_delete_confirm_dialog(f: &mut Frame, area: Rect, screen: &ScreenContext<
 
     let actions = Line::from(vec![
         Span::styled(
-            "[Shift+Y]",
+            "[Y]",
             ctx.apply(Style::default().fg(ctx.state_success()).bold()),
         ),
         Span::raw(" Confirm  "),
@@ -2543,8 +2543,8 @@ mod tests {
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Char('d'),
-                ratatui::crossterm::event::KeyModifiers::NONE,
+                KeyCode::Char('D'),
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
             )),
             &mut app_state,
             &settings,
@@ -2585,8 +2585,8 @@ mod tests {
 
         handle_event(
             CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
-                KeyCode::Char('d'),
-                ratatui::crossterm::event::KeyModifiers::NONE,
+                KeyCode::Char('D'),
+                ratatui::crossterm::event::KeyModifiers::SHIFT,
             )),
             &mut app_state,
             &settings,
