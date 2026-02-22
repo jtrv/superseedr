@@ -549,7 +549,10 @@ fn execute_rss_effects(
             }
             RssAction::AddEntry => {
                 if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
-                    && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
+                    && matches!(
+                        app_state.ui.rss.focused_section,
+                        RssSectionFocus::Links | RssSectionFocus::Filters
+                    )
                 {
                     app_state.ui.rss.is_editing = true;
                     app_state.ui.rss.edit_buffer.clear();
@@ -2434,6 +2437,30 @@ mod tests {
             RssFilterMode::Fuzzy
         ));
         assert!(app_state.ui.rss.status_message.is_none());
+    }
+
+    #[test]
+    fn add_entry_from_links_starts_editing() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Links;
+        let settings = crate::config::Settings::default();
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(app_state.ui.rss.is_editing);
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Editing new entry")
+        );
     }
 
     #[test]
