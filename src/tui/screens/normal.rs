@@ -4138,17 +4138,21 @@ mod tests {
 
     #[test]
     fn block_stream_download_inflow_hidden_when_download_is_complete() {
-        let mut metrics = TorrentMetrics::default();
-        metrics.number_of_pieces_total = 10;
-        metrics.number_of_pieces_completed = 10;
+        let metrics = TorrentMetrics {
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            ..Default::default()
+        };
         assert!(!should_render_download_inflow(&metrics));
     }
 
     #[test]
     fn block_stream_download_inflow_visible_when_download_is_incomplete() {
-        let mut metrics = TorrentMetrics::default();
-        metrics.number_of_pieces_total = 10;
-        metrics.number_of_pieces_completed = 9;
+        let metrics = TorrentMetrics {
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 9,
+            ..Default::default()
+        };
         assert!(should_render_download_inflow(&metrics));
     }
 
