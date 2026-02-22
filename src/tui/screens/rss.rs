@@ -1960,8 +1960,8 @@ fn draw_history(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
             Line::from(format!(
                 "{} | {} | {}",
                 human_readable_history_time(&entry.date_iso),
-                src,
-                entry.title
+                entry.title,
+                src
             ))
         })
         .collect();
