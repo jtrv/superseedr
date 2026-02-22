@@ -2378,10 +2378,11 @@ fn draw_vertical_block_stream_panel(
     if area.width < 2 || area.height < 2 {
         return;
     }
+    let title_color = block_stream_title_color(app_state, ctx);
     let block = Block::default()
         .title(Span::styled(
             "Blocks",
-            ctx.apply(Style::default().fg(ctx.theme.scale.stream.inflow)),
+            ctx.apply(Style::default().fg(title_color)),
         ))
         .borders(Borders::ALL)
         .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
@@ -2390,34 +2391,83 @@ fn draw_vertical_block_stream_panel(
     draw_vertical_block_stream_content(f, app_state, inner, ctx);
 }
 
+fn block_stream_title_color(app_state: &AppState, ctx: &ThemeContext) -> Color {
+    let torrent = app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash));
+
+    let Some(torrent) = torrent else {
+        return ctx.theme.semantic.border;
+    };
+
+    let dl = torrent.latest_state.blocks_in_this_tick;
+    let ul = torrent.latest_state.blocks_out_this_tick;
+    if dl == 0 && ul == 0 {
+        ctx.theme.semantic.border
+    } else if dl >= ul {
+        ctx.theme.scale.stream.inflow
+    } else {
+        ctx.theme.scale.stream.outflow
+    }
+}
+
 fn draw_disk_health_panel(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     if area.width < 2 || area.height < 2 {
         return;
     }
-    let disk_theme_color = ctx.ui_disk_blob();
-    let disk_state_word = match app_state.disk_health_state_level {
-        0 => "Stable",
-        1 => "Busy",
-        2 => "Strain",
-        _ => "Chaos",
-    };
+    let disk_state_word = disk_health_state_word(app_state.disk_health_state_level);
+    let border_color = disk_health_border_color(ctx, app_state.disk_health_state_level);
+    let title_color = disk_health_title_color(ctx, app_state.disk_health_state_level);
     let block = Block::default()
         .title_top(Span::styled(
             "Disk",
-            ctx.apply(Style::default().fg(disk_theme_color).bold()),
+            ctx.apply(Style::default().fg(title_color).bold()),
         ))
         .title_top(
             Line::from(Span::styled(
                 disk_state_word,
-                ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ctx.apply(Style::default().fg(title_color).bold()),
             ))
             .alignment(Alignment::Right),
         )
         .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+        .border_style(ctx.apply(Style::default().fg(border_color)));
     let inner = block.inner(area);
     f.render_widget(block, area);
     draw_disk_health_orb(f, app_state, inner, ctx);
+}
+
+fn disk_health_state_word(state_level: u8) -> &'static str {
+    match state_level {
+        0 => "Stable",
+        1 => "Busy",
+        2 => "Strain",
+        _ => "Chaos",
+    }
+}
+
+fn disk_health_status_color(ctx: &ThemeContext, state_level: u8) -> Color {
+    match state_level {
+        0 => Color::Reset,
+        1 => ctx.state_info(),
+        2 => ctx.state_warning(),
+        _ => ctx.state_error(),
+    }
+}
+
+fn disk_health_title_color(ctx: &ThemeContext, state_level: u8) -> Color {
+    match state_level {
+        0 => Color::Reset,
+        _ => disk_health_status_color(ctx, state_level),
+    }
+}
+
+fn disk_health_border_color(ctx: &ThemeContext, state_level: u8) -> Color {
+    match state_level {
+        0 => ctx.theme.semantic.border,
+        _ => disk_health_status_color(ctx, state_level),
+    }
 }
 
 fn compute_throughput_gap(app_state: &AppState) -> f64 {
@@ -2439,13 +2489,13 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         .disk_health_ema
         .max(app_state.disk_health_peak_hold)
         .clamp(0.0, 1.0);
+    let deform_profile = disk_health_deform_profile(app_state.disk_health_state_level);
     let gap = compute_throughput_gap(app_state);
     let phase = app_state.disk_health_phase;
 
-    let orb_color = ctx.ui_disk_blob();
-    let orb_style = if health > 0.70 {
-        ctx.apply(Style::default().fg(orb_color).bold())
-    } else if health > 0.35 {
+    let orb_color = disk_health_status_color(ctx, app_state.disk_health_state_level);
+    let has_iops_activity = app_state.read_iops > 0 || app_state.write_iops > 0;
+    let orb_style = if has_iops_activity {
         ctx.apply(Style::default().fg(orb_color))
     } else {
         ctx.apply(Style::default().fg(orb_color).dim())
@@ -2482,19 +2532,29 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
                     let nx = ((px / cells_w as f64) - 0.5) * 2.0;
                     let ny = ((py / cells_h as f64) - 0.5) * 2.0;
 
-                    let squeeze = if nx > 0.0 { 1.0 - (0.35 * gap) } else { 1.0 };
-                    let x = nx / squeeze.max(0.35);
+                    // Keep gap-driven deformation centered by applying horizontal squeeze symmetrically.
+                    let squeeze = (1.0 - (0.22 * gap)).max(0.35);
+                    let x = nx / squeeze;
                     // Terminal cells are usually taller than they are wide; compensate to keep a round shape.
                     let y = ny * (cells_w as f64 / cells_h as f64).clamp(0.6, 1.8) * 2.0;
                     let theta = y.atan2(x);
                     let dist = (x * x + y * y).sqrt();
 
-                    let deform = (0.04 + 0.18 * health) * f64::sin(2.0 * theta + phase)
-                        + (0.02 + 0.10 * health) * f64::sin(3.0 * theta - 0.7 * phase);
+                    let deform = (deform_profile.low_freq_base
+                        + deform_profile.low_freq_health_scale * health)
+                        * f64::sin(deform_profile.low_freq_wave * theta + phase)
+                        + (deform_profile.high_freq_base
+                            + deform_profile.high_freq_health_scale * health)
+                            * f64::sin(
+                                deform_profile.high_freq_wave * theta
+                                    - deform_profile.high_freq_phase_scale * phase,
+                            );
                     let edge = 0.96 + deform;
 
                     // Render as a solid blob (no hollow shell look).
-                    let fill_factor = (1.02 - 0.04 * health).clamp(0.94, 1.02);
+                    let fill_factor = (deform_profile.fill_base
+                        - deform_profile.fill_health_scale * health)
+                        .clamp(0.90, 1.03);
                     let in_blob = dist <= edge * fill_factor;
 
                     if in_blob {
@@ -2512,6 +2572,72 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     }
 
     f.render_widget(Paragraph::new(lines), orb_area);
+}
+
+#[derive(Clone, Copy)]
+struct DiskDeformProfile {
+    low_freq_base: f64,
+    low_freq_health_scale: f64,
+    low_freq_wave: f64,
+    high_freq_base: f64,
+    high_freq_health_scale: f64,
+    high_freq_wave: f64,
+    high_freq_phase_scale: f64,
+    fill_base: f64,
+    fill_health_scale: f64,
+}
+
+fn disk_health_deform_profile(state_level: u8) -> DiskDeformProfile {
+    match state_level {
+        // Stable: calm and rounded.
+        0 => DiskDeformProfile {
+            low_freq_base: 0.03,
+            low_freq_health_scale: 0.12,
+            low_freq_wave: 2.0,
+            high_freq_base: 0.015,
+            high_freq_health_scale: 0.05,
+            high_freq_wave: 3.0,
+            high_freq_phase_scale: 0.6,
+            fill_base: 1.02,
+            fill_health_scale: 0.03,
+        },
+        // Busy: moderate wobble, still relatively smooth.
+        1 => DiskDeformProfile {
+            low_freq_base: 0.04,
+            low_freq_health_scale: 0.16,
+            low_freq_wave: 2.0,
+            high_freq_base: 0.02,
+            high_freq_health_scale: 0.09,
+            high_freq_wave: 3.2,
+            high_freq_phase_scale: 0.75,
+            fill_base: 1.01,
+            fill_health_scale: 0.04,
+        },
+        // Strain: sharper and more turbulent silhouette.
+        2 => DiskDeformProfile {
+            low_freq_base: 0.06,
+            low_freq_health_scale: 0.24,
+            low_freq_wave: 2.4,
+            high_freq_base: 0.04,
+            high_freq_health_scale: 0.14,
+            high_freq_wave: 4.4,
+            high_freq_phase_scale: 1.00,
+            fill_base: 0.99,
+            fill_health_scale: 0.05,
+        },
+        // Chaos: most unstable / jagged.
+        _ => DiskDeformProfile {
+            low_freq_base: 0.08,
+            low_freq_health_scale: 0.30,
+            low_freq_wave: 2.8,
+            high_freq_base: 0.05,
+            high_freq_health_scale: 0.18,
+            high_freq_wave: 5.2,
+            high_freq_phase_scale: 1.20,
+            fill_base: 0.97,
+            fill_health_scale: 0.06,
+        },
+    }
 }
 
 fn draw_vertical_block_stream_content(
@@ -2673,18 +2799,20 @@ fn draw_vertical_block_stream_content(
             let total_scaled_blocks_f64 = (larger_stream_count + smaller_stream_count) as f64;
             let ratio_smaller = smaller_stream_count as f64 / total_scaled_blocks_f64;
             let smaller_first: bool = order_rng.random_bool(1.0 - ratio_smaller);
+            let smaller_stay_probability = (idle_slow_probability * 3.0_f64).clamp(0.0, 1.0);
+            let larger_stay_probability = (idle_slow_probability * 0.35_f64).clamp(0.0, 1.0);
             let mut slow_rng = StdRng::seed_from_u64(
                 frame_seed
                     ^ (dl_slice_index as u64).rotate_left(7)
                     ^ (ul_slice_index as u64).rotate_right(11)
                     ^ 0xAC71_4D2F,
             );
-            let smaller_seed = if slow_rng.random_bool(idle_slow_probability) {
+            let smaller_seed = if slow_rng.random_bool(smaller_stay_probability) {
                 smaller_seed_salt
             } else {
                 frame_seed ^ smaller_seed_salt
             };
-            let larger_seed = if slow_rng.random_bool(idle_slow_probability) {
+            let larger_seed = if slow_rng.random_bool(larger_stay_probability) {
                 larger_seed_salt
             } else {
                 frame_seed ^ larger_seed_salt
@@ -3738,6 +3866,7 @@ mod tests {
         TorrentMetrics,
     };
     use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
+    use crate::theme::{Theme, ThemeContext, ThemeName};
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
         let mut metrics = TorrentMetrics::default();
@@ -4095,6 +4224,46 @@ mod tests {
     }
 
     #[test]
+    fn block_stream_title_color_is_neutral_without_activity() {
+        let app_state = create_test_app_state();
+        let ctx = ThemeContext::new(app_state.theme, 0.0);
+        assert_eq!(
+            block_stream_title_color(&app_state, &ctx),
+            ctx.theme.semantic.border
+        );
+    }
+
+    #[test]
+    fn block_stream_title_color_prefers_download_when_dominant() {
+        let mut app_state = create_test_app_state();
+        let selected = app_state.torrent_list_order[app_state.ui.selected_torrent_index].clone();
+        if let Some(torrent) = app_state.torrents.get_mut(&selected) {
+            torrent.latest_state.blocks_in_this_tick = 7;
+            torrent.latest_state.blocks_out_this_tick = 2;
+        }
+        let ctx = ThemeContext::new(app_state.theme, 0.0);
+        assert_eq!(
+            block_stream_title_color(&app_state, &ctx),
+            ctx.theme.scale.stream.inflow
+        );
+    }
+
+    #[test]
+    fn block_stream_title_color_prefers_upload_when_dominant() {
+        let mut app_state = create_test_app_state();
+        let selected = app_state.torrent_list_order[app_state.ui.selected_torrent_index].clone();
+        if let Some(torrent) = app_state.torrents.get_mut(&selected) {
+            torrent.latest_state.blocks_in_this_tick = 1;
+            torrent.latest_state.blocks_out_this_tick = 9;
+        }
+        let ctx = ThemeContext::new(app_state.theme, 0.0);
+        assert_eq!(
+            block_stream_title_color(&app_state, &ctx),
+            ctx.theme.scale.stream.outflow
+        );
+    }
+
+    #[test]
     fn block_stream_download_inflow_hidden_when_download_is_complete() {
         let metrics = TorrentMetrics {
             number_of_pieces_total: 10,
@@ -4112,6 +4281,49 @@ mod tests {
             ..Default::default()
         };
         assert!(should_render_download_inflow(&metrics));
+    }
+
+    #[test]
+    fn disk_health_status_color_uses_state_slots_across_themes() {
+        for theme_name in ThemeName::sorted_for_ui() {
+            let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
+            assert_eq!(disk_health_status_color(&ctx, 0), Color::Reset);
+            assert_eq!(disk_health_status_color(&ctx, 1), ctx.state_info());
+            assert_eq!(disk_health_status_color(&ctx, 2), ctx.state_warning());
+            assert_eq!(disk_health_status_color(&ctx, 3), ctx.state_error());
+            assert_eq!(disk_health_status_color(&ctx, 255), ctx.state_error());
+        }
+    }
+
+    #[test]
+    fn disk_health_title_color_keeps_stable_readable_and_maps_alerts() {
+        for theme_name in ThemeName::sorted_for_ui() {
+            let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
+            assert_eq!(disk_health_title_color(&ctx, 0), Color::Reset);
+            assert_eq!(disk_health_title_color(&ctx, 1), ctx.state_info());
+            assert_eq!(disk_health_title_color(&ctx, 2), ctx.state_warning());
+            assert_eq!(disk_health_title_color(&ctx, 3), ctx.state_error());
+        }
+    }
+
+    #[test]
+    fn disk_health_border_color_uses_normal_border_for_stable() {
+        for theme_name in ThemeName::sorted_for_ui() {
+            let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
+            assert_eq!(disk_health_border_color(&ctx, 0), ctx.theme.semantic.border);
+            assert_eq!(disk_health_border_color(&ctx, 1), ctx.state_info());
+            assert_eq!(disk_health_border_color(&ctx, 2), ctx.state_warning());
+            assert_eq!(disk_health_border_color(&ctx, 3), ctx.state_error());
+        }
+    }
+
+    #[test]
+    fn disk_health_state_word_maps_levels() {
+        assert_eq!(disk_health_state_word(0), "Stable");
+        assert_eq!(disk_health_state_word(1), "Busy");
+        assert_eq!(disk_health_state_word(2), "Strain");
+        assert_eq!(disk_health_state_word(3), "Chaos");
+        assert_eq!(disk_health_state_word(9), "Chaos");
     }
 
     #[test]
