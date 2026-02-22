@@ -1607,10 +1607,19 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
             style,
         )])));
     }
+    if items.is_empty() && is_creating_filter {
+        let draft = app_state.ui.rss.edit_buffer.trim();
+        if !draft.is_empty() {
+            items.push(ListItem::new(Line::from(vec![Span::styled(
+                format!("[new] {}", draft),
+                ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
+            )])));
+        }
+    }
     let rows_ms = rows_start.elapsed().as_millis();
     let mut state = ListState::default();
-    if !sorted_indices.is_empty() {
-        state.select(Some(selected.min(sorted_indices.len() - 1)));
+    if !items.is_empty() {
+        state.select(Some(selected.min(items.len() - 1)));
     }
     let highlight_style = if active {
         screen
