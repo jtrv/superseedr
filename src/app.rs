@@ -1150,9 +1150,8 @@ impl App {
     }
 
     fn refresh_system_warning(&mut self) {
-        self.app_state.system_warning = compose_system_warning(
-            self.base_system_warning.as_deref(),
-            {
+        self.app_state.system_warning =
+            compose_system_warning(self.base_system_warning.as_deref(), {
                 #[cfg(feature = "dht")]
                 {
                     self.dht_bootstrap_warning.as_deref()
@@ -1161,8 +1160,7 @@ impl App {
                 {
                     None
                 }
-            },
-        );
+            });
     }
 
     #[cfg(feature = "dht")]
@@ -1202,9 +1200,8 @@ impl App {
                 let new_dht_handle = new_dht_server.as_async();
                 self.distributed_hash_table = new_dht_handle.clone();
                 for manager_tx in self.torrent_manager_command_txs.values() {
-                    let _ = manager_tx.try_send(ManagerCommand::UpdateDhtHandle(
-                        new_dht_handle.clone(),
-                    ));
+                    let _ = manager_tx
+                        .try_send(ManagerCommand::UpdateDhtHandle(new_dht_handle.clone()));
                 }
                 self.dht_bootstrap_warning = None;
                 self.refresh_system_warning();
