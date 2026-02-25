@@ -885,7 +885,7 @@ impl App {
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
         let persisted_rss_state = load_rss_state();
 
-        let tuning_controller = TuningController::new_fixed(limits.clone());
+        let tuning_controller = TuningController::new_adaptive(limits.clone());
         let tuning_state = tuning_controller.state().clone();
         let app_state = AppState {
             system_warning: None,

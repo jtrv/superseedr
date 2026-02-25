@@ -13,6 +13,19 @@ pub(crate) const BASELINE_ALPHA: f64 = 0.1;
 pub(crate) const REALITY_CHECK_FACTOR: f64 = 2.0;
 pub(crate) const DEFAULT_TUNING_CADENCE_SECS: u64 = 90;
 pub(crate) const DEFAULT_TUNING_LOOKBACK_SECS: usize = 60;
+pub(crate) const MIN_TUNING_CADENCE_SECS: u64 = 15;
+pub(crate) const MAX_TUNING_CADENCE_SECS: u64 = 180;
+pub(crate) const FAST_START_CADENCE_SECS: u64 = 20;
+pub(crate) const FAST_START_CYCLES: u8 = 3;
+pub(crate) const MIN_TUNING_LOOKBACK_SECS: usize = 15;
+pub(crate) const MAX_TUNING_LOOKBACK_SECS: usize = 60;
+const LOOKBACK_RATIO: f64 = 0.7;
+const IMPROVEMENT_SPEEDUP_FACTOR: f64 = 0.85;
+const STAGNATION_BACKOFF_FACTOR: f64 = 1.6;
+const REGRESSION_SPEEDUP_FACTOR: f64 = 0.5;
+const STAGNATION_BACKOFF_START_CYCLES: u32 = 2;
+const RAPID_REGRESSION_RATIO: f64 = 0.90;
+const PENALTY_SPIKE_DELTA: f64 = 0.25;
 
 pub(crate) const MIN_PEERS: usize = 20;
 pub(crate) const MIN_DISK: usize = 2;
@@ -44,6 +57,10 @@ pub(crate) struct TuningController {
     cadence_secs: u64,
     lookback_secs: usize,
     countdown_secs: u64,
+    adaptive_enabled: bool,
+    stagnation_cycles: u32,
+    fast_start_cycles_remaining: u8,
+    last_penalty_factor: Option<f64>,
     state: TuningState,
 }
 
@@ -53,6 +70,24 @@ impl TuningController {
             cadence_secs: DEFAULT_TUNING_CADENCE_SECS,
             lookback_secs: DEFAULT_TUNING_LOOKBACK_SECS,
             countdown_secs: DEFAULT_TUNING_CADENCE_SECS,
+            adaptive_enabled: false,
+            stagnation_cycles: 0,
+            fast_start_cycles_remaining: 0,
+            last_penalty_factor: None,
+            state: TuningState::new(initial_limits),
+        }
+    }
+
+    pub(crate) fn new_adaptive(initial_limits: CalculatedLimits) -> Self {
+        let cadence_secs = FAST_START_CADENCE_SECS;
+        Self {
+            cadence_secs,
+            lookback_secs: derive_lookback_secs(cadence_secs),
+            countdown_secs: cadence_secs,
+            adaptive_enabled: true,
+            stagnation_cycles: 0,
+            fast_start_cycles_remaining: FAST_START_CYCLES,
+            last_penalty_factor: None,
             state: TuningState::new(initial_limits),
         }
     }
@@ -82,6 +117,14 @@ impl TuningController {
         self.state.current_tuning_score = 0;
         self.state.baseline_speed_ema = 0.0;
         self.state.last_tuning_limits = current_limits.clone();
+        self.stagnation_cycles = 0;
+        self.last_penalty_factor = None;
+        if self.adaptive_enabled {
+            self.cadence_secs = FAST_START_CADENCE_SECS;
+            self.lookback_secs = derive_lookback_secs(self.cadence_secs);
+            self.fast_start_cycles_remaining = FAST_START_CYCLES;
+        }
+        self.countdown_secs = self.cadence_secs;
     }
 
     pub(crate) fn update_live_score(
@@ -102,7 +145,6 @@ impl TuningController {
         current_scpb: f64,
         scpb_max: f64,
     ) -> TuningEvaluation {
-        self.countdown_secs = self.cadence_secs;
         let score = self.update_live_score(relevant_history, current_scpb, scpb_max);
         let evaluation = evaluate_tuning_cycle_from_score(
             current_limits,
@@ -115,8 +157,75 @@ impl TuningController {
         self.state.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
         self.state.last_tuning_score = evaluation.updated_last_tuning_score;
         self.state.last_tuning_limits = evaluation.updated_last_tuning_limits.clone();
+        self.apply_cadence_policy(&evaluation, score.penalty_factor);
+        self.countdown_secs = self.cadence_secs;
         evaluation
     }
+
+    fn apply_cadence_policy(&mut self, evaluation: &TuningEvaluation, penalty_factor: f64) {
+        if !self.adaptive_enabled {
+            return;
+        }
+
+        let previous_penalty = self.last_penalty_factor.unwrap_or(penalty_factor);
+        let rapid_regression = evaluation.best_score_before > 0
+            && (evaluation.new_score as f64)
+                < ((evaluation.best_score_before as f64) * RAPID_REGRESSION_RATIO);
+        let penalty_spike = penalty_factor > (previous_penalty + PENALTY_SPIKE_DELTA);
+
+        if evaluation.accepted_improvement {
+            self.stagnation_cycles = 0;
+            self.cadence_secs = scaled_cadence(
+                self.cadence_secs,
+                IMPROVEMENT_SPEEDUP_FACTOR,
+                ScaleDirection::Down,
+            );
+        } else if rapid_regression || penalty_spike {
+            self.stagnation_cycles = 0;
+            self.cadence_secs = scaled_cadence(
+                self.cadence_secs,
+                REGRESSION_SPEEDUP_FACTOR,
+                ScaleDirection::Down,
+            );
+        } else {
+            self.stagnation_cycles = self.stagnation_cycles.saturating_add(1);
+            if self.stagnation_cycles >= STAGNATION_BACKOFF_START_CYCLES {
+                self.cadence_secs = scaled_cadence(
+                    self.cadence_secs,
+                    STAGNATION_BACKOFF_FACTOR,
+                    ScaleDirection::Up,
+                );
+            }
+        }
+
+        if self.fast_start_cycles_remaining > 0 {
+            self.cadence_secs = self.cadence_secs.min(FAST_START_CADENCE_SECS);
+            self.fast_start_cycles_remaining = self.fast_start_cycles_remaining.saturating_sub(1);
+        }
+
+        self.lookback_secs = derive_lookback_secs(self.cadence_secs);
+        self.last_penalty_factor = Some(penalty_factor);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ScaleDirection {
+    Up,
+    Down,
+}
+
+fn scaled_cadence(cadence_secs: u64, factor: f64, direction: ScaleDirection) -> u64 {
+    let scaled = match direction {
+        ScaleDirection::Up => (cadence_secs as f64 * factor).ceil() as u64,
+        ScaleDirection::Down => (cadence_secs as f64 * factor).floor() as u64,
+    };
+    scaled.clamp(MIN_TUNING_CADENCE_SECS, MAX_TUNING_CADENCE_SECS)
+}
+
+fn derive_lookback_secs(cadence_secs: u64) -> usize {
+    let derived = ((cadence_secs as f64) * LOOKBACK_RATIO).round() as usize;
+    let clamped = derived.clamp(MIN_TUNING_LOOKBACK_SECS, MAX_TUNING_LOOKBACK_SECS);
+    clamped.min(cadence_secs as usize)
 }
 
 pub(crate) fn normalize_limits_for_mode(
@@ -797,5 +906,72 @@ mod tests {
             controller.state().last_tuning_limits.max_connected_peers,
             limits.max_connected_peers
         );
+    }
+
+    #[test]
+    fn adaptive_controller_starts_fast_with_linked_lookback() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let controller = TuningController::new_adaptive(limits);
+        assert_eq!(controller.cadence_secs(), FAST_START_CADENCE_SECS);
+        assert!(controller.lookback_secs() <= controller.cadence_secs() as usize);
+        assert_eq!(controller.countdown_secs(), FAST_START_CADENCE_SECS);
+    }
+
+    #[test]
+    fn adaptive_controller_backs_off_after_stagnation() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_adaptive(limits.clone());
+
+        let history_good = [40_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_good, 8.0, 10.0);
+        let cadence_after_accept = controller.cadence_secs();
+
+        let history_same = [40_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_same, 8.0, 10.0);
+        let cadence_after_first_stall = controller.cadence_secs();
+
+        let _ = controller.evaluate_cycle(&limits, &history_same, 8.0, 10.0);
+        let cadence_after_second_stall = controller.cadence_secs();
+
+        assert!(cadence_after_accept <= FAST_START_CADENCE_SECS);
+        assert!(cadence_after_accept >= MIN_TUNING_CADENCE_SECS);
+        assert_eq!(cadence_after_first_stall, cadence_after_accept);
+        assert!(cadence_after_second_stall > cadence_after_first_stall);
+    }
+
+    #[test]
+    fn adaptive_controller_speeds_up_on_rapid_regression() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_adaptive(limits.clone());
+
+        let history_good = [50_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_good, 8.0, 10.0);
+
+        let history_same = [50_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_same, 8.0, 10.0);
+        let _ = controller.evaluate_cycle(&limits, &history_same, 8.0, 10.0);
+        let cadence_before_drop = controller.cadence_secs();
+
+        let history_drop = [10_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_drop, 8.0, 10.0);
+        let cadence_after_drop = controller.cadence_secs();
+
+        assert!(cadence_before_drop > MIN_TUNING_CADENCE_SECS);
+        assert!(cadence_after_drop < cadence_before_drop);
     }
 }
