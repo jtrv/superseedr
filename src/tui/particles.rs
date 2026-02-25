@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use ratatui::prelude::{Color, Frame};
+use std::f64::consts::TAU;
 
 use crate::theme::{
     blend_colors, color_to_rgb, ParticleProfile, ThemeContext, ThemeParticleEffect,
@@ -111,6 +112,7 @@ fn sample_particle(
             glow,
             underlying_fg,
         ),
+        ParticleProfile::Diamond => sample_diamond(ctx, x, y, width, height, phase, density, glow),
         ParticleProfile::BioluminescentReef => sample_bioluminescent_reef(
             ctx,
             x,
@@ -124,6 +126,144 @@ fn sample_particle(
         ),
         ParticleProfile::None => None,
     }
+}
+
+fn sample_diamond(
+    ctx: &ThemeContext,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    phase: f64,
+    density: f64,
+    glow: f64,
+) -> Option<(&'static str, Color)> {
+    let w = width.max(2.0);
+    let h = height.max(2.0);
+    let nx = x / (w - 1.0);
+    let ny = y / (h - 1.0);
+    let drift_x = (phase * 1.18) + ((ny * 6.0) + phase * 0.33).sin() * 0.35;
+    let drift_y = (phase * 0.52) + ((nx * 4.4) - phase * 0.27).cos() * 0.22;
+    let field_x = x - drift_x;
+    let field_y = y + drift_y;
+    let density_bias = (1.0 - density).clamp(0.0, 1.0);
+
+    // Rare large 3x3 facets for noticeable size variation.
+    let huge_x = (field_x / 3.0).floor();
+    let huge_y = (field_y / 3.0).floor();
+    let huge_seed = hash01(huge_x, huge_y, 0.0, 739.0);
+    let huge_cluster = (((huge_x * 0.26) + (huge_y * 0.17) + phase * 0.04).sin() * 0.5) + 0.5;
+    if huge_seed > 0.92 + density_bias * 0.06 && huge_cluster > 0.61 {
+        let huge_twinkle = ((phase * 0.56) + (huge_seed * TAU)).sin() * 0.5 + 0.5;
+        let huge_depth = (((nx * 1.7) + (ny * 1.5) - phase * 0.02).cos() * 0.5) + 0.5;
+        let huge_base = if huge_twinkle > 0.64 {
+            ctx.theme.semantic.white
+        } else if huge_depth > 0.52 {
+            ctx.theme.scale.categorical.sky
+        } else {
+            ctx.theme.scale.categorical.sapphire
+        };
+        let huge_shine = (0.10 + huge_twinkle * 0.26 + huge_cluster * 0.10).clamp(0.0, 0.46);
+        return Some((
+            "=",
+            glow_color(
+                huge_base,
+                ctx.theme.semantic.white,
+                (glow * huge_shine).clamp(0.0, 0.46),
+            ),
+        ));
+    }
+
+    // Medium 2x2 facets.
+    let big_x = (field_x / 2.0).floor();
+    let big_y = (field_y / 2.0).floor();
+    let big_seed = hash01(big_x, big_y, 0.0, 743.0);
+    let big_cluster = (((big_x * 0.33) + (big_y * 0.19) + phase * 0.06).sin() * 0.5) + 0.5;
+    if big_seed > 0.82 + density_bias * 0.12 && big_cluster > 0.58 {
+        let big_twinkle = ((phase * 0.62) + (big_seed * TAU)).sin() * 0.5 + 0.5;
+        let big_depth = (((nx * 2.1) + (ny * 1.9) - phase * 0.03).cos() * 0.5) + 0.5;
+        let big_base = if big_twinkle > 0.66 {
+            ctx.theme.semantic.white
+        } else if big_depth > 0.54 {
+            ctx.theme.scale.categorical.sky
+        } else {
+            ctx.theme.scale.categorical.sapphire
+        };
+        let big_shine = (0.08 + big_twinkle * 0.24 + big_cluster * 0.08).clamp(0.0, 0.42);
+        return Some((
+            "=",
+            glow_color(
+                big_base,
+                ctx.theme.semantic.white,
+                (glow * big_shine).clamp(0.0, 0.42),
+            ),
+        ));
+    }
+
+    // Coarse lattice with per-cell jitter keeps placement visibly uneven.
+    let grid_band = hash01(0.0, (field_y / 6.0).floor(), 0.0, 757.0);
+    let grid_w = if grid_band > 0.55 { 7.0 } else { 10.0 };
+    let grid_h = if grid_band > 0.55 { 3.0 } else { 5.0 };
+    let gx = (field_x / grid_w).floor();
+    let gy = (field_y / grid_h).floor();
+    let cell_seed = hash01(gx, gy, 0.0, 701.0);
+    if cell_seed < 0.52 + density_bias * 0.30 {
+        return None;
+    }
+
+    let twinkle_phase = (phase * (0.70 + cell_seed * 0.45)) + (cell_seed * TAU);
+    let center_x = ((gx + 0.5) * grid_w)
+        + (hash01(gx, gy, 0.0, 709.0) - 0.5) * 1.8
+        + twinkle_phase.sin() * 0.28;
+    let center_y = ((gy + 0.5) * grid_h)
+        + (hash01(gx, gy, 0.0, 719.0) - 0.5) * 1.3
+        + (twinkle_phase * 0.9).cos() * 0.20;
+    let dx = x - center_x;
+    let dy = y - center_y;
+    let dist = (dx * dx + dy * dy).sqrt();
+
+    let size_seed = hash01(gx, gy, 0.0, 727.0);
+    let radius = 0.58 + size_seed * 1.05;
+    if dist > radius {
+        return None;
+    }
+
+    // Slower twinkle than drift, with lane motifs that form --==-- and --==.
+    let twinkle = ((phase * 1.10) + (cell_seed * TAU)).sin() * 0.5 + 0.5;
+    let edge_falloff = (1.0 - (dist / radius)).clamp(0.0, 1.0);
+    let lane = (field_y / 2.0).floor();
+    let motif_seed = hash01(gx, gy, 0.0, 761.0);
+    let motif_len = if motif_seed > 0.54 { 6 } else { 4 };
+    let motif_idx = ((field_x + lane * 0.7 + phase * 1.6).floor() as i32).rem_euclid(motif_len);
+    let motif_core = match motif_len {
+        6 => matches!(motif_idx, 2 | 3), // --==--
+        _ => motif_idx >= 2,             // --==
+    };
+    let glyph = if (edge_falloff > 0.82 && twinkle > 0.76) || (motif_core && twinkle > 0.68) {
+        "="
+    } else {
+        "-"
+    };
+
+    let depth_band = (((nx * 3.4) + (ny * 2.8) - phase * 0.04).sin() * 0.5) + 0.5;
+    let base = if twinkle > 0.68 {
+        ctx.theme.semantic.white
+    } else if depth_band > 0.52 {
+        ctx.theme.scale.categorical.sky
+    } else {
+        ctx.theme.scale.categorical.sapphire
+    };
+    let highlight = glow_color(
+        ctx.theme.semantic.white,
+        ctx.theme.scale.categorical.sky,
+        0.14,
+    );
+    let shine = (0.04 + edge_falloff * 0.11 + twinkle * 0.20).clamp(0.0, 0.34);
+
+    Some((
+        glyph,
+        glow_color(base, highlight, (glow * shine).clamp(0.0, 0.34)),
+    ))
 }
 
 fn sample_sakura(
@@ -272,48 +412,80 @@ fn sample_bioluminescent_reef(
     let h = height.max(2.0);
     let nx = x / (w - 1.0);
     let ny = y / (h - 1.0);
+    let area_scale = ((w * h) / 10_000.0).sqrt().clamp(0.85, 1.6);
 
-    // Slow multi-layer drift suggests plankton depth and current.
-    let drift_x = x - (phase * 0.9) + ((ny * 9.0) + phase * 0.25).sin() * 1.4;
-    let drift_y = y + (phase * 0.45) + ((nx * 7.0) - phase * 0.22).cos() * 0.9;
-    let field_a = ((drift_x * 0.16) + (drift_y * 0.11)).sin().abs();
-    let field_b = ((drift_x * 0.07) - (drift_y * 0.19) + phase * 0.31)
+    // Use a low-frequency cluster mask so particles form patches instead of uniform noise.
+    let current_x = x - (phase * 0.82)
+        + ((ny * 8.0) + phase * 0.21).sin() * 1.2
+        + ((ny * 2.9) - phase * 0.09).cos() * 0.5;
+    let current_y = y
+        + (phase * 0.46)
+        + ((nx * 7.0) - phase * 0.19).cos() * 0.85
+        + ((nx * 3.3) + phase * 0.12).sin() * 0.45;
+    let field_a = ((current_x * 0.16) + (current_y * 0.10) + phase * 0.04)
+        .sin()
+        .abs();
+    let field_b = ((current_x * 0.06) - (current_y * 0.14) + phase * 0.30)
         .cos()
         .abs();
-    let field = (field_a * 0.62) + (field_b * 0.38);
+    let eddy = (((nx * 10.0) - (ny * 7.0) + phase * 0.35).sin() * 0.5) + 0.5;
+    let field = (field_a * 0.45) + (field_b * 0.30) + (eddy * 0.25);
+    let cell_w = (11.0 * area_scale).max(7.0);
+    let cell_h = (6.5 * area_scale).max(5.0);
+    let cx = (x / cell_w).floor();
+    let cy = (y / cell_h).floor();
+    let cell_seed = hash01(cx, cy, 0.0, 311.0);
+    let jitter_x = (hash01(cx, cy, 0.0, 313.0) - 0.5) * cell_w * 0.55;
+    let jitter_y = (hash01(cx, cy, 0.0, 317.0) - 0.5) * cell_h * 0.50;
+    let center_x = ((cx + 0.5) * cell_w) + jitter_x + phase * (0.06 + cell_seed * 0.03);
+    let center_y = ((cy + 0.5) * cell_h) + jitter_y + phase * (0.03 + cell_seed * 0.02);
+    let dx = x - center_x;
+    let dy = y - center_y;
+    let dist = (dx * dx + dy * dy).sqrt();
+    let radius = (1.0 + (cell_seed * 2.8)) * area_scale;
+    let blob = (1.0 - (dist / radius)).clamp(0.0, 1.0);
+    let cluster_a = (((nx * 4.0) - (ny * 2.7) + phase * 0.10).sin() * 0.5) + 0.5;
+    let cluster_b = (((nx * 2.0) + (ny * 2.2) - phase * 0.07).cos() * 0.5) + 0.5;
+    let cluster_mask = (blob * 0.62) + (cluster_a * 0.23) + (cluster_b * 0.15);
 
-    let sparse = hash01(drift_x, drift_y, phase, 149.0);
-    let threshold = 0.92 + ((1.0 - density).clamp(0.0, 1.0) * 0.06);
-    if field < threshold || sparse < 0.58 {
+    let sparkle_seed = hash01(current_x * 0.77, current_y * 0.91, 0.0, 149.0);
+    let pulse = ((phase * 0.24) + (sparkle_seed * TAU)).sin() * 0.5 + 0.5;
+    let threshold = 0.88 + ((1.0 - density).clamp(0.0, 1.0) * 0.06) - (pulse * 0.03);
+    if field < threshold || cluster_mask < 0.50 || sparkle_seed < 0.54 {
         return None;
     }
 
-    let pick = hash01(x, y, phase, 163.0);
-    let glyph = if pick > 0.88 {
+    let pick = hash01(x, y, 0.0, 163.0);
+    let glyph = if blob > 0.78 && pick > 0.74 {
+        "•"
+    } else if blob > 0.56 && pick > 0.62 {
         "·"
-    } else if pick > 0.64 {
+    } else if pick > 0.88 {
+        "·"
+    } else if pick > 0.56 {
         "."
-    } else if pick > 0.40 {
+    } else if pick > 0.28 {
         "•"
     } else {
-        "·"
+        "∙"
     };
 
-    let depth = hash01(x * 0.41, y * 0.73, phase, 173.0);
-    let base = if depth > 0.88 {
+    let depth = hash01(x * 0.41, y * 0.73, 0.0, 173.0);
+    let base = if depth > 0.85 {
         ctx.theme.scale.categorical.sky
-    } else if depth > 0.62 {
+    } else if depth > 0.56 {
         ctx.theme.scale.categorical.teal
     } else {
         ctx.theme.scale.categorical.green
     };
+    let shimmer = (0.04 + depth * 0.10 + pulse * 0.07 + eddy * 0.05 + blob * 0.06).clamp(0.0, 0.22);
 
     Some((
         glyph,
         glow_color(
             base,
             ctx.theme.semantic.white,
-            (glow * (0.10 + depth * 0.18)).clamp(0.0, 0.30),
+            (glow * shimmer).clamp(0.0, 0.22),
         ),
     ))
 }

@@ -417,6 +417,7 @@ pub enum ParticleProfile {
     None,
     Sakura,
     Matrix,
+    Diamond,
     BioluminescentReef,
 }
 
@@ -3315,7 +3316,14 @@ impl Theme {
                 wave_wavelength: 52.0,
                 wave_angle_degrees: 74.0,
                 wave_mode: WaveMode::Linear,
-                particle: ThemeParticleEffect::default(),
+                particle: ThemeParticleEffect {
+                    enabled: true,
+                    layer_mode: ParticleLayerMode::Background,
+                    profile: ParticleProfile::Diamond,
+                    density: 0.006,
+                    speed: 23.4,
+                    intensity: 0.52,
+                },
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(228, 240, 255),
@@ -3408,9 +3416,9 @@ impl Theme {
                     enabled: true,
                     layer_mode: ParticleLayerMode::Background,
                     profile: ParticleProfile::BioluminescentReef,
-                    density: 0.017,
-                    speed: 0.24,
-                    intensity: 0.58,
+                    density: 0.024,
+                    speed: 0.42,
+                    intensity: 0.72,
                 },
             },
             semantic: ThemeSemantic {
@@ -3923,6 +3931,7 @@ mod tests {
     fn test_particle_themes_enable_particle_profiles() {
         let sakura = Theme::builtin(ThemeName::Sakura);
         let matrix = Theme::builtin(ThemeName::Matrix);
+        let diamond = Theme::builtin(ThemeName::Diamond);
         let reef = Theme::builtin(ThemeName::BioluminescentReef);
 
         assert!(sakura.effects.particle.enabled);
@@ -3936,6 +3945,13 @@ mod tests {
         assert_eq!(matrix.effects.particle.profile, ParticleProfile::Matrix);
         assert_eq!(
             matrix.effects.particle.layer_mode,
+            ParticleLayerMode::Background
+        );
+
+        assert!(diamond.effects.particle.enabled);
+        assert_eq!(diamond.effects.particle.profile, ParticleProfile::Diamond);
+        assert_eq!(
+            diamond.effects.particle.layer_mode,
             ParticleLayerMode::Background
         );
 
