@@ -25,9 +25,15 @@ const STAGNATION_BACKOFF_FACTOR: f64 = 1.6;
 const REGRESSION_SPEEDUP_FACTOR: f64 = 0.5;
 const STAGNATION_BACKOFF_START_CYCLES: u32 = 2;
 const RAPID_REGRESSION_RATIO: f64 = 0.90;
+const SEVERE_REGRESSION_RATIO: f64 = 0.75;
 const PENALTY_SPIKE_DELTA: f64 = 0.25;
 const CADENCE_CHANGE_PRESSURE_TRIGGER: u8 = 4;
 const CADENCE_CHANGE_PRESSURE_DECAY: u8 = 1;
+const HIGH_NOISE_REL_STDDEV: f64 = 0.25;
+const REGRESSION_SPEEDUP_BUDGET_CYCLES: u8 = 3;
+const MIN_CADENCE_NO_IMPROVEMENT_BACKOFF_CYCLES: u32 = 3;
+const STALE_BEST_DECAY_START_CYCLES: u32 = 6;
+const STALE_BEST_DECAY_FACTOR: f64 = 0.97;
 
 pub(crate) const MIN_PEERS: usize = 20;
 pub(crate) const MIN_DISK: usize = 2;
@@ -61,7 +67,9 @@ pub(crate) struct TuningController {
     countdown_secs: u64,
     adaptive_enabled: bool,
     stagnation_cycles: u32,
+    no_improvement_cycles: u32,
     fast_start_cycles_remaining: u8,
+    regression_speedup_budget_remaining: u8,
     last_penalty_factor: Option<f64>,
     cadence_change_pressure: u8,
     state: TuningState,
@@ -75,7 +83,9 @@ impl TuningController {
             countdown_secs: DEFAULT_TUNING_CADENCE_SECS,
             adaptive_enabled: false,
             stagnation_cycles: 0,
+            no_improvement_cycles: 0,
             fast_start_cycles_remaining: 0,
+            regression_speedup_budget_remaining: 0,
             last_penalty_factor: None,
             cadence_change_pressure: 0,
             state: TuningState::new(initial_limits),
@@ -90,7 +100,9 @@ impl TuningController {
             countdown_secs: cadence_secs,
             adaptive_enabled: true,
             stagnation_cycles: 0,
+            no_improvement_cycles: 0,
             fast_start_cycles_remaining: FAST_START_CYCLES,
+            regression_speedup_budget_remaining: REGRESSION_SPEEDUP_BUDGET_CYCLES,
             last_penalty_factor: None,
             cadence_change_pressure: 0,
             state: TuningState::new(initial_limits),
@@ -123,12 +135,14 @@ impl TuningController {
         self.state.baseline_speed_ema = 0.0;
         self.state.last_tuning_limits = current_limits.clone();
         self.stagnation_cycles = 0;
+        self.no_improvement_cycles = 0;
         self.last_penalty_factor = None;
         self.cadence_change_pressure = 0;
         if self.adaptive_enabled {
             self.cadence_secs = FAST_START_CADENCE_SECS;
             self.lookback_secs = derive_lookback_secs(self.cadence_secs);
             self.fast_start_cycles_remaining = FAST_START_CYCLES;
+            self.regression_speedup_budget_remaining = REGRESSION_SPEEDUP_BUDGET_CYCLES;
         }
         self.countdown_secs = self.cadence_secs;
     }
@@ -163,45 +177,73 @@ impl TuningController {
         self.state.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
         self.state.last_tuning_score = evaluation.updated_last_tuning_score;
         self.state.last_tuning_limits = evaluation.updated_last_tuning_limits.clone();
-        self.apply_cadence_policy(&evaluation, score.penalty_factor);
+        self.apply_cadence_policy(&evaluation, score.penalty_factor, relevant_history);
         self.countdown_secs = self.cadence_secs;
         evaluation
     }
 
-    fn apply_cadence_policy(&mut self, evaluation: &TuningEvaluation, penalty_factor: f64) {
+    fn apply_cadence_policy(
+        &mut self,
+        evaluation: &TuningEvaluation,
+        penalty_factor: f64,
+        relevant_history: &[u64],
+    ) {
         if !self.adaptive_enabled {
             return;
         }
 
         let previous_penalty = self.last_penalty_factor.unwrap_or(penalty_factor);
         let previous_cadence = self.cadence_secs;
+        let rel_stddev = relative_stddev(relevant_history);
+        let high_noise = rel_stddev >= HIGH_NOISE_REL_STDDEV;
+        let severe_regression = evaluation.best_score_before > 0
+            && (evaluation.new_score as f64)
+                < ((evaluation.best_score_before as f64) * SEVERE_REGRESSION_RATIO);
         let rapid_regression = evaluation.best_score_before > 0
             && (evaluation.new_score as f64)
                 < ((evaluation.best_score_before as f64) * RAPID_REGRESSION_RATIO);
+        let regression_signal = severe_regression || (!high_noise && rapid_regression);
         let penalty_spike = penalty_factor > (previous_penalty + PENALTY_SPIKE_DELTA);
 
         if evaluation.accepted_improvement {
             self.stagnation_cycles = 0;
+            self.no_improvement_cycles = 0;
+            self.regression_speedup_budget_remaining = REGRESSION_SPEEDUP_BUDGET_CYCLES;
             self.cadence_secs = scaled_cadence(
                 self.cadence_secs,
                 IMPROVEMENT_SPEEDUP_FACTOR,
                 ScaleDirection::Down,
             );
-        } else if rapid_regression || penalty_spike {
-            self.stagnation_cycles = 0;
-            self.cadence_secs = scaled_cadence(
-                self.cadence_secs,
-                REGRESSION_SPEEDUP_FACTOR,
-                ScaleDirection::Down,
-            );
         } else {
-            self.stagnation_cycles = self.stagnation_cycles.saturating_add(1);
-            if self.stagnation_cycles >= STAGNATION_BACKOFF_START_CYCLES {
+            self.no_improvement_cycles = self.no_improvement_cycles.saturating_add(1);
+            let can_speedup_regression = self.regression_speedup_budget_remaining > 0;
+            if (regression_signal || penalty_spike) && can_speedup_regression {
+                self.stagnation_cycles = 0;
+                self.regression_speedup_budget_remaining =
+                    self.regression_speedup_budget_remaining.saturating_sub(1);
                 self.cadence_secs = scaled_cadence(
                     self.cadence_secs,
-                    STAGNATION_BACKOFF_FACTOR,
-                    ScaleDirection::Up,
+                    REGRESSION_SPEEDUP_FACTOR,
+                    ScaleDirection::Down,
                 );
+            } else {
+                self.stagnation_cycles = self.stagnation_cycles.saturating_add(1);
+                if self.cadence_secs == MIN_TUNING_CADENCE_SECS
+                    && self.no_improvement_cycles >= MIN_CADENCE_NO_IMPROVEMENT_BACKOFF_CYCLES
+                {
+                    self.cadence_secs = scaled_cadence(
+                        self.cadence_secs,
+                        STAGNATION_BACKOFF_FACTOR,
+                        ScaleDirection::Up,
+                    );
+                    self.stagnation_cycles = 0;
+                } else if self.stagnation_cycles >= STAGNATION_BACKOFF_START_CYCLES {
+                    self.cadence_secs = scaled_cadence(
+                        self.cadence_secs,
+                        STAGNATION_BACKOFF_FACTOR,
+                        ScaleDirection::Up,
+                    );
+                }
             }
         }
 
@@ -227,6 +269,13 @@ impl TuningController {
             self.cadence_change_pressure = self.cadence_change_pressure / 2;
         }
 
+        // Decay stale best score toward baseline after sustained non-improvement.
+        if self.no_improvement_cycles >= STALE_BEST_DECAY_START_CYCLES {
+            let baseline_floor = self.state.baseline_speed_ema as u64;
+            let decayed = (self.state.last_tuning_score as f64 * STALE_BEST_DECAY_FACTOR) as u64;
+            self.state.last_tuning_score = decayed.max(baseline_floor);
+        }
+
         self.lookback_secs = derive_lookback_secs(self.cadence_secs);
         self.last_penalty_factor = Some(penalty_factor);
     }
@@ -250,6 +299,25 @@ fn derive_lookback_secs(cadence_secs: u64) -> usize {
     let derived = ((cadence_secs as f64) * LOOKBACK_RATIO).round() as usize;
     let clamped = derived.clamp(MIN_TUNING_LOOKBACK_SECS, MAX_TUNING_LOOKBACK_SECS);
     clamped.min(cadence_secs as usize)
+}
+
+fn relative_stddev(values: &[u64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mean = values.iter().copied().map(|v| v as f64).sum::<f64>() / values.len() as f64;
+    if mean <= 0.0 {
+        return 0.0;
+    }
+    let var = values
+        .iter()
+        .map(|v| {
+            let dv = *v as f64 - mean;
+            dv * dv
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    var.sqrt() / mean
 }
 
 pub(crate) fn normalize_limits_for_mode(
@@ -1014,5 +1082,57 @@ mod tests {
         let _ = controller.evaluate_cycle(&limits, &history_good, 8.0, 10.0);
         assert!(controller.cadence_secs() > FAST_START_CADENCE_SECS);
         assert!(controller.cadence_change_pressure < CADENCE_CHANGE_PRESSURE_TRIGGER);
+    }
+
+    #[test]
+    fn adaptive_controller_limits_regression_speedups_then_backs_off() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_adaptive(limits.clone());
+
+        let history_good = [50_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_good, 8.0, 10.0);
+        let baseline_cadence = controller.cadence_secs();
+        let history_drop = [10_000u64; 60];
+        let mut saw_backoff = false;
+        let mut previous = baseline_cadence;
+
+        for _ in 0..10 {
+            let _ = controller.evaluate_cycle(&limits, &history_drop, 8.0, 10.0);
+            let current = controller.cadence_secs();
+            if current > previous {
+                saw_backoff = true;
+                break;
+            }
+            previous = current;
+        }
+
+        assert!(saw_backoff);
+    }
+
+    #[test]
+    fn adaptive_controller_decays_stale_best_after_repeated_no_improvement() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_adaptive(limits.clone());
+
+        let history_good = [60_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_good, 8.0, 10.0);
+        let best_before = controller.state().last_tuning_score;
+        let history_worse = [35_000u64; 60];
+
+        for _ in 0..(STALE_BEST_DECAY_START_CYCLES + 1) {
+            let _ = controller.evaluate_cycle(&limits, &history_worse, 8.0, 10.0);
+        }
+
+        assert!(controller.state().last_tuning_score < best_before);
     }
 }
