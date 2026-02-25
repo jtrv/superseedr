@@ -11,12 +11,113 @@ pub(crate) const MIN_STEP_RATE: f64 = 0.01;
 pub(crate) const MAX_STEP_RATE: f64 = 0.10;
 pub(crate) const BASELINE_ALPHA: f64 = 0.1;
 pub(crate) const REALITY_CHECK_FACTOR: f64 = 2.0;
+pub(crate) const DEFAULT_TUNING_CADENCE_SECS: u64 = 90;
+pub(crate) const DEFAULT_TUNING_LOOKBACK_SECS: usize = 60;
 
 pub(crate) const MIN_PEERS: usize = 20;
 pub(crate) const MIN_DISK: usize = 2;
 pub(crate) const MIN_RESERVE: usize = 0;
 
 pub(crate) const MAX_TRADE_ATTEMPTS: usize = 5;
+
+#[derive(Debug, Clone)]
+pub(crate) struct TuningState {
+    pub(crate) last_tuning_score: u64,
+    pub(crate) current_tuning_score: u64,
+    pub(crate) last_tuning_limits: CalculatedLimits,
+    pub(crate) baseline_speed_ema: f64,
+}
+
+impl TuningState {
+    pub(crate) fn new(initial_limits: CalculatedLimits) -> Self {
+        Self {
+            last_tuning_score: 0,
+            current_tuning_score: 0,
+            last_tuning_limits: initial_limits,
+            baseline_speed_ema: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TuningController {
+    cadence_secs: u64,
+    lookback_secs: usize,
+    countdown_secs: u64,
+    state: TuningState,
+}
+
+impl TuningController {
+    pub(crate) fn new_fixed(initial_limits: CalculatedLimits) -> Self {
+        Self {
+            cadence_secs: DEFAULT_TUNING_CADENCE_SECS,
+            lookback_secs: DEFAULT_TUNING_LOOKBACK_SECS,
+            countdown_secs: DEFAULT_TUNING_CADENCE_SECS,
+            state: TuningState::new(initial_limits),
+        }
+    }
+
+    pub(crate) fn cadence_secs(&self) -> u64 {
+        self.cadence_secs
+    }
+
+    pub(crate) fn lookback_secs(&self) -> usize {
+        self.lookback_secs
+    }
+
+    pub(crate) fn countdown_secs(&self) -> u64 {
+        self.countdown_secs
+    }
+
+    pub(crate) fn state(&self) -> &TuningState {
+        &self.state
+    }
+
+    pub(crate) fn on_second_tick(&mut self) {
+        self.countdown_secs = self.countdown_secs.saturating_sub(1);
+    }
+
+    pub(crate) fn reset_for_objective_change(&mut self, current_limits: &CalculatedLimits) {
+        self.state.last_tuning_score = 0;
+        self.state.current_tuning_score = 0;
+        self.state.baseline_speed_ema = 0.0;
+        self.state.last_tuning_limits = current_limits.clone();
+    }
+
+    pub(crate) fn update_live_score(
+        &mut self,
+        relevant_history: &[u64],
+        current_scpb: f64,
+        scpb_max: f64,
+    ) -> TuningScore {
+        let live_score = compute_tuning_score(relevant_history, current_scpb, scpb_max);
+        self.state.current_tuning_score = live_score.new_score;
+        live_score
+    }
+
+    pub(crate) fn evaluate_cycle(
+        &mut self,
+        current_limits: &CalculatedLimits,
+        relevant_history: &[u64],
+        current_scpb: f64,
+        scpb_max: f64,
+    ) -> TuningEvaluation {
+        self.countdown_secs = self.cadence_secs;
+        let score = self.update_live_score(relevant_history, current_scpb, scpb_max);
+        let evaluation = evaluate_tuning_cycle_from_score(
+            current_limits,
+            &self.state.last_tuning_limits,
+            self.state.last_tuning_score,
+            self.state.baseline_speed_ema,
+            score,
+        );
+
+        self.state.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
+        self.state.last_tuning_score = evaluation.updated_last_tuning_score;
+        self.state.last_tuning_limits = evaluation.updated_last_tuning_limits.clone();
+        evaluation
+    }
+}
 
 pub(crate) fn normalize_limits_for_mode(
     limits: &CalculatedLimits,
@@ -39,7 +140,9 @@ pub(crate) fn normalize_limits_for_mode(
     }
 
     // Downloading mode: keep total disk budget, targeting 30% read / 70% write.
-    let disk_budget = limits.disk_read_permits.saturating_add(limits.disk_write_permits);
+    let disk_budget = limits
+        .disk_read_permits
+        .saturating_add(limits.disk_write_permits);
     let read_slots = disk_budget.saturating_mul(30) / 100;
     let write_slots = disk_budget.saturating_sub(read_slots);
     CalculatedLimits {
@@ -281,8 +384,12 @@ mod tests {
 
     impl SyntheticWorkload {
         fn sample(&self, limits: &CalculatedLimits) -> (u64, f64) {
-            let peer_delta = limits.max_connected_peers.abs_diff(self.optimum.max_connected_peers);
-            let read_delta = limits.disk_read_permits.abs_diff(self.optimum.disk_read_permits);
+            let peer_delta = limits
+                .max_connected_peers
+                .abs_diff(self.optimum.max_connected_peers);
+            let read_delta = limits
+                .disk_read_permits
+                .abs_diff(self.optimum.disk_read_permits);
             let write_delta = limits
                 .disk_write_permits
                 .abs_diff(self.optimum.disk_write_permits);
@@ -399,16 +506,29 @@ mod tests {
         };
         let result = simulate_tuning_cycles(initial_limits, 500, 7, &workload);
 
-        assert!(result.best_score > 100_000, "Expected strong improvement in best score");
         assert!(
-            result.best_limits.max_connected_peers.abs_diff(workload.optimum.max_connected_peers)
+            result.best_score > 100_000,
+            "Expected strong improvement in best score"
+        );
+        assert!(
+            result
+                .best_limits
+                .max_connected_peers
+                .abs_diff(workload.optimum.max_connected_peers)
                 <= 12
         );
         assert!(
-            result.best_limits.disk_read_permits.abs_diff(workload.optimum.disk_read_permits) <= 4
+            result
+                .best_limits
+                .disk_read_permits
+                .abs_diff(workload.optimum.disk_read_permits)
+                <= 4
         );
         assert!(
-            result.best_limits.disk_write_permits.abs_diff(workload.optimum.disk_write_permits)
+            result
+                .best_limits
+                .disk_write_permits
+                .abs_diff(workload.optimum.disk_write_permits)
                 <= 4
         );
     }
@@ -443,7 +563,10 @@ mod tests {
             eval.effective_limits.max_connected_peers,
             good_limits.max_connected_peers
         );
-        assert_eq!(eval.effective_limits.disk_read_permits, good_limits.disk_read_permits);
+        assert_eq!(
+            eval.effective_limits.disk_read_permits,
+            good_limits.disk_read_permits
+        );
         assert_eq!(
             eval.effective_limits.disk_write_permits,
             good_limits.disk_write_permits
@@ -610,5 +733,69 @@ mod tests {
         assert_eq!(before_disk_total, after_disk_total);
         assert_eq!(normalized.disk_read_permits, 6);
         assert_eq!(normalized.disk_write_permits, 16);
+    }
+
+    #[test]
+    fn tuning_controller_fixed_policy_uses_default_lookback_and_countdown() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_fixed(limits);
+        assert_eq!(controller.cadence_secs(), DEFAULT_TUNING_CADENCE_SECS);
+        assert_eq!(controller.lookback_secs(), DEFAULT_TUNING_LOOKBACK_SECS);
+        assert_eq!(controller.countdown_secs(), DEFAULT_TUNING_CADENCE_SECS);
+
+        controller.on_second_tick();
+        assert_eq!(
+            controller.countdown_secs(),
+            DEFAULT_TUNING_CADENCE_SECS.saturating_sub(1)
+        );
+    }
+
+    #[test]
+    fn tuning_controller_objective_reset_clears_scores_and_ema() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_fixed(limits.clone());
+        let history = [30_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history, 12.0, 10.0);
+        assert!(controller.state().current_tuning_score > 0);
+
+        controller.reset_for_objective_change(&limits);
+        assert_eq!(controller.state().last_tuning_score, 0);
+        assert_eq!(controller.state().current_tuning_score, 0);
+        assert_eq!(controller.state().baseline_speed_ema, 0.0);
+    }
+
+    #[test]
+    fn tuning_controller_evaluate_cycle_resets_countdown_and_tracks_best() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_fixed(limits.clone());
+        controller.on_second_tick();
+        controller.on_second_tick();
+        assert_eq!(controller.countdown_secs(), DEFAULT_TUNING_CADENCE_SECS - 2);
+
+        let strong_history = [40_000u64; 60];
+        let eval = controller.evaluate_cycle(&limits, &strong_history, 8.0, 10.0);
+
+        assert_eq!(controller.countdown_secs(), DEFAULT_TUNING_CADENCE_SECS);
+        assert!(eval.accepted_improvement);
+        assert_eq!(controller.state().last_tuning_score, eval.new_score);
+        assert_eq!(
+            controller.state().last_tuning_limits.max_connected_peers,
+            limits.max_connected_peers
+        );
     }
 }

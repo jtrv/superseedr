@@ -41,10 +41,7 @@ use crate::resource_manager::ResourceType;
 use crate::telemetry::network_history_telemetry::NetworkHistoryTelemetry;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
-use crate::tuning::{
-    compute_tuning_score, evaluate_tuning_cycle_from_score, make_random_adjustment,
-    normalize_limits_for_mode,
-};
+use crate::tuning::{make_random_adjustment, normalize_limits_for_mode, TuningController};
 
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
@@ -286,7 +283,6 @@ impl CalculatedLimits {
         map
     }
 }
-
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum GraphDisplayMode {
@@ -768,6 +764,7 @@ pub struct App {
     pub tui_task: Option<tokio::task::JoinHandle<()>>,
     pub notify_rx: mpsc::Receiver<Result<Event, NotifyError>>,
     pub watcher: RecommendedWatcher,
+    pub tuning_controller: TuningController,
 }
 
 #[derive(Clone)]
@@ -888,6 +885,8 @@ impl App {
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
         let persisted_rss_state = load_rss_state();
 
+        let tuning_controller = TuningController::new_fixed(limits.clone());
+        let tuning_state = tuning_controller.state().clone();
         let app_state = AppState {
             system_warning: None,
             system_error: None,
@@ -916,10 +915,11 @@ impl App {
             lifetime_uploaded_from_config: client_configs.lifetime_uploaded,
             minute_disk_backoff_history_ms: VecDeque::with_capacity(24 * 60),
             max_disk_backoff_this_tick_ms: 0,
-            last_tuning_score: 0,
-            current_tuning_score: 0,
-            tuning_countdown: 90,
-            last_tuning_limits: limits.clone(),
+            last_tuning_score: tuning_state.last_tuning_score,
+            current_tuning_score: tuning_state.current_tuning_score,
+            tuning_countdown: tuning_controller.cadence_secs(),
+            last_tuning_limits: tuning_state.last_tuning_limits,
+            baseline_speed_ema: tuning_state.baseline_speed_ema,
             adaptive_max_scpb: 10.0,
             ..Default::default()
         };
@@ -956,6 +956,7 @@ impl App {
             tui_task: None,
             watcher,
             notify_rx,
+            tuning_controller,
         };
         app.refresh_system_warning();
 
@@ -1025,7 +1026,8 @@ impl App {
         let mut sys = System::new();
 
         let mut stats_interval = time::interval(Duration::from_secs(1));
-        let mut tuning_interval = time::interval(Duration::from_secs(90));
+        let mut tuning_interval =
+            time::interval(Duration::from_secs(self.tuning_controller.cadence_secs()));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
         let mut network_history_persist_interval = time::interval(Duration::from_secs(15));
@@ -2234,10 +2236,14 @@ impl App {
         let was_seeding = self.app_state.is_seeding;
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
         NetworkHistoryTelemetry::on_second_tick(&mut self.app_state);
+        self.tuning_controller.on_second_tick();
+        self.app_state.tuning_countdown = self.tuning_controller.countdown_secs();
         if was_seeding != self.app_state.is_seeding {
             self.app_state.limits =
                 normalize_limits_for_mode(&self.app_state.limits, self.app_state.is_seeding);
-            self.app_state.last_tuning_limits = self.app_state.limits.clone();
+            self.tuning_controller
+                .reset_for_objective_change(&self.app_state.limits);
+            self.sync_tuning_state_from_controller();
 
             let rm = self.resource_manager.clone();
             let limits_map = self.app_state.limits.clone().into_map();
@@ -2251,13 +2257,14 @@ impl App {
         } else {
             &self.app_state.avg_upload_history
         };
-        let relevant_history = &history[history.len().saturating_sub(60)..];
-        let live_score = compute_tuning_score(
+        let lookback = self.tuning_controller.lookback_secs();
+        let relevant_history = &history[history.len().saturating_sub(lookback)..];
+        self.tuning_controller.update_live_score(
             relevant_history,
             self.app_state.global_disk_thrash_score,
             self.app_state.adaptive_max_scpb,
         );
-        self.app_state.current_tuning_score = live_score.new_score;
+        self.sync_tuning_state_from_controller();
     }
 
     fn startup_network_history_restore(&self) {
@@ -2310,31 +2317,21 @@ impl App {
     }
 
     async fn tuning_resource_limits(&mut self) {
-        self.app_state.tuning_countdown = 90;
         let history = if !self.app_state.is_seeding {
             &self.app_state.avg_download_history
         } else {
             &self.app_state.avg_upload_history
         };
 
-        let relevant_history = &history[history.len().saturating_sub(60)..];
-        let score = compute_tuning_score(
+        let lookback = self.tuning_controller.lookback_secs();
+        let relevant_history = &history[history.len().saturating_sub(lookback)..];
+        let evaluation = self.tuning_controller.evaluate_cycle(
+            &self.app_state.limits,
             relevant_history,
             self.app_state.global_disk_thrash_score,
             self.app_state.adaptive_max_scpb,
         );
-        self.app_state.current_tuning_score = score.new_score;
-        let evaluation = evaluate_tuning_cycle_from_score(
-            &self.app_state.limits,
-            &self.app_state.last_tuning_limits,
-            self.app_state.last_tuning_score,
-            self.app_state.baseline_speed_ema,
-            score,
-        );
-
-        self.app_state.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
-        self.app_state.last_tuning_score = evaluation.updated_last_tuning_score;
-        self.app_state.last_tuning_limits = evaluation.updated_last_tuning_limits.clone();
+        self.sync_tuning_state_from_controller();
 
         if evaluation.accepted_improvement {
             tracing_event!(
@@ -2367,6 +2364,15 @@ impl App {
             .resource_manager
             .update_limits(self.app_state.limits.clone().into_map())
             .await;
+    }
+
+    fn sync_tuning_state_from_controller(&mut self) {
+        let state = self.tuning_controller.state();
+        self.app_state.last_tuning_score = state.last_tuning_score;
+        self.app_state.current_tuning_score = state.current_tuning_score;
+        self.app_state.last_tuning_limits = state.last_tuning_limits.clone();
+        self.app_state.baseline_speed_ema = state.baseline_speed_ema;
+        self.app_state.tuning_countdown = self.tuning_controller.countdown_secs();
     }
 
     fn save_state_to_disk(&mut self) {
@@ -3589,13 +3595,12 @@ mod tests {
     use super::{
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
         flush_persistence_writer_parts, parse_hybrid_hashes,
-        persisted_validation_status_from_piece_completion,
-        prune_rss_feed_errors, queue_persistence_payload, resolve_magnet_torrent_name,
-        rss_settings_changed, should_persist_network_history_on_interval, App, AppMode, AppState,
-        FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
-        TorrentDisplayState, TorrentMetrics, TorrentSortColumn, UiState,
-        sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete,
+        persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
+        queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
+        should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
+        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppMode, AppState,
+        FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection, TorrentDisplayState,
+        TorrentMetrics, TorrentSortColumn, UiState,
     };
     use std::collections::HashMap;
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
@@ -3888,15 +3893,14 @@ mod tests {
         let mut network_history_state =
             crate::persistence::network_history::NetworkHistoryPersistedState::default();
         network_history_state.updated_at_unix = 42;
-        network_history_state
-            .tiers
-            .second_1s
-            .push(crate::persistence::network_history::NetworkHistoryPoint {
+        network_history_state.tiers.second_1s.push(
+            crate::persistence::network_history::NetworkHistoryPoint {
                 ts_unix: 41,
                 download_bps: 1000,
                 upload_bps: 100,
                 backoff_ms_max: 0,
-            });
+            },
+        );
 
         let payload = PersistPayload {
             settings: crate::config::Settings::default(),
@@ -3921,9 +3925,7 @@ mod tests {
     #[tokio::test]
     async fn flush_persistence_writer_parts_drops_sender_and_joins_task() {
         let (tx, mut rx) = tokio::sync::watch::channel::<Option<PersistPayload>>(None);
-        let task = tokio::spawn(async move {
-            while rx.changed().await.is_ok() {}
-        });
+        let task = tokio::spawn(async move { while rx.changed().await.is_ok() {} });
 
         let mut tx_opt = Some(tx);
         let mut task_opt = Some(task);
@@ -3932,5 +3934,4 @@ mod tests {
         assert!(tx_opt.is_none());
         assert!(task_opt.is_none());
     }
-
 }

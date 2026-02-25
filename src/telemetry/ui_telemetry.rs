@@ -395,13 +395,9 @@ impl UiTelemetry {
         if is_seeding != app_state.is_seeding {
             tracing_event!(
                 Level::DEBUG,
-                "Self-Tune: Objective changed to {}. Resetting score.",
+                "Self-Tune: Objective changed to {}.",
                 if is_seeding { "Seeding" } else { "Leeching" }
             );
-            app_state.last_tuning_score = 0;
-            app_state.current_tuning_score = 0;
-            app_state.baseline_speed_ema = 0.0;
-            app_state.last_tuning_limits = app_state.limits.clone();
 
             if is_seeding {
                 app_state.torrent_sort = (TorrentSortColumn::Up, SortDirection::Descending);
@@ -412,7 +408,6 @@ impl UiTelemetry {
             }
         }
         app_state.is_seeding = is_seeding;
-        app_state.tuning_countdown = app_state.tuning_countdown.saturating_sub(1);
     }
 }
 
@@ -573,6 +568,7 @@ mod tests {
         UiTelemetry,
     };
     use crate::app::{AppState, PeerInfo, TorrentDisplayState, TorrentMetrics};
+    use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
     use crate::telemetry::manager_telemetry::ManagerTelemetry;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -810,12 +806,9 @@ mod tests {
     }
 
     #[test]
-    fn objective_switch_resets_tuning_ema_and_scores() {
+    fn objective_switch_updates_mode_and_sorting() {
         let mut app_state = AppState {
             is_seeding: true,
-            last_tuning_score: 1234,
-            current_tuning_score: 987,
-            baseline_speed_ema: 4321.0,
             ..Default::default()
         };
 
@@ -828,8 +821,13 @@ mod tests {
         UiTelemetry::on_second_tick(&mut app_state, &mut sys);
 
         assert!(!app_state.is_seeding);
-        assert_eq!(app_state.last_tuning_score, 0);
-        assert_eq!(app_state.current_tuning_score, 0);
-        assert_eq!(app_state.baseline_speed_ema, 0.0);
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Down, SortDirection::Descending)
+        );
+        assert_eq!(
+            app_state.peer_sort,
+            (PeerSortColumn::DL, SortDirection::Descending)
+        );
     }
 }
