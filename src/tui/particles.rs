@@ -139,16 +139,18 @@ fn sample_sakura(
     let palette = [
         ctx.theme.scale.categorical.pink,
         ctx.theme.scale.categorical.pink,
+        ctx.theme.scale.categorical.pink,
         ctx.theme.scale.categorical.flamingo,
         ctx.theme.scale.categorical.rosewater,
+        ctx.theme.scale.categorical.flamingo,
     ];
     let mut base = palette[(pick * palette.len() as f64) as usize % palette.len()];
     if reactive_tint && !matches!(underlying_fg, Color::Reset) {
-        base = glow_color(base, underlying_fg, 0.10);
+        base = glow_color(base, underlying_fg, 0.08);
     }
     Some((
         glyph,
-        glow_color(base, ctx.theme.semantic.white, glow * 0.11),
+        glow_color(base, ctx.theme.semantic.white, glow * 0.10),
     ))
 }
 

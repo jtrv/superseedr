@@ -3436,20 +3436,20 @@ impl Theme {
 
     pub fn sakura() -> Self {
         let categorical = ThemeCategorical {
-            rosewater: Color::Rgb(255, 236, 244),
-            flamingo: Color::Rgb(250, 207, 224),
-            pink: Color::Rgb(244, 174, 205),
-            mauve: Color::Rgb(214, 160, 198),
-            red: Color::Rgb(201, 118, 141),
-            maroon: Color::Rgb(151, 98, 84),
-            peach: Color::Rgb(224, 165, 145),
-            yellow: Color::Rgb(236, 211, 174),
-            green: Color::Rgb(152, 188, 156),
-            teal: Color::Rgb(128, 182, 189),
-            sky: Color::Rgb(145, 196, 236),
-            sapphire: Color::Rgb(116, 171, 214),
-            blue: Color::Rgb(98, 145, 196),
-            lavender: Color::Rgb(198, 188, 226),
+            rosewater: Color::Rgb(255, 240, 246),
+            flamingo: Color::Rgb(255, 188, 220),
+            pink: Color::Rgb(255, 142, 198),
+            mauve: Color::Rgb(228, 154, 199),
+            red: Color::Rgb(214, 102, 138),
+            maroon: Color::Rgb(133, 84, 66),
+            peach: Color::Rgb(191, 138, 112),
+            yellow: Color::Rgb(234, 204, 163),
+            green: Color::Rgb(154, 184, 154),
+            teal: Color::Rgb(128, 174, 176),
+            sky: Color::Rgb(139, 186, 228),
+            sapphire: Color::Rgb(111, 162, 206),
+            blue: Color::Rgb(93, 138, 188),
+            lavender: Color::Rgb(208, 184, 230),
         };
 
         Self {
@@ -3466,14 +3466,14 @@ impl Theme {
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
-                text: Color::Rgb(248, 241, 245),
-                subtext1: Color::Rgb(222, 204, 212),
-                subtext0: Color::Rgb(188, 165, 171),
-                overlay0: Color::Rgb(128, 105, 112),
-                surface2: Color::Rgb(96, 76, 88),
-                surface1: Color::Rgb(73, 55, 67),
-                surface0: Color::Rgb(52, 38, 49),
-                border: Color::Rgb(162, 135, 122),
+                text: Color::Rgb(255, 214, 236),
+                subtext1: Color::Rgb(245, 182, 214),
+                subtext0: Color::Rgb(222, 149, 178),
+                overlay0: Color::Rgb(176, 108, 130),
+                surface2: Color::Rgb(121, 76, 82),
+                surface1: Color::Rgb(95, 57, 63),
+                surface0: Color::Rgb(74, 43, 49),
+                border: Color::Rgb(186, 118, 104),
                 white: Color::White,
             },
             scale: ThemeScale {
