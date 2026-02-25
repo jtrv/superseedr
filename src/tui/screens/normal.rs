@@ -18,9 +18,9 @@ use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
-    format_latency, format_limit_bps, format_memory,
-    format_speed, format_time, generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text,
-    speed_to_style, truncate_with_ellipsis,
+    format_latency, format_limit_bps, format_memory, format_speed, format_time,
+    generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
+    truncate_with_ellipsis,
 };
 use crate::tui::layout::common::compute_smart_table_layout;
 use crate::tui::layout::common::compute_visible_peer_columns;
@@ -1491,7 +1491,11 @@ pub fn draw_network_chart(
         | GraphDisplayMode::TenMinutes
         | GraphDisplayMode::ThirtyMinutes
         | GraphDisplayMode::OneHour => (
-            app_state.graph_mode.as_seconds().min(SECONDS_HISTORY_MAX).max(1),
+            app_state
+                .graph_mode
+                .as_seconds()
+                .min(SECONDS_HISTORY_MAX)
+                .max(1),
             1_u64,
             &app_state.network_history_state.tiers.second_1s,
         ),
@@ -1504,13 +1508,21 @@ pub fn draw_network_chart(
             60_u64,
             &app_state.network_history_state.tiers.minute_1m,
         ),
-        GraphDisplayMode::SevenDays => (7 * 24 * 4, 15 * 60_u64, &app_state.network_history_state.tiers.minute_15m),
+        GraphDisplayMode::SevenDays => (
+            7 * 24 * 4,
+            15 * 60_u64,
+            &app_state.network_history_state.tiers.minute_15m,
+        ),
         GraphDisplayMode::ThirtyDays => (
             30 * 24 * 4,
             15 * 60_u64,
             &app_state.network_history_state.tiers.minute_15m,
         ),
-        GraphDisplayMode::OneYear => (365 * 24, 60 * 60_u64, &app_state.network_history_state.tiers.hour_1h),
+        GraphDisplayMode::OneYear => (
+            365 * 24,
+            60 * 60_u64,
+            &app_state.network_history_state.tiers.hour_1h,
+        ),
     };
 
     let (dl_history_slice, ul_history_slice, backoff_history_relevant_ms) =
@@ -2449,19 +2461,24 @@ pub fn draw_block_stream_and_disk_orb(
         return;
     }
 
+    // Decide split shape using the local pane geometry first; global screen mode can be too coarse
+    // and causes unreadable side-by-side micro-panels at transition widths.
+    let force_stacked = area.width < 34 || area.height > area.width.saturating_mul(2);
     let is_vertical_mode = app_state.screen_area.width < 100
         || (app_state.screen_area.height as f32 > app_state.screen_area.width as f32 * 0.6);
-    if is_vertical_mode {
-        let split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+
+    if !force_stacked && is_vertical_mode {
+        let split = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(area);
         draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
         draw_disk_health_panel(f, app_state, split[1], ctx);
-    } else {
-        let split =
-            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
-        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
-        draw_disk_health_panel(f, app_state, split[1], ctx);
+        return;
     }
+
+    let split =
+        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
+    draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+    draw_disk_health_panel(f, app_state, split[1], ctx);
 }
 
 fn draw_vertical_block_stream_panel(
@@ -2605,7 +2622,8 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let phase = app_state.disk_health_phase;
 
     let orb_color = disk_health_status_color(ctx, app_state.disk_health_state_level);
-    let has_disk_speed_activity = app_state.avg_disk_read_bps > 0 || app_state.avg_disk_write_bps > 0;
+    let has_disk_speed_activity =
+        app_state.avg_disk_read_bps > 0 || app_state.avg_disk_write_bps > 0;
     let orb_style = if has_disk_speed_activity {
         ctx.apply(Style::default().fg(orb_color))
     } else {
