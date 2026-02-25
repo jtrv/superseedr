@@ -26,6 +26,8 @@ const REGRESSION_SPEEDUP_FACTOR: f64 = 0.5;
 const STAGNATION_BACKOFF_START_CYCLES: u32 = 2;
 const RAPID_REGRESSION_RATIO: f64 = 0.90;
 const PENALTY_SPIKE_DELTA: f64 = 0.25;
+const CADENCE_CHANGE_PRESSURE_TRIGGER: u8 = 4;
+const CADENCE_CHANGE_PRESSURE_DECAY: u8 = 1;
 
 pub(crate) const MIN_PEERS: usize = 20;
 pub(crate) const MIN_DISK: usize = 2;
@@ -61,6 +63,7 @@ pub(crate) struct TuningController {
     stagnation_cycles: u32,
     fast_start_cycles_remaining: u8,
     last_penalty_factor: Option<f64>,
+    cadence_change_pressure: u8,
     state: TuningState,
 }
 
@@ -74,6 +77,7 @@ impl TuningController {
             stagnation_cycles: 0,
             fast_start_cycles_remaining: 0,
             last_penalty_factor: None,
+            cadence_change_pressure: 0,
             state: TuningState::new(initial_limits),
         }
     }
@@ -88,6 +92,7 @@ impl TuningController {
             stagnation_cycles: 0,
             fast_start_cycles_remaining: FAST_START_CYCLES,
             last_penalty_factor: None,
+            cadence_change_pressure: 0,
             state: TuningState::new(initial_limits),
         }
     }
@@ -119,6 +124,7 @@ impl TuningController {
         self.state.last_tuning_limits = current_limits.clone();
         self.stagnation_cycles = 0;
         self.last_penalty_factor = None;
+        self.cadence_change_pressure = 0;
         if self.adaptive_enabled {
             self.cadence_secs = FAST_START_CADENCE_SECS;
             self.lookback_secs = derive_lookback_secs(self.cadence_secs);
@@ -168,6 +174,7 @@ impl TuningController {
         }
 
         let previous_penalty = self.last_penalty_factor.unwrap_or(penalty_factor);
+        let previous_cadence = self.cadence_secs;
         let rapid_regression = evaluation.best_score_before > 0
             && (evaluation.new_score as f64)
                 < ((evaluation.best_score_before as f64) * RAPID_REGRESSION_RATIO);
@@ -201,6 +208,23 @@ impl TuningController {
         if self.fast_start_cycles_remaining > 0 {
             self.cadence_secs = self.cadence_secs.min(FAST_START_CADENCE_SECS);
             self.fast_start_cycles_remaining = self.fast_start_cycles_remaining.saturating_sub(1);
+        }
+
+        // Failsafe: if cadence keeps changing rapidly, force a stabilizing backoff.
+        if self.cadence_secs != previous_cadence {
+            self.cadence_change_pressure = self.cadence_change_pressure.saturating_add(1);
+        } else {
+            self.cadence_change_pressure = self
+                .cadence_change_pressure
+                .saturating_sub(CADENCE_CHANGE_PRESSURE_DECAY);
+        }
+        if self.cadence_change_pressure >= CADENCE_CHANGE_PRESSURE_TRIGGER {
+            self.cadence_secs = scaled_cadence(
+                self.cadence_secs,
+                STAGNATION_BACKOFF_FACTOR,
+                ScaleDirection::Up,
+            );
+            self.cadence_change_pressure = self.cadence_change_pressure / 2;
         }
 
         self.lookback_secs = derive_lookback_secs(self.cadence_secs);
@@ -973,5 +997,22 @@ mod tests {
 
         assert!(cadence_before_drop > MIN_TUNING_CADENCE_SECS);
         assert!(cadence_after_drop < cadence_before_drop);
+    }
+
+    #[test]
+    fn adaptive_controller_forces_backoff_when_change_pressure_is_high() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut controller = TuningController::new_adaptive(limits.clone());
+        controller.cadence_change_pressure = CADENCE_CHANGE_PRESSURE_TRIGGER - 1;
+
+        let history_good = [40_000u64; 60];
+        let _ = controller.evaluate_cycle(&limits, &history_good, 8.0, 10.0);
+        assert!(controller.cadence_secs() > FAST_START_CADENCE_SECS);
+        assert!(controller.cadence_change_pressure < CADENCE_CHANGE_PRESSURE_TRIGGER);
     }
 }
