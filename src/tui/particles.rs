@@ -8,8 +8,8 @@ use crate::theme::{
     blend_colors, color_to_rgb, ParticleProfile, ThemeContext, ThemeParticleEffect,
 };
 
-// Terminal cells are typically taller than wide. Scale Y in radial math so circles render visually circular.
-const BLACK_HOLE_Y_ASPECT: f64 = 0.5;
+// Terminal cells are typically taller than wide. Scale Y up in radial math so circles render visually circular.
+const BLACK_HOLE_Y_ASPECT: f64 = 2.0;
 
 pub(crate) fn apply_theme_particles_background_to_frame(f: &mut Frame, ctx: &ThemeContext) {
     let particle = ctx.theme.effects.particle;
