@@ -3457,10 +3457,10 @@ impl Theme {
             effects: ThemeEffects {
                 particle: ThemeParticleEffect {
                     enabled: true,
-                    layer_mode: ParticleLayerMode::Both,
+                    layer_mode: ParticleLayerMode::Background,
                     profile: ParticleProfile::Sakura,
                     density: 0.020,
-                    speed: 0.9,
+                    speed: 0.68,
                     intensity: 0.75,
                 },
                 ..ThemeEffects::default()
@@ -3908,7 +3908,10 @@ mod tests {
 
         assert!(sakura.effects.particle.enabled);
         assert_eq!(sakura.effects.particle.profile, ParticleProfile::Sakura);
-        assert_eq!(sakura.effects.particle.layer_mode, ParticleLayerMode::Both);
+        assert_eq!(
+            sakura.effects.particle.layer_mode,
+            ParticleLayerMode::Background
+        );
     }
 
     #[test]
