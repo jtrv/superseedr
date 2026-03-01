@@ -3,7 +3,8 @@
 
 use crate::app::AppState;
 use crate::persistence::network_history::{
-    enforce_retention_caps, NetworkHistoryPersistedState, NetworkHistoryPoint,
+    enforce_retention_caps, NetworkHistoryPersistedState, NetworkHistoryPoint, NetworkHistoryTiers,
+    HOUR_1H_CAP, MINUTE_15M_CAP, MINUTE_1M_CAP, SECOND_1S_CAP,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,10 +13,7 @@ pub struct NetworkHistoryTelemetry;
 
 impl NetworkHistoryTelemetry {
     pub fn on_second_tick(app_state: &mut AppState) {
-        let now_unix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_unix = current_unix_time();
         let download_bps = app_state.avg_download_history.last().copied().unwrap_or(0);
         let upload_bps = app_state.avg_upload_history.last().copied().unwrap_or(0);
         let backoff_ms_max = app_state
@@ -35,23 +33,32 @@ impl NetworkHistoryTelemetry {
     }
 
     pub fn apply_loaded_state(app_state: &mut AppState, state: NetworkHistoryPersistedState) {
+        Self::apply_loaded_state_at(app_state, state, current_unix_time());
+    }
+
+    fn apply_loaded_state_at(
+        app_state: &mut AppState,
+        state: NetworkHistoryPersistedState,
+        now_unix: u64,
+    ) {
         let was_dirty = app_state.network_history_dirty;
         let merged = merge_state_for_late_restore(&app_state.network_history_state, state);
+        let densified = densify_state_for_restore(merged, now_unix);
 
-        app_state.avg_download_history = merged
+        app_state.avg_download_history = densified
             .tiers
             .second_1s
             .iter()
             .map(|p| p.download_bps)
             .collect();
-        app_state.avg_upload_history = merged
+        app_state.avg_upload_history = densified
             .tiers
             .second_1s
             .iter()
             .map(|p| p.upload_bps)
             .collect();
         app_state.disk_backoff_history_ms = VecDeque::from(
-            merged
+            densified
                 .tiers
                 .second_1s
                 .iter()
@@ -59,20 +66,20 @@ impl NetworkHistoryTelemetry {
                 .collect::<Vec<_>>(),
         );
 
-        app_state.minute_avg_dl_history = merged
+        app_state.minute_avg_dl_history = densified
             .tiers
             .minute_1m
             .iter()
             .map(|p| p.download_bps)
             .collect();
-        app_state.minute_avg_ul_history = merged
+        app_state.minute_avg_ul_history = densified
             .tiers
             .minute_1m
             .iter()
             .map(|p| p.upload_bps)
             .collect();
         app_state.minute_disk_backoff_history_ms = VecDeque::from(
-            merged
+            densified
                 .tiers
                 .minute_1m
                 .iter()
@@ -80,10 +87,17 @@ impl NetworkHistoryTelemetry {
                 .collect::<Vec<_>>(),
         );
 
-        app_state.network_history_state = merged;
+        app_state.network_history_state = densified;
         // Preserve dirty state if live samples were already pending flush.
         app_state.network_history_dirty = was_dirty;
     }
+}
+
+fn current_unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn merge_tier_points(
@@ -132,9 +146,81 @@ fn merge_state_for_late_restore(
     merged
 }
 
+fn densify_tier_points(
+    points: &[NetworkHistoryPoint],
+    step_secs: u64,
+    max_points: usize,
+    now_unix: u64,
+) -> Vec<NetworkHistoryPoint> {
+    if points.is_empty() || step_secs == 0 || max_points == 0 {
+        return Vec::new();
+    }
+
+    let mut dense = Vec::with_capacity(points.len());
+    let mut prev_ts = points[0].ts_unix;
+    dense.push(points[0].clone());
+
+    for point in &points[1..] {
+        let mut next_ts = prev_ts.saturating_add(step_secs);
+        while next_ts < point.ts_unix {
+            dense.push(NetworkHistoryPoint {
+                ts_unix: next_ts,
+                ..Default::default()
+            });
+            prev_ts = next_ts;
+            next_ts = prev_ts.saturating_add(step_secs);
+        }
+        dense.push(point.clone());
+        prev_ts = point.ts_unix;
+    }
+
+    let mut next_ts = prev_ts.saturating_add(step_secs);
+    while next_ts <= now_unix {
+        dense.push(NetworkHistoryPoint {
+            ts_unix: next_ts,
+            ..Default::default()
+        });
+        prev_ts = next_ts;
+        next_ts = prev_ts.saturating_add(step_secs);
+    }
+
+    if dense.len() > max_points {
+        let overflow = dense.len() - max_points;
+        dense.drain(0..overflow);
+    }
+
+    dense
+}
+
+fn densify_state_for_restore(
+    state: NetworkHistoryPersistedState,
+    now_unix: u64,
+) -> NetworkHistoryPersistedState {
+    let mut dense = NetworkHistoryPersistedState {
+        schema_version: state.schema_version,
+        updated_at_unix: state.updated_at_unix,
+        tiers: NetworkHistoryTiers {
+            second_1s: densify_tier_points(&state.tiers.second_1s, 1, SECOND_1S_CAP, now_unix),
+            minute_1m: densify_tier_points(&state.tiers.minute_1m, 60, MINUTE_1M_CAP, now_unix),
+            minute_15m: densify_tier_points(
+                &state.tiers.minute_15m,
+                15 * 60,
+                MINUTE_15M_CAP,
+                now_unix,
+            ),
+            hour_1h: densify_tier_points(&state.tiers.hour_1h, 60 * 60, HOUR_1H_CAP, now_unix),
+        },
+    };
+    enforce_retention_caps(&mut dense);
+    dense
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{merge_state_for_late_restore, merge_tier_points, NetworkHistoryTelemetry};
+    use super::{
+        densify_state_for_restore, merge_state_for_late_restore, merge_tier_points,
+        NetworkHistoryTelemetry,
+    };
     use crate::app::AppState;
     use crate::persistence::network_history::{NetworkHistoryPersistedState, NetworkHistoryPoint};
     use std::collections::VecDeque;
@@ -195,7 +281,7 @@ mod tests {
             backoff_ms_max: 3,
         });
 
-        NetworkHistoryTelemetry::apply_loaded_state(&mut app_state, loaded);
+        NetworkHistoryTelemetry::apply_loaded_state_at(&mut app_state, loaded, 2);
 
         // ts=2 should come from live value (100), not loaded overlap (150).
         assert_eq!(app_state.avg_download_history, vec![200, 100]);
@@ -227,5 +313,87 @@ mod tests {
         let merged = merge_state_for_late_restore(&live, loaded);
         assert_eq!(merged.tiers.second_1s.len(), 1);
         assert_eq!(merged.tiers.second_1s[0].download_bps, 500);
+    }
+
+    #[test]
+    fn densify_state_for_restore_fills_sparse_second_gaps_and_tail_with_zeros() {
+        let mut sparse = NetworkHistoryPersistedState::default();
+        sparse.tiers.second_1s.push(NetworkHistoryPoint {
+            ts_unix: 1,
+            download_bps: 200,
+            upload_bps: 20,
+            backoff_ms_max: 2,
+        });
+        sparse.tiers.second_1s.push(NetworkHistoryPoint {
+            ts_unix: 3,
+            download_bps: 100,
+            upload_bps: 10,
+            backoff_ms_max: 1,
+        });
+
+        let dense = densify_state_for_restore(sparse, 4);
+        assert_eq!(
+            dense
+                .tiers
+                .second_1s
+                .iter()
+                .map(|p| p.download_bps)
+                .collect::<Vec<_>>(),
+            vec![200, 0, 100, 0]
+        );
+    }
+
+    #[test]
+    fn densify_state_for_restore_fills_sparse_minute_gaps_and_tail_with_zeros() {
+        let mut sparse = NetworkHistoryPersistedState::default();
+        sparse.tiers.minute_1m.push(NetworkHistoryPoint {
+            ts_unix: 60,
+            download_bps: 600,
+            upload_bps: 60,
+            backoff_ms_max: 3,
+        });
+        sparse.tiers.minute_1m.push(NetworkHistoryPoint {
+            ts_unix: 180,
+            download_bps: 300,
+            upload_bps: 30,
+            backoff_ms_max: 1,
+        });
+
+        let dense = densify_state_for_restore(sparse, 240);
+        assert_eq!(
+            dense
+                .tiers
+                .minute_1m
+                .iter()
+                .map(|p| p.download_bps)
+                .collect::<Vec<_>>(),
+            vec![600, 0, 300, 0]
+        );
+    }
+
+    #[test]
+    fn apply_loaded_state_restores_dense_histories_from_sparse_points() {
+        let mut app_state = AppState::default();
+        let mut loaded = NetworkHistoryPersistedState::default();
+        loaded.tiers.second_1s.push(NetworkHistoryPoint {
+            ts_unix: 10,
+            download_bps: 500,
+            upload_bps: 50,
+            backoff_ms_max: 4,
+        });
+        loaded.tiers.second_1s.push(NetworkHistoryPoint {
+            ts_unix: 12,
+            download_bps: 250,
+            upload_bps: 25,
+            backoff_ms_max: 2,
+        });
+
+        NetworkHistoryTelemetry::apply_loaded_state_at(&mut app_state, loaded, 13);
+        assert_eq!(app_state.avg_download_history, vec![500, 0, 250, 0]);
+        assert_eq!(app_state.avg_upload_history, vec![50, 0, 25, 0]);
+        assert_eq!(
+            app_state.disk_backoff_history_ms,
+            VecDeque::from(vec![4, 0, 2, 0])
+        );
     }
 }

@@ -4,7 +4,7 @@
 use crate::config::get_app_paths;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
+use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 use tracing::{event as tracing_event, Level};
 
@@ -13,6 +13,9 @@ pub const SECOND_1S_CAP: usize = 60 * 60; // 1 hour
 pub const MINUTE_1M_CAP: usize = 48 * 60; // 48 hours
 pub const MINUTE_15M_CAP: usize = 30 * 24 * 4; // 30 days
 pub const HOUR_1H_CAP: usize = 365 * 24; // 365 days
+const NETWORK_HISTORY_FILE_NAME: &str = "network_history.bin";
+const NETWORK_HISTORY_TEMP_EXTENSION: &str = "bin.tmp";
+const NETWORK_HISTORY_MAGIC: &[u8; 8] = b"SSNHBIN1";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(default)]
@@ -93,6 +96,7 @@ impl NetworkHistoryRollupState {
             upload_bps,
             backoff_ms_max,
         };
+        let mut should_persist = !is_zero_point(&second_point);
         state.tiers.second_1s.push(second_point.clone());
         cap_vec(&mut state.tiers.second_1s, SECOND_1S_CAP);
 
@@ -100,6 +104,7 @@ impl NetworkHistoryRollupState {
         if self.second_to_minute.count >= 60 {
             let minute_point = make_rollup_point(&self.second_to_minute, ts_unix);
             self.second_to_minute.clear();
+            should_persist |= !is_zero_point(&minute_point);
 
             state.tiers.minute_1m.push(minute_point.clone());
             cap_vec(&mut state.tiers.minute_1m, MINUTE_1M_CAP);
@@ -108,6 +113,7 @@ impl NetworkHistoryRollupState {
             if self.minute_to_15m.count >= 15 {
                 let m15_point = make_rollup_point(&self.minute_to_15m, ts_unix);
                 self.minute_to_15m.clear();
+                should_persist |= !is_zero_point(&m15_point);
 
                 state.tiers.minute_15m.push(m15_point.clone());
                 cap_vec(&mut state.tiers.minute_15m, MINUTE_15M_CAP);
@@ -116,6 +122,7 @@ impl NetworkHistoryRollupState {
                 if self.m15_to_hour.count >= 4 {
                     let hour_point = make_rollup_point(&self.m15_to_hour, ts_unix);
                     self.m15_to_hour.clear();
+                    should_persist |= !is_zero_point(&hour_point);
 
                     state.tiers.hour_1h.push(hour_point);
                     cap_vec(&mut state.tiers.hour_1h, HOUR_1H_CAP);
@@ -123,7 +130,7 @@ impl NetworkHistoryRollupState {
             }
         }
 
-        true
+        should_persist
     }
 }
 
@@ -156,6 +163,33 @@ pub fn enforce_retention_caps(state: &mut NetworkHistoryPersistedState) {
     cap_vec(&mut state.tiers.hour_1h, HOUR_1H_CAP);
 }
 
+pub fn is_zero_point(point: &NetworkHistoryPoint) -> bool {
+    point.download_bps == 0 && point.upload_bps == 0 && point.backoff_ms_max == 0
+}
+
+fn sparse_points_for_persistence(points: &[NetworkHistoryPoint]) -> Vec<NetworkHistoryPoint> {
+    points
+        .iter()
+        .filter(|point| !is_zero_point(point))
+        .cloned()
+        .collect()
+}
+
+pub fn sparse_state_for_persistence(
+    state: &NetworkHistoryPersistedState,
+) -> NetworkHistoryPersistedState {
+    NetworkHistoryPersistedState {
+        schema_version: state.schema_version,
+        updated_at_unix: state.updated_at_unix,
+        tiers: NetworkHistoryTiers {
+            second_1s: sparse_points_for_persistence(&state.tiers.second_1s),
+            minute_1m: sparse_points_for_persistence(&state.tiers.minute_1m),
+            minute_15m: sparse_points_for_persistence(&state.tiers.minute_15m),
+            hour_1h: sparse_points_for_persistence(&state.tiers.hour_1h),
+        },
+    }
+}
+
 #[allow(dead_code)]
 pub fn network_history_state_file_path() -> io::Result<PathBuf> {
     let (_, data_dir) = get_app_paths().ok_or_else(|| {
@@ -165,7 +199,7 @@ pub fn network_history_state_file_path() -> io::Result<PathBuf> {
         )
     })?;
 
-    Ok(data_dir.join("persistence").join("network_history.toml"))
+    Ok(data_dir.join("persistence").join(NETWORK_HISTORY_FILE_NAME))
 }
 
 #[allow(dead_code)]
@@ -189,13 +223,121 @@ pub fn save_network_history_state(state: &NetworkHistoryPersistedState) -> io::R
     save_network_history_state_to_path(state, &path)
 }
 
+fn encode_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn encode_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn decode_u32(cursor: &mut Cursor<&[u8]>) -> io::Result<u32> {
+    let mut bytes = [0_u8; 4];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn decode_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
+    let mut bytes = [0_u8; 8];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn encode_points(buf: &mut Vec<u8>, points: &[NetworkHistoryPoint]) {
+    encode_u32(buf, points.len() as u32);
+    for point in points {
+        encode_u64(buf, point.ts_unix);
+        encode_u64(buf, point.download_bps);
+        encode_u64(buf, point.upload_bps);
+        encode_u64(buf, point.backoff_ms_max);
+    }
+}
+
+fn decode_points(
+    cursor: &mut Cursor<&[u8]>,
+    max_points: usize,
+) -> io::Result<Vec<NetworkHistoryPoint>> {
+    let count = decode_u32(cursor)? as usize;
+    if count > max_points {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "network history tier exceeds retention cap",
+        ));
+    }
+    let mut points = Vec::with_capacity(count);
+    for _ in 0..count {
+        points.push(NetworkHistoryPoint {
+            ts_unix: decode_u64(cursor)?,
+            download_bps: decode_u64(cursor)?,
+            upload_bps: decode_u64(cursor)?,
+            backoff_ms_max: decode_u64(cursor)?,
+        });
+    }
+    Ok(points)
+}
+
+fn encode_network_history_state(state: &NetworkHistoryPersistedState) -> Vec<u8> {
+    let second_points = state.tiers.second_1s.len();
+    let minute_points = state.tiers.minute_1m.len();
+    let minute_15_points = state.tiers.minute_15m.len();
+    let hour_points = state.tiers.hour_1h.len();
+    let total_points = second_points + minute_points + minute_15_points + hour_points;
+    let mut buf = Vec::with_capacity(
+        NETWORK_HISTORY_MAGIC.len()
+            + 12
+            + (total_points * std::mem::size_of::<NetworkHistoryPoint>()),
+    );
+    buf.extend_from_slice(NETWORK_HISTORY_MAGIC);
+    encode_u32(&mut buf, state.schema_version);
+    encode_u64(&mut buf, state.updated_at_unix);
+    encode_points(&mut buf, &state.tiers.second_1s);
+    encode_points(&mut buf, &state.tiers.minute_1m);
+    encode_points(&mut buf, &state.tiers.minute_15m);
+    encode_points(&mut buf, &state.tiers.hour_1h);
+    buf
+}
+
+fn decode_network_history_state(bytes: &[u8]) -> io::Result<NetworkHistoryPersistedState> {
+    let mut cursor = Cursor::new(bytes);
+    let mut magic = [0_u8; NETWORK_HISTORY_MAGIC.len()];
+    cursor.read_exact(&mut magic)?;
+    if &magic != NETWORK_HISTORY_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid network history binary header",
+        ));
+    }
+
+    let schema_version = decode_u32(&mut cursor)?;
+    let updated_at_unix = decode_u64(&mut cursor)?;
+    let tiers = NetworkHistoryTiers {
+        second_1s: decode_points(&mut cursor, SECOND_1S_CAP)?,
+        minute_1m: decode_points(&mut cursor, MINUTE_1M_CAP)?,
+        minute_15m: decode_points(&mut cursor, MINUTE_15M_CAP)?,
+        hour_1h: decode_points(&mut cursor, HOUR_1H_CAP)?,
+    };
+
+    if cursor.position() != bytes.len() as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing bytes in network history binary payload",
+        ));
+    }
+
+    Ok(NetworkHistoryPersistedState {
+        schema_version,
+        updated_at_unix,
+        tiers,
+    })
+}
+
 fn load_network_history_state_from_path(path: &Path) -> NetworkHistoryPersistedState {
     if !path.exists() {
         return NetworkHistoryPersistedState::default();
     }
 
-    match fs::read_to_string(path) {
-        Ok(content) => match toml::from_str::<NetworkHistoryPersistedState>(&content) {
+    match fs::read(path) {
+        Ok(bytes) => match decode_network_history_state(&bytes) {
             Ok(mut state) => {
                 enforce_retention_caps(&mut state);
                 state
@@ -203,7 +345,7 @@ fn load_network_history_state_from_path(path: &Path) -> NetworkHistoryPersistedS
             Err(e) => {
                 tracing_event!(
                     Level::WARN,
-                    "Failed to parse network history persistence file {:?}. Resetting state: {}",
+                    "Failed to decode network history persistence file {:?}. Resetting state: {}",
                     path,
                     e
                 );
@@ -230,8 +372,9 @@ fn save_network_history_state_to_path(
         fs::create_dir_all(parent)?;
     }
 
-    let content = toml::to_string_pretty(state).map_err(io::Error::other)?;
-    let tmp_path = path.with_extension("toml.tmp");
+    let sparse_state = sparse_state_for_persistence(state);
+    let content = encode_network_history_state(&sparse_state);
+    let tmp_path = path.with_extension(NETWORK_HISTORY_TEMP_EXTENSION);
 
     fs::write(&tmp_path, content)?;
     fs::rename(&tmp_path, path)?;
@@ -247,7 +390,7 @@ mod tests {
     #[test]
     fn load_missing_file_returns_default() {
         let dir = tempdir().expect("create tempdir");
-        let path = dir.path().join("network_history.toml");
+        let path = dir.path().join(NETWORK_HISTORY_FILE_NAME);
 
         let state = load_network_history_state_from_path(&path);
         assert_eq!(state, NetworkHistoryPersistedState::default());
@@ -256,8 +399,8 @@ mod tests {
     #[test]
     fn load_invalid_file_returns_default() {
         let dir = tempdir().expect("create tempdir");
-        let path = dir.path().join("network_history.toml");
-        fs::write(&path, "not = [valid").expect("write malformed toml");
+        let path = dir.path().join(NETWORK_HISTORY_FILE_NAME);
+        fs::write(&path, [0_u8, 1, 2, 3]).expect("write malformed binary");
 
         let state = load_network_history_state_from_path(&path);
         assert_eq!(state, NetworkHistoryPersistedState::default());
@@ -266,7 +409,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trip() {
         let dir = tempdir().expect("create tempdir");
-        let path = dir.path().join("network_history.toml");
+        let path = dir.path().join(NETWORK_HISTORY_FILE_NAME);
 
         let state = NetworkHistoryPersistedState {
             schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
@@ -288,6 +431,81 @@ mod tests {
         let loaded = load_network_history_state_from_path(&path);
 
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn sparse_state_for_persistence_omits_zero_points() {
+        let state = NetworkHistoryPersistedState {
+            schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
+            updated_at_unix: 1_771_860_000,
+            tiers: NetworkHistoryTiers {
+                second_1s: vec![
+                    NetworkHistoryPoint {
+                        ts_unix: 1,
+                        download_bps: 0,
+                        upload_bps: 0,
+                        backoff_ms_max: 0,
+                    },
+                    NetworkHistoryPoint {
+                        ts_unix: 2,
+                        download_bps: 1024,
+                        upload_bps: 0,
+                        backoff_ms_max: 0,
+                    },
+                ],
+                minute_1m: vec![NetworkHistoryPoint {
+                    ts_unix: 60,
+                    download_bps: 0,
+                    upload_bps: 0,
+                    backoff_ms_max: 0,
+                }],
+                minute_15m: vec![],
+                hour_1h: vec![],
+            },
+        };
+
+        let sparse = sparse_state_for_persistence(&state);
+        assert_eq!(sparse.tiers.second_1s.len(), 1);
+        assert_eq!(sparse.tiers.second_1s[0].ts_unix, 2);
+        assert!(sparse.tiers.minute_1m.is_empty());
+    }
+
+    #[test]
+    fn zero_only_second_sample_does_not_mark_persistence_dirty() {
+        let mut state = NetworkHistoryPersistedState::default();
+        let mut rollups = NetworkHistoryRollupState::default();
+
+        assert!(!rollups.ingest_second_sample(&mut state, 1, 0, 0, 0));
+        assert_eq!(state.tiers.second_1s.len(), 1);
+        assert!(is_zero_point(&state.tiers.second_1s[0]));
+    }
+
+    #[test]
+    fn legacy_toml_file_is_ignored() {
+        let dir = tempdir().expect("create tempdir");
+        let binary_path = dir.path().join(NETWORK_HISTORY_FILE_NAME);
+        let legacy_toml_path = dir.path().join("network_history.toml");
+        let legacy_state = NetworkHistoryPersistedState {
+            schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
+            updated_at_unix: 1_771_860_000,
+            tiers: NetworkHistoryTiers {
+                second_1s: vec![NetworkHistoryPoint {
+                    ts_unix: 1_771_860_000,
+                    download_bps: 2048,
+                    upload_bps: 512,
+                    backoff_ms_max: 4,
+                }],
+                minute_1m: vec![],
+                minute_15m: vec![],
+                hour_1h: vec![],
+            },
+        };
+
+        let legacy_toml = toml::to_string_pretty(&legacy_state).expect("serialize legacy toml");
+        fs::write(&legacy_toml_path, legacy_toml).expect("write legacy toml");
+
+        let loaded = load_network_history_state_from_path(&binary_path);
+        assert_eq!(loaded, NetworkHistoryPersistedState::default());
     }
 
     #[test]

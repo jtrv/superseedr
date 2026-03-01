@@ -102,6 +102,8 @@ const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
+const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
+const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 #[derive(serde::Deserialize)]
 struct CratesResponse {
@@ -1028,7 +1030,8 @@ impl App {
         let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
-        let mut network_history_persist_interval = time::interval(Duration::from_secs(15));
+        let mut network_history_persist_interval =
+            time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
         let mut next_tuning_at =
             time::Instant::now() + Duration::from_secs(self.tuning_controller.cadence_secs());
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1320,7 +1323,7 @@ impl App {
             return;
         }
 
-        let shutdown_timeout = time::sleep(Duration::from_secs(10));
+        let shutdown_timeout = time::sleep(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS));
         let mut draw_interval = time::interval(Duration::from_millis(100));
         tokio::pin!(shutdown_timeout);
 
