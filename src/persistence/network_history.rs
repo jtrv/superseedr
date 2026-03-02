@@ -8,7 +8,7 @@ use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 use tracing::{event as tracing_event, Level};
 
-pub const NETWORK_HISTORY_SCHEMA_VERSION: u32 = 1;
+pub const NETWORK_HISTORY_SCHEMA_VERSION: u32 = 2;
 pub const SECOND_1S_CAP: usize = 60 * 60; // 1 hour
 pub const MINUTE_1M_CAP: usize = 48 * 60; // 48 hours
 pub const MINUTE_15M_CAP: usize = 30 * 24 * 4; // 30 days
@@ -35,11 +35,29 @@ pub struct NetworkHistoryTiers {
     pub hour_1h: Vec<NetworkHistoryPoint>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct PersistedRollupAccumulator {
+    pub count: u32,
+    pub dl_sum: u128,
+    pub ul_sum: u128,
+    pub backoff_max: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct NetworkHistoryRollupSnapshot {
+    pub second_to_minute: PersistedRollupAccumulator,
+    pub minute_to_15m: PersistedRollupAccumulator,
+    pub m15_to_hour: PersistedRollupAccumulator,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct NetworkHistoryPersistedState {
     pub schema_version: u32,
     pub updated_at_unix: u64,
+    pub rollups: NetworkHistoryRollupSnapshot,
     pub tiers: NetworkHistoryTiers,
 }
 
@@ -48,12 +66,13 @@ impl Default for NetworkHistoryPersistedState {
         Self {
             schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
             updated_at_unix: 0,
+            rollups: NetworkHistoryRollupSnapshot::default(),
             tiers: NetworkHistoryTiers::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RollupAccumulator {
     count: u32,
     dl_sum: u128,
@@ -74,7 +93,29 @@ impl RollupAccumulator {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+impl From<&RollupAccumulator> for PersistedRollupAccumulator {
+    fn from(accumulator: &RollupAccumulator) -> Self {
+        Self {
+            count: accumulator.count,
+            dl_sum: accumulator.dl_sum,
+            ul_sum: accumulator.ul_sum,
+            backoff_max: accumulator.backoff_max,
+        }
+    }
+}
+
+impl From<&PersistedRollupAccumulator> for RollupAccumulator {
+    fn from(accumulator: &PersistedRollupAccumulator) -> Self {
+        Self {
+            count: accumulator.count,
+            dl_sum: accumulator.dl_sum,
+            ul_sum: accumulator.ul_sum,
+            backoff_max: accumulator.backoff_max,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetworkHistoryRollupState {
     second_to_minute: RollupAccumulator,
     minute_to_15m: RollupAccumulator,
@@ -82,11 +123,19 @@ pub struct NetworkHistoryRollupState {
 }
 
 impl NetworkHistoryRollupState {
-    pub fn rebuild_from_state(state: &NetworkHistoryPersistedState) -> Self {
+    pub fn to_snapshot(&self) -> NetworkHistoryRollupSnapshot {
+        NetworkHistoryRollupSnapshot {
+            second_to_minute: PersistedRollupAccumulator::from(&self.second_to_minute),
+            minute_to_15m: PersistedRollupAccumulator::from(&self.minute_to_15m),
+            m15_to_hour: PersistedRollupAccumulator::from(&self.m15_to_hour),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &NetworkHistoryRollupSnapshot) -> Self {
         Self {
-            second_to_minute: rebuild_accumulator(&state.tiers.second_1s, 60),
-            minute_to_15m: rebuild_accumulator(&state.tiers.minute_1m, 15),
-            m15_to_hour: rebuild_accumulator(&state.tiers.minute_15m, 4),
+            second_to_minute: RollupAccumulator::from(&snapshot.second_to_minute),
+            minute_to_15m: RollupAccumulator::from(&snapshot.minute_to_15m),
+            m15_to_hour: RollupAccumulator::from(&snapshot.m15_to_hour),
         }
     }
 
@@ -138,22 +187,9 @@ impl NetworkHistoryRollupState {
             }
         }
 
+        state.rollups = self.to_snapshot();
         should_persist
     }
-}
-
-fn rebuild_accumulator(points: &[NetworkHistoryPoint], bucket_size: usize) -> RollupAccumulator {
-    if bucket_size == 0 || points.is_empty() {
-        return RollupAccumulator::default();
-    }
-
-    let remainder = points.len() % bucket_size;
-    let start = points.len().saturating_sub(remainder);
-    let mut accumulator = RollupAccumulator::default();
-    for point in &points[start..] {
-        accumulator.push(point);
-    }
-    accumulator
 }
 
 fn make_rollup_point(acc: &RollupAccumulator, ts_unix: u64) -> NetworkHistoryPoint {
@@ -203,6 +239,7 @@ pub fn sparse_state_for_persistence(
     NetworkHistoryPersistedState {
         schema_version: state.schema_version,
         updated_at_unix: state.updated_at_unix,
+        rollups: state.rollups.clone(),
         tiers: NetworkHistoryTiers {
             second_1s: sparse_points_for_persistence(&state.tiers.second_1s),
             minute_1m: sparse_points_for_persistence(&state.tiers.minute_1m),
@@ -253,6 +290,10 @@ fn encode_u64(buf: &mut Vec<u8>, value: u64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+fn encode_u128(buf: &mut Vec<u8>, value: u128) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
 fn decode_u32(cursor: &mut Cursor<&[u8]>) -> io::Result<u32> {
     let mut bytes = [0_u8; 4];
     cursor.read_exact(&mut bytes)?;
@@ -263,6 +304,28 @@ fn decode_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
     let mut bytes = [0_u8; 8];
     cursor.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
+}
+
+fn decode_u128(cursor: &mut Cursor<&[u8]>) -> io::Result<u128> {
+    let mut bytes = [0_u8; 16];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u128::from_le_bytes(bytes))
+}
+
+fn encode_rollup_accumulator(buf: &mut Vec<u8>, accumulator: &PersistedRollupAccumulator) {
+    encode_u32(buf, accumulator.count);
+    encode_u128(buf, accumulator.dl_sum);
+    encode_u128(buf, accumulator.ul_sum);
+    encode_u64(buf, accumulator.backoff_max);
+}
+
+fn decode_rollup_accumulator(cursor: &mut Cursor<&[u8]>) -> io::Result<PersistedRollupAccumulator> {
+    Ok(PersistedRollupAccumulator {
+        count: decode_u32(cursor)?,
+        dl_sum: decode_u128(cursor)?,
+        ul_sum: decode_u128(cursor)?,
+        backoff_max: decode_u64(cursor)?,
+    })
 }
 
 fn encode_points(buf: &mut Vec<u8>, points: &[NetworkHistoryPoint]) {
@@ -307,11 +370,15 @@ fn encode_network_history_state(state: &NetworkHistoryPersistedState) -> Vec<u8>
     let mut buf = Vec::with_capacity(
         NETWORK_HISTORY_MAGIC.len()
             + 12
+            + (3 * (4 + 16 + 16 + 8))
             + (total_points * std::mem::size_of::<NetworkHistoryPoint>()),
     );
     buf.extend_from_slice(NETWORK_HISTORY_MAGIC);
     encode_u32(&mut buf, state.schema_version);
     encode_u64(&mut buf, state.updated_at_unix);
+    encode_rollup_accumulator(&mut buf, &state.rollups.second_to_minute);
+    encode_rollup_accumulator(&mut buf, &state.rollups.minute_to_15m);
+    encode_rollup_accumulator(&mut buf, &state.rollups.m15_to_hour);
     encode_points(&mut buf, &state.tiers.second_1s);
     encode_points(&mut buf, &state.tiers.minute_1m);
     encode_points(&mut buf, &state.tiers.minute_15m);
@@ -331,7 +398,18 @@ fn decode_network_history_state(bytes: &[u8]) -> io::Result<NetworkHistoryPersis
     }
 
     let schema_version = decode_u32(&mut cursor)?;
+    if schema_version != NETWORK_HISTORY_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported network history schema version {schema_version}"),
+        ));
+    }
     let updated_at_unix = decode_u64(&mut cursor)?;
+    let rollups = NetworkHistoryRollupSnapshot {
+        second_to_minute: decode_rollup_accumulator(&mut cursor)?,
+        minute_to_15m: decode_rollup_accumulator(&mut cursor)?,
+        m15_to_hour: decode_rollup_accumulator(&mut cursor)?,
+    };
     let tiers = NetworkHistoryTiers {
         second_1s: decode_points(&mut cursor, SECOND_1S_CAP)?,
         minute_1m: decode_points(&mut cursor, MINUTE_1M_CAP)?,
@@ -349,6 +427,7 @@ fn decode_network_history_state(bytes: &[u8]) -> io::Result<NetworkHistoryPersis
     Ok(NetworkHistoryPersistedState {
         schema_version,
         updated_at_unix,
+        rollups,
         tiers,
     })
 }
@@ -436,6 +515,26 @@ mod tests {
         let state = NetworkHistoryPersistedState {
             schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
             updated_at_unix: 1_771_860_000,
+            rollups: NetworkHistoryRollupSnapshot {
+                second_to_minute: PersistedRollupAccumulator {
+                    count: 17,
+                    dl_sum: 12_345,
+                    ul_sum: 678,
+                    backoff_max: 9,
+                },
+                minute_to_15m: PersistedRollupAccumulator {
+                    count: 3,
+                    dl_sum: 3_333,
+                    ul_sum: 444,
+                    backoff_max: 7,
+                },
+                m15_to_hour: PersistedRollupAccumulator {
+                    count: 2,
+                    dl_sum: 8_888,
+                    ul_sum: 999,
+                    backoff_max: 5,
+                },
+            },
             tiers: NetworkHistoryTiers {
                 second_1s: vec![NetworkHistoryPoint {
                     ts_unix: 1_771_860_000,
@@ -460,6 +559,15 @@ mod tests {
         let state = NetworkHistoryPersistedState {
             schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
             updated_at_unix: 1_771_860_000,
+            rollups: NetworkHistoryRollupSnapshot {
+                second_to_minute: PersistedRollupAccumulator {
+                    count: 2,
+                    dl_sum: 1_024,
+                    ul_sum: 0,
+                    backoff_max: 0,
+                },
+                ..Default::default()
+            },
             tiers: NetworkHistoryTiers {
                 second_1s: vec![
                     NetworkHistoryPoint {
@@ -490,6 +598,7 @@ mod tests {
         assert_eq!(sparse.tiers.second_1s.len(), 1);
         assert_eq!(sparse.tiers.second_1s[0].ts_unix, 2);
         assert!(sparse.tiers.minute_1m.is_empty());
+        assert_eq!(sparse.rollups, state.rollups);
     }
 
     #[test]
@@ -500,6 +609,7 @@ mod tests {
         assert!(!rollups.ingest_second_sample(&mut state, 1, 0, 0, 0));
         assert_eq!(state.tiers.second_1s.len(), 1);
         assert!(is_zero_point(&state.tiers.second_1s[0]));
+        assert_eq!(state.rollups, rollups.to_snapshot());
     }
 
     #[test]
@@ -510,6 +620,7 @@ mod tests {
         let legacy_state = NetworkHistoryPersistedState {
             schema_version: NETWORK_HISTORY_SCHEMA_VERSION,
             updated_at_unix: 1_771_860_000,
+            rollups: NetworkHistoryRollupSnapshot::default(),
             tiers: NetworkHistoryTiers {
                 second_1s: vec![NetworkHistoryPoint {
                     ts_unix: 1_771_860_000,
@@ -597,80 +708,61 @@ mod tests {
         assert_eq!(hour.download_bps, 1800);
         assert_eq!(hour.upload_bps, 3601);
         assert_eq!(hour.backoff_ms_max, 99);
+        assert_eq!(state.rollups, rollups.to_snapshot());
     }
 
     #[test]
-    fn rebuild_from_state_restores_partial_rollup_accumulators() {
-        let mut state = NetworkHistoryPersistedState::default();
-        state.tiers.second_1s = (1_u64..=61)
-            .map(|ts| NetworkHistoryPoint {
-                ts_unix: ts,
-                download_bps: ts,
-                upload_bps: ts * 2,
-                backoff_ms_max: ts,
-            })
-            .collect();
-        state.tiers.minute_1m = (1_u64..=16)
-            .map(|idx| NetworkHistoryPoint {
-                ts_unix: idx * 60,
-                download_bps: idx,
-                upload_bps: idx * 3,
-                backoff_ms_max: idx,
-            })
-            .collect();
-        state.tiers.minute_15m = (1_u64..=5)
-            .map(|idx| NetworkHistoryPoint {
-                ts_unix: idx * 15 * 60,
-                download_bps: idx,
-                upload_bps: idx * 4,
-                backoff_ms_max: idx,
-            })
-            .collect();
-
-        let rollups = NetworkHistoryRollupState::rebuild_from_state(&state);
-
-        assert_eq!(rollups.second_to_minute.count, 1);
-        assert_eq!(rollups.second_to_minute.dl_sum, 61);
-        assert_eq!(rollups.second_to_minute.ul_sum, 122);
-        assert_eq!(rollups.second_to_minute.backoff_max, 61);
-
-        assert_eq!(rollups.minute_to_15m.count, 1);
-        assert_eq!(rollups.minute_to_15m.dl_sum, 16);
-        assert_eq!(rollups.minute_to_15m.ul_sum, 48);
-        assert_eq!(rollups.minute_to_15m.backoff_max, 16);
-
-        assert_eq!(rollups.m15_to_hour.count, 1);
-        assert_eq!(rollups.m15_to_hour.dl_sum, 5);
-        assert_eq!(rollups.m15_to_hour.ul_sum, 20);
-        assert_eq!(rollups.m15_to_hour.backoff_max, 5);
-    }
-
-    #[test]
-    fn rebuild_from_state_keeps_zero_filled_points_in_partial_bucket() {
-        let state = NetworkHistoryPersistedState {
-            tiers: NetworkHistoryTiers {
-                second_1s: vec![
-                    NetworkHistoryPoint {
-                        ts_unix: 58,
-                        download_bps: 10,
-                        upload_bps: 1,
-                        backoff_ms_max: 2,
-                    },
-                    NetworkHistoryPoint {
-                        ts_unix: 59,
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
+    fn rollup_snapshot_round_trip_restores_partial_accumulators() {
+        let snapshot = NetworkHistoryRollupSnapshot {
+            second_to_minute: PersistedRollupAccumulator {
+                count: 1,
+                dl_sum: 61,
+                ul_sum: 122,
+                backoff_max: 61,
             },
-            ..Default::default()
+            minute_to_15m: PersistedRollupAccumulator {
+                count: 1,
+                dl_sum: 16,
+                ul_sum: 48,
+                backoff_max: 16,
+            },
+            m15_to_hour: PersistedRollupAccumulator {
+                count: 1,
+                dl_sum: 5,
+                ul_sum: 20,
+                backoff_max: 5,
+            },
         };
 
-        let rollups = NetworkHistoryRollupState::rebuild_from_state(&state);
+        let rollups = NetworkHistoryRollupState::from_snapshot(&snapshot);
 
-        assert_eq!(rollups.second_to_minute.count, 2);
-        assert_eq!(rollups.second_to_minute.dl_sum, 10);
-        assert_eq!(rollups.second_to_minute.ul_sum, 1);
-        assert_eq!(rollups.second_to_minute.backoff_max, 2);
+        assert_eq!(rollups.to_snapshot(), snapshot);
+    }
+
+    #[test]
+    fn load_schema_v1_file_returns_default() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join(NETWORK_HISTORY_FILE_NAME);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(NETWORK_HISTORY_MAGIC);
+        encode_u32(&mut bytes, 1);
+        encode_u64(&mut bytes, 1_771_860_000);
+        encode_points(
+            &mut bytes,
+            &[NetworkHistoryPoint {
+                ts_unix: 1,
+                download_bps: 1,
+                upload_bps: 2,
+                backoff_ms_max: 3,
+            }],
+        );
+        encode_points(&mut bytes, &[]);
+        encode_points(&mut bytes, &[]);
+        encode_points(&mut bytes, &[]);
+        fs::write(&path, bytes).expect("write schema v1 binary");
+
+        let loaded = load_network_history_state_from_path(&path);
+        assert_eq!(loaded, NetworkHistoryPersistedState::default());
     }
 }

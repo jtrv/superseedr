@@ -3628,6 +3628,7 @@ fn build_persist_payload(
     let network_history = if app_state.network_history_restore_pending {
         None
     } else {
+        app_state.network_history_state.rollups = app_state.network_history_rollups.to_snapshot();
         app_state.network_history_state.updated_at_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -4043,6 +4044,35 @@ mod tests {
         assert!(payload.network_history.is_none());
         assert_eq!(app_state.network_history_state.updated_at_unix, 0);
         assert_eq!(app_state.next_network_history_persist_request_id, 0);
+    }
+
+    #[test]
+    fn build_persist_payload_syncs_rollup_snapshot_into_network_history_state() {
+        let mut settings = crate::config::Settings::default();
+        let snapshot = crate::persistence::network_history::NetworkHistoryRollupSnapshot {
+            second_to_minute: crate::persistence::network_history::PersistedRollupAccumulator {
+                count: 7,
+                dl_sum: 7_000,
+                ul_sum: 700,
+                backoff_max: 9,
+            },
+            ..Default::default()
+        };
+        let mut app_state = AppState {
+            network_history_rollups:
+                crate::persistence::network_history::NetworkHistoryRollupState::from_snapshot(
+                    &snapshot,
+                ),
+            ..Default::default()
+        };
+
+        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let network_history = payload
+            .network_history
+            .expect("network history payload should be present");
+
+        assert_eq!(network_history.state.rollups, snapshot);
+        assert_eq!(app_state.network_history_state.rollups, snapshot);
     }
 
     #[test]
