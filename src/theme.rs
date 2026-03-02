@@ -92,6 +92,8 @@ pub enum ThemeName {
     Vesper,
     #[strum(serialize = "Zenburn")]
     Zenburn,
+    #[strum(serialize = "Sakura")]
+    Sakura,
 }
 
 impl ThemeName {
@@ -148,6 +150,7 @@ impl Serialize for ThemeName {
             ThemeName::TokyoNight => "tokyo_night",
             ThemeName::Vesper => "vesper",
             ThemeName::Zenburn => "zenburn",
+            ThemeName::Sakura => "sakura",
         };
         serializer.serialize_str(s)
     }
@@ -329,6 +332,7 @@ fn resolve_theme_name(raw: &str) -> ThemeResolution {
         "tokyo_night" => Some(ThemeName::TokyoNight),
         "vesper" => Some(ThemeName::Vesper),
         "zenburn" => Some(ThemeName::Zenburn),
+        "sakura" => Some(ThemeName::Sakura),
         _ => None,
     };
 
@@ -340,6 +344,7 @@ fn resolve_theme_name(raw: &str) -> ThemeResolution {
         "catppuccin" => Some(("catppuccin", ThemeName::CatppuccinMocha)),
         "synthwave84" => Some(("synthwave84", ThemeName::Synthwave84)),
         "tokyonight" => Some(("tokyonight", ThemeName::TokyoNight)),
+        "flowers" => Some(("flowers", ThemeName::Sakura)),
         _ => None,
     };
 
@@ -376,6 +381,7 @@ pub struct ThemeEffects {
     pub wave_wavelength: f32,
     pub wave_angle_degrees: f32,
     pub wave_mode: WaveMode,
+    pub particle: ThemeParticleEffect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +390,59 @@ pub enum WaveMode {
     RadialOut,
     #[allow(dead_code)]
     RadialIn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticleLayerMode {
+    None,
+    Background,
+    #[allow(dead_code)]
+    Foreground,
+    #[allow(dead_code)]
+    Both,
+}
+
+impl ParticleLayerMode {
+    pub fn has_background(self) -> bool {
+        matches!(self, Self::Background | Self::Both)
+    }
+
+    pub fn has_foreground(self) -> bool {
+        matches!(self, Self::Foreground | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticleProfile {
+    None,
+    Sakura,
+    Matrix,
+    Diamond,
+    BioluminescentReef,
+    BlackHole,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeParticleEffect {
+    pub enabled: bool,
+    pub layer_mode: ParticleLayerMode,
+    pub profile: ParticleProfile,
+    pub density: f32,
+    pub speed: f32,
+    pub intensity: f32,
+}
+
+impl Default for ThemeParticleEffect {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            layer_mode: ParticleLayerMode::None,
+            profile: ParticleProfile::None,
+            density: 0.0,
+            speed: 0.0,
+            intensity: 0.0,
+        }
+    }
 }
 
 impl Default for ThemeEffects {
@@ -403,13 +462,14 @@ impl Default for ThemeEffects {
             wave_wavelength: 0.0,
             wave_angle_degrees: 0.0,
             wave_mode: WaveMode::Linear,
+            particle: ThemeParticleEffect::default(),
         }
     }
 }
 
 impl ThemeEffects {
     pub fn enabled(&self) -> bool {
-        self.local_enabled || self.wave_enabled
+        self.local_enabled || self.wave_enabled || self.particle.enabled
     }
 }
 
@@ -800,6 +860,7 @@ impl Theme {
             ThemeName::TokyoNight => Self::tokyo_night(),
             ThemeName::Vesper => Self::vesper(),
             ThemeName::Zenburn => Self::zenburn(),
+            ThemeName::Sakura => Self::sakura(),
         }
     }
 
@@ -916,8 +977,8 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.mauve,
-                    medium: categorical.pink,
+                    low: categorical.teal,
+                    medium: categorical.teal,
                     high: categorical.teal,
                     empty: Color::Rgb(30, 45, 65),
                 },
@@ -997,10 +1058,10 @@ impl Theme {
                     categorical.blue,
                 ],
                 heatmap: ThemeHeatmap {
-                    low: categorical.flamingo,
-                    medium: categorical.pink,
-                    high: categorical.red,
-                    empty: Color::Rgb(255, 130, 205),
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
+                    empty: Color::Rgb(89, 50, 78),
                 },
                 stream: ThemeStream {
                     inflow: categorical.mauve,
@@ -1179,6 +1240,7 @@ impl Theme {
                 wave_wavelength: 34.0,
                 wave_angle_degrees: 22.0,
                 wave_mode: WaveMode::Linear,
+                particle: ThemeParticleEffect::default(),
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(255, 236, 175),
@@ -1204,9 +1266,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.sapphire,
-                    medium: categorical.mauve,
-                    high: categorical.rosewater,
+                    low: categorical.yellow,
+                    medium: categorical.yellow,
+                    high: categorical.yellow,
                     empty: Color::Rgb(78, 53, 22),
                 },
                 stream: ThemeStream {
@@ -1264,8 +1326,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.mauve,
-                    medium: categorical.pink,
-                    high: categorical.green,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(68, 71, 90),
                 },
                 stream: ThemeStream {
@@ -1381,9 +1443,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.yellow,
                     medium: categorical.yellow,
-                    high: categorical.red,
+                    high: categorical.yellow,
                     empty: Color::Rgb(60, 56, 54),
                 },
                 stream: ThemeStream {
@@ -1440,9 +1502,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.sky,
-                    high: categorical.red,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(36, 40, 59),
                 },
                 stream: ThemeStream {
@@ -1500,8 +1562,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(40, 44, 52),
                 },
                 stream: ThemeStream {
@@ -1558,9 +1620,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.teal,
+                    medium: categorical.teal,
+                    high: categorical.teal,
                     empty: Color::Rgb(7, 54, 66),
                 },
                 stream: ThemeStream {
@@ -1617,9 +1679,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.green,
+                    medium: categorical.green,
+                    high: categorical.green,
                     empty: Color::Rgb(39, 40, 34),
                 },
                 stream: ThemeStream {
@@ -1676,9 +1738,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.green,
+                    medium: categorical.green,
+                    high: categorical.green,
                     empty: Color::Rgb(59, 69, 71),
                 },
                 stream: ThemeStream {
@@ -1735,9 +1797,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.sapphire,
                     empty: Color::Rgb(54, 54, 75),
                 },
                 stream: ThemeStream {
@@ -1795,8 +1857,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(33, 38, 45),
                 },
                 stream: ThemeStream {
@@ -1854,8 +1916,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(238, 232, 213),
                 },
                 stream: ThemeStream {
@@ -1891,6 +1953,14 @@ impl Theme {
                 local_enabled: true,
                 flicker_hz: 5.0,
                 flicker_intensity: 0.16,
+                particle: ThemeParticleEffect {
+                    enabled: true,
+                    layer_mode: ParticleLayerMode::Background,
+                    profile: ParticleProfile::Matrix,
+                    density: 0.026,
+                    speed: 0.82,
+                    intensity: 0.62,
+                },
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
@@ -2055,9 +2125,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.pink,
                     medium: categorical.pink,
-                    high: categorical.yellow,
+                    high: categorical.pink,
                     empty: Color::Rgb(30, 0, 60),
                 },
                 stream: ThemeStream {
@@ -2114,9 +2184,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.teal,
+                    medium: categorical.teal,
+                    high: categorical.teal,
                     empty: Color::Rgb(25, 30, 36),
                 },
                 stream: ThemeStream {
@@ -2173,9 +2243,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.green,
+                    medium: categorical.green,
+                    high: categorical.green,
                     empty: Color::Rgb(71, 71, 71),
                 },
                 stream: ThemeStream {
@@ -2239,9 +2309,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.pink,
                     medium: categorical.pink,
-                    high: categorical.yellow,
+                    high: categorical.pink,
                     empty: Color::Rgb(52, 43, 73),
                 },
                 stream: ThemeStream {
@@ -2299,8 +2369,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(234, 238, 242),
                 },
                 stream: ThemeStream {
@@ -2372,9 +2442,9 @@ impl Theme {
                     Color::Rgb(160, 160, 160),
                 ],
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(110, 110, 110),
-                    medium: Color::Rgb(255, 175, 0),
-                    high: Color::Rgb(255, 128, 0),
+                    low: categorical.peach,
+                    medium: categorical.peach,
+                    high: categorical.peach,
                     empty: Color::Rgb(30, 30, 30),
                 },
                 stream: ThemeStream {
@@ -2431,9 +2501,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.teal,
+                    medium: categorical.teal,
+                    high: categorical.teal,
                     empty: Color::Rgb(25, 27, 41),
                 },
                 stream: ThemeStream {
@@ -2490,9 +2560,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.yellow,
                     medium: categorical.yellow,
-                    high: categorical.red,
+                    high: categorical.yellow,
                     empty: Color::Rgb(213, 196, 161),
                 },
                 stream: ThemeStream {
@@ -2550,8 +2620,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(38, 38, 38),
                 },
                 stream: ThemeStream {
@@ -2613,9 +2683,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(0, 0, 255),
-                    medium: Color::Rgb(0, 255, 0),
-                    high: Color::Rgb(255, 0, 0),
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.pink,
                     empty: Color::Rgb(50, 50, 50),
                 },
                 stream: ThemeStream {
@@ -2677,9 +2747,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(150, 0, 0),
-                    medium: Color::Rgb(255, 80, 0),
-                    high: Color::Rgb(255, 255, 0),
+                    low: categorical.maroon,
+                    medium: categorical.maroon,
+                    high: categorical.yellow,
                     empty: Color::Rgb(40, 10, 0),
                 },
                 stream: ThemeStream {
@@ -2746,9 +2816,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(50, 50, 150),
-                    medium: Color::Rgb(0, 150, 150),
-                    high: Color::Rgb(0, 255, 128),
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.teal,
                     empty: Color::Rgb(20, 30, 60),
                 },
                 stream: ThemeStream {
@@ -2805,9 +2875,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(43, 48, 59),
                 },
                 stream: ThemeStream {
@@ -2864,9 +2934,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(38, 35, 58),
                 },
                 stream: ThemeStream {
@@ -2924,8 +2994,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(40, 50, 76),
                 },
                 stream: ThemeStream {
@@ -2983,8 +3053,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(228, 221, 205),
                 },
                 stream: ThemeStream {
@@ -3030,6 +3100,14 @@ impl Theme {
                 wave_wavelength: 64.0,
                 wave_angle_degrees: -34.0,
                 wave_mode: WaveMode::Linear,
+                particle: ThemeParticleEffect {
+                    enabled: true,
+                    layer_mode: ParticleLayerMode::Foreground,
+                    profile: ParticleProfile::BlackHole,
+                    density: 0.05,
+                    speed: 1.0,
+                    intensity: 0.9,
+                },
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(234, 234, 234),
@@ -3055,9 +3133,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.sapphire,
-                    medium: categorical.peach,
-                    high: categorical.pink,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(6, 8, 14),
                 },
                 stream: ThemeStream {
@@ -3124,9 +3202,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.peach,
-                    high: categorical.red,
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.peach,
                     empty: Color::Rgb(40, 32, 28),
                 },
                 stream: ThemeStream {
@@ -3172,6 +3250,7 @@ impl Theme {
                 wave_wavelength: 64.0,
                 wave_angle_degrees: -35.0,
                 wave_mode: WaveMode::Linear,
+                particle: ThemeParticleEffect::default(),
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(34, 56, 88),
@@ -3198,8 +3277,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.sky,
-                    high: categorical.mauve,
+                    medium: categorical.sapphire,
+                    high: categorical.teal,
                     empty: Color::Rgb(222, 232, 245),
                 },
                 stream: ThemeStream {
@@ -3245,6 +3324,14 @@ impl Theme {
                 wave_wavelength: 52.0,
                 wave_angle_degrees: 74.0,
                 wave_mode: WaveMode::Linear,
+                particle: ThemeParticleEffect {
+                    enabled: true,
+                    layer_mode: ParticleLayerMode::Background,
+                    profile: ParticleProfile::Diamond,
+                    density: 0.006,
+                    speed: 23.4,
+                    intensity: 0.52,
+                },
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(228, 240, 255),
@@ -3285,7 +3372,7 @@ impl Theme {
                     categorical.maroon,
                 ],
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.sky,
                     medium: categorical.sky,
                     high: categorical.mauve,
                     empty: Color::Rgb(28, 41, 64),
@@ -3333,6 +3420,14 @@ impl Theme {
                 wave_wavelength: 46.0,
                 wave_angle_degrees: -55.0,
                 wave_mode: WaveMode::Linear,
+                particle: ThemeParticleEffect {
+                    enabled: true,
+                    layer_mode: ParticleLayerMode::Background,
+                    profile: ParticleProfile::BioluminescentReef,
+                    density: 0.024,
+                    speed: 0.42,
+                    intensity: 0.72,
+                },
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(213, 245, 239),
@@ -3366,6 +3461,75 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.sky,
                     outflow: categorical.green,
+                },
+                categorical,
+            },
+        }
+    }
+
+    pub fn sakura() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(255, 240, 246),
+            flamingo: Color::Rgb(255, 188, 220),
+            pink: Color::Rgb(255, 142, 198),
+            mauve: Color::Rgb(228, 154, 199),
+            red: Color::Rgb(214, 102, 138),
+            maroon: Color::Rgb(133, 84, 66),
+            peach: Color::Rgb(191, 138, 112),
+            yellow: Color::Rgb(234, 204, 163),
+            green: Color::Rgb(154, 184, 154),
+            teal: Color::Rgb(128, 174, 176),
+            sky: Color::Rgb(139, 186, 228),
+            sapphire: Color::Rgb(111, 162, 206),
+            blue: Color::Rgb(93, 138, 188),
+            lavender: Color::Rgb(208, 184, 230),
+        };
+
+        Self {
+            name: ThemeName::Sakura,
+            effects: ThemeEffects {
+                particle: ThemeParticleEffect {
+                    enabled: true,
+                    layer_mode: ParticleLayerMode::Background,
+                    profile: ParticleProfile::Sakura,
+                    density: 0.020,
+                    speed: 0.68,
+                    intensity: 0.75,
+                },
+                ..ThemeEffects::default()
+            },
+            semantic: ThemeSemantic {
+                text: Color::Rgb(255, 214, 236),
+                subtext1: Color::Rgb(245, 182, 214),
+                subtext0: Color::Rgb(222, 149, 178),
+                overlay0: Color::Rgb(176, 108, 130),
+                surface2: Color::Rgb(121, 76, 82),
+                surface1: Color::Rgb(95, 57, 63),
+                surface0: Color::Rgb(74, 43, 49),
+                border: Color::Rgb(186, 118, 104),
+                white: Color::White,
+            },
+            scale: ThemeScale {
+                speed: [
+                    categorical.sky,
+                    categorical.sapphire,
+                    categorical.blue,
+                    categorical.teal,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.peach,
+                    categorical.rosewater,
+                ],
+                ip_hash: categorical_ip_hash(categorical),
+                heatmap: ThemeHeatmap {
+                    low: categorical.sky,
+                    medium: categorical.pink,
+                    high: categorical.maroon,
+                    empty: Color::Rgb(73, 55, 67),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.sky,
+                    outflow: categorical.teal,
                 },
                 categorical,
             },
@@ -3444,6 +3608,7 @@ mod tests {
             ThemeName::TokyoNight,
             ThemeName::Vesper,
             ThemeName::Zenburn,
+            ThemeName::Sakura,
         ]
     }
 
@@ -3522,6 +3687,7 @@ mod tests {
             ("tokyo_night", ThemeName::TokyoNight),
             ("vesper", ThemeName::Vesper),
             ("zenburn", ThemeName::Zenburn),
+            ("sakura", ThemeName::Sakura),
         ];
 
         for (input, expected) in themes {
@@ -3573,6 +3739,7 @@ mod tests {
             ("Tokyo Night", ThemeName::TokyoNight),
             ("Vesper", ThemeName::Vesper),
             ("Zenburn", ThemeName::Zenburn),
+            ("Sakura", ThemeName::Sakura),
         ];
 
         for (input, expected) in themes {
@@ -3611,6 +3778,7 @@ mod tests {
             ("catppuccin", ThemeName::CatppuccinMocha),
             ("synthwave84", ThemeName::Synthwave84),
             ("tokyonight", ThemeName::TokyoNight),
+            ("flowers", ThemeName::Sakura),
         ];
 
         for (input, expected) in aliases {
@@ -3765,5 +3933,63 @@ mod tests {
             effect_theme.effects.enabled(),
             "Diamond should report effects enabled"
         );
+    }
+
+    #[test]
+    fn test_particle_themes_enable_particle_profiles() {
+        let sakura = Theme::builtin(ThemeName::Sakura);
+        let matrix = Theme::builtin(ThemeName::Matrix);
+        let diamond = Theme::builtin(ThemeName::Diamond);
+        let reef = Theme::builtin(ThemeName::BioluminescentReef);
+        let black_hole = Theme::builtin(ThemeName::BlackHole);
+
+        assert!(sakura.effects.particle.enabled);
+        assert_eq!(sakura.effects.particle.profile, ParticleProfile::Sakura);
+        assert_eq!(
+            sakura.effects.particle.layer_mode,
+            ParticleLayerMode::Background
+        );
+
+        assert!(matrix.effects.particle.enabled);
+        assert_eq!(matrix.effects.particle.profile, ParticleProfile::Matrix);
+        assert_eq!(
+            matrix.effects.particle.layer_mode,
+            ParticleLayerMode::Background
+        );
+
+        assert!(diamond.effects.particle.enabled);
+        assert_eq!(diamond.effects.particle.profile, ParticleProfile::Diamond);
+        assert_eq!(
+            diamond.effects.particle.layer_mode,
+            ParticleLayerMode::Background
+        );
+
+        assert!(reef.effects.particle.enabled);
+        assert_eq!(
+            reef.effects.particle.profile,
+            ParticleProfile::BioluminescentReef
+        );
+        assert_eq!(
+            reef.effects.particle.layer_mode,
+            ParticleLayerMode::Background
+        );
+
+        assert!(black_hole.effects.particle.enabled);
+        assert_eq!(
+            black_hole.effects.particle.profile,
+            ParticleProfile::BlackHole
+        );
+        assert_eq!(
+            black_hole.effects.particle.layer_mode,
+            ParticleLayerMode::Foreground
+        );
+    }
+
+    #[test]
+    fn test_non_particle_theme_keeps_particle_effects_disabled() {
+        let nord = Theme::builtin(ThemeName::Nord);
+        assert!(!nord.effects.particle.enabled);
+        assert_eq!(nord.effects.particle.layer_mode, ParticleLayerMode::None);
+        assert_eq!(nord.effects.particle.profile, ParticleProfile::None);
     }
 }

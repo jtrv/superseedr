@@ -19,6 +19,10 @@ use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
     TorrentSettings, TorrentSortColumn,
 };
+use crate::persistence::network_history::{
+    load_network_history_state, save_network_history_state, NetworkHistoryPersistedState,
+    NetworkHistoryRollupState,
+};
 use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
 use crate::token_bucket::TokenBucket;
@@ -34,8 +38,10 @@ use crate::config::get_watch_path;
 use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
+use crate::telemetry::network_history_telemetry::NetworkHistoryTelemetry;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
+use crate::tuning::{make_random_adjustment, normalize_limits_for_mode, TuningController};
 
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
@@ -71,8 +77,6 @@ use std::time::Duration;
 
 use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::cell::RefCell;
-use throbber_widgets_tui::ThrobberState;
 
 use sysinfo::System;
 
@@ -91,9 +95,6 @@ use directories::UserDirs;
 
 use ratatui::crossterm::event::{self, Event as CrosstermEvent};
 
-use rand::seq::SliceRandom;
-use rand::Rng;
-
 #[cfg(unix)]
 use rlimit::Resource;
 
@@ -101,6 +102,8 @@ const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
+const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
+const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 #[derive(serde::Deserialize)]
 struct CratesResponse {
@@ -190,11 +193,6 @@ pub struct FileMetadata {
     pub modified: std::time::SystemTime,
 }
 
-#[derive(Debug, Default)]
-pub struct ThrobberHolder {
-    pub torrent_sparkline: ThrobberState,
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub enum DataRate {
     RateQuarter,
@@ -270,7 +268,7 @@ impl DataRate {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct CalculatedLimits {
     pub reserve_permits: usize,
     pub max_connected_peers: usize,
@@ -299,6 +297,9 @@ pub enum GraphDisplayMode {
     ThreeHours,
     TwelveHours,
     TwentyFourHours,
+    SevenDays,
+    ThirtyDays,
+    OneYear,
 }
 
 impl GraphDisplayMode {
@@ -312,6 +313,9 @@ impl GraphDisplayMode {
             Self::ThreeHours => 3 * 3600,
             Self::TwelveHours => 12 * 3600,
             Self::TwentyFourHours => 86_400,
+            Self::SevenDays => 7 * 86_400,
+            Self::ThirtyDays => 30 * 86_400,
+            Self::OneYear => 365 * 86_400,
         }
     }
 
@@ -325,6 +329,9 @@ impl GraphDisplayMode {
             Self::ThreeHours => "3h",
             Self::TwelveHours => "12h",
             Self::TwentyFourHours => "24h",
+            Self::SevenDays => "7d",
+            Self::ThirtyDays => "30d",
+            Self::OneYear => "1y",
         }
     }
 
@@ -337,13 +344,16 @@ impl GraphDisplayMode {
             Self::OneHour => Self::ThreeHours,
             Self::ThreeHours => Self::TwelveHours,
             Self::TwelveHours => Self::TwentyFourHours,
-            Self::TwentyFourHours => Self::OneMinute,
+            Self::TwentyFourHours => Self::SevenDays,
+            Self::SevenDays => Self::ThirtyDays,
+            Self::ThirtyDays => Self::OneYear,
+            Self::OneYear => Self::OneMinute,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            Self::OneMinute => Self::TwentyFourHours,
+            Self::OneMinute => Self::OneYear,
             Self::FiveMinutes => Self::OneMinute,
             Self::TenMinutes => Self::FiveMinutes,
             Self::ThirtyMinutes => Self::TenMinutes,
@@ -351,6 +361,9 @@ impl GraphDisplayMode {
             Self::ThreeHours => Self::OneHour,
             Self::TwelveHours => Self::ThreeHours,
             Self::TwentyFourHours => Self::TwelveHours,
+            Self::SevenDays => Self::TwentyFourHours,
+            Self::ThirtyDays => Self::SevenDays,
+            Self::OneYear => Self::ThirtyDays,
         }
     }
 }
@@ -393,6 +406,11 @@ pub enum AppCommand {
     },
     RssDownloadSelected(RssHistoryEntry),
     RssDownloadPreview(RssPreviewItem),
+    NetworkHistoryLoaded(NetworkHistoryPersistedState),
+    NetworkHistoryPersisted {
+        request_id: u64,
+        success: bool,
+    },
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
 }
@@ -699,6 +717,12 @@ pub struct AppState {
     pub graph_mode: GraphDisplayMode,
     pub minute_avg_dl_history: Vec<u64>,
     pub minute_avg_ul_history: Vec<u64>,
+    pub network_history_state: NetworkHistoryPersistedState,
+    pub network_history_rollups: NetworkHistoryRollupState,
+    pub network_history_dirty: bool,
+    pub network_history_restore_pending: bool,
+    pub next_network_history_persist_request_id: u64,
+    pub pending_network_history_persist_request_id: Option<u64>,
 
     pub last_tuning_score: u64,
     pub current_tuning_score: u64,
@@ -715,8 +739,6 @@ pub struct AppState {
     pub disk_health_state_level: u8,
 
     pub recently_processed_files: HashMap<PathBuf, Instant>,
-
-    pub throbber_holder: RefCell<ThrobberHolder>,
 }
 
 pub struct App {
@@ -751,12 +773,21 @@ pub struct App {
     pub tui_task: Option<tokio::task::JoinHandle<()>>,
     pub notify_rx: mpsc::Receiver<Result<Event, NotifyError>>,
     pub watcher: RecommendedWatcher,
+    pub tuning_controller: TuningController,
+    pub next_tuning_at: time::Instant,
+}
+
+#[derive(Clone)]
+pub struct NetworkHistoryPersistRequest {
+    pub request_id: u64,
+    pub state: NetworkHistoryPersistedState,
 }
 
 #[derive(Clone)]
 pub struct PersistPayload {
     pub settings: Settings,
     pub rss_state: RssPersistedState,
+    pub network_history: Option<NetworkHistoryPersistRequest>,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -773,26 +804,67 @@ impl App {
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
         let (persistence_tx, mut persistence_rx) = watch::channel::<Option<PersistPayload>>(None);
+        let persistence_app_command_tx = app_command_tx.clone();
         let persistence_task = tokio::spawn(async move {
             while persistence_rx.changed().await.is_ok() {
                 let Some(payload) = persistence_rx.borrow().clone() else {
                     continue;
                 };
+                let network_history_request_id = payload
+                    .network_history
+                    .as_ref()
+                    .map(|request| request.request_id);
                 let write_result = tokio::task::spawn_blocking(move || {
                     save_settings(&payload.settings)
                         .map_err(|e| format!("Failed to auto-save settings: {}", e))?;
                     save_rss_state(&payload.rss_state)
                         .map_err(|e| format!("Failed to auto-save RSS state: {}", e))?;
+                    if let Some(network_history) = payload.network_history {
+                        save_network_history_state(&network_history.state).map_err(|e| {
+                            format!("Failed to auto-save network history state: {}", e)
+                        })?;
+                    }
                     Ok::<(), String>(())
                 })
                 .await;
 
                 match write_result {
                     Ok(Ok(())) => {
-                        tracing_event!(Level::DEBUG, "Settings/RSS state auto-saved successfully.");
+                        tracing_event!(
+                            Level::DEBUG,
+                            "Persistence payload auto-saved successfully."
+                        );
+                        if let Some(request_id) = network_history_request_id {
+                            let _ = persistence_app_command_tx
+                                .send(AppCommand::NetworkHistoryPersisted {
+                                    request_id,
+                                    success: true,
+                                })
+                                .await;
+                        }
                     }
-                    Ok(Err(e)) => tracing_event!(Level::ERROR, "{}", e),
-                    Err(e) => tracing_event!(Level::ERROR, "Persistence writer join failed: {}", e),
+                    Ok(Err(e)) => {
+                        tracing_event!(Level::ERROR, "{}", e);
+                        if let Some(request_id) = network_history_request_id {
+                            let _ = persistence_app_command_tx
+                                .send(AppCommand::NetworkHistoryPersisted {
+                                    request_id,
+                                    success: false,
+                                })
+                                .await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing_event!(Level::ERROR, "Persistence writer join failed: {}", e);
+                        if let Some(request_id) = network_history_request_id {
+                            let _ = persistence_app_command_tx
+                                .send(AppCommand::NetworkHistoryPersisted {
+                                    request_id,
+                                    success: false,
+                                })
+                                .await;
+                        }
+                    }
                 }
             }
         });
@@ -868,6 +940,8 @@ impl App {
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
         let persisted_rss_state = load_rss_state();
 
+        let tuning_controller = TuningController::new_adaptive(limits.clone());
+        let tuning_state = tuning_controller.state().clone();
         let app_state = AppState {
             system_warning: None,
             system_error: None,
@@ -896,16 +970,19 @@ impl App {
             lifetime_uploaded_from_config: client_configs.lifetime_uploaded,
             minute_disk_backoff_history_ms: VecDeque::with_capacity(24 * 60),
             max_disk_backoff_this_tick_ms: 0,
-            last_tuning_score: 0,
-            current_tuning_score: 0,
-            tuning_countdown: 90,
-            last_tuning_limits: limits.clone(),
+            last_tuning_score: tuning_state.last_tuning_score,
+            current_tuning_score: tuning_state.current_tuning_score,
+            tuning_countdown: tuning_controller.cadence_secs(),
+            last_tuning_limits: tuning_state.last_tuning_limits,
+            baseline_speed_ema: tuning_state.baseline_speed_ema,
             adaptive_max_scpb: 10.0,
             ..Default::default()
         };
 
         let (notify_tx, notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
         let watcher = watcher::create_watcher(&client_configs, notify_tx)?;
+        let initial_tuning_deadline =
+            time::Instant::now() + Duration::from_secs(tuning_controller.cadence_secs());
 
         let mut app = Self {
             app_state,
@@ -936,6 +1013,8 @@ impl App {
             tui_task: None,
             watcher,
             notify_rx,
+            tuning_controller,
+            next_tuning_at: initial_tuning_deadline,
         };
         app.refresh_system_warning();
 
@@ -952,6 +1031,14 @@ impl App {
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
         for torrent_config in torrents_to_load {
+            if !should_load_persisted_torrent(&torrent_config) {
+                tracing_event!(
+                    Level::WARN,
+                    torrent = %torrent_config.torrent_or_magnet,
+                    "Skipping persisted torrent left in transient Deleting state during startup"
+                );
+                continue;
+            }
             if torrent_config.torrent_or_magnet.starts_with("magnet:") {
                 app.add_magnet_torrent(
                     torrent_config.name.clone(),
@@ -1000,14 +1087,18 @@ impl App {
         self.process_pending_commands().await;
 
         self.startup_crossterm_event_listener();
+        self.startup_network_history_restore();
 
         let mut sys = System::new();
 
         let mut stats_interval = time::interval(Duration::from_secs(1));
-        let mut tuning_interval = time::interval(Duration::from_secs(90));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
+        let mut network_history_persist_interval =
+            time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
+        self.reschedule_tuning_deadline();
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let output_status_interval = self.client_configs.output_status_interval;
         let mut status_dump_timer = tokio::time::interval(std::time::Duration::from_secs(
@@ -1024,6 +1115,7 @@ impl App {
                 AppMode::PowerSaving => Duration::from_secs(1), // Force 1 FPS for Zen mode
                 _ => Duration::from_millis(self.app_state.data_rate.as_ms()), // User-defined FPS
             };
+            let next_tuning_at = self.next_tuning_at;
 
             tokio::select! {
                 _ = signal::ctrl_c() => {
@@ -1057,12 +1149,18 @@ impl App {
                     self.app_state.ui.needs_redraw = true;
                 }
 
-                _ = tuning_interval.tick() => {
+                _ = time::sleep_until(next_tuning_at) => {
                     self.tuning_resource_limits().await;
+                    self.reschedule_tuning_deadline();
                 }
 
                 _ = status_dump_timer.tick(), if output_status_interval > 0 => {
                     self.dump_status_to_file();
+                }
+                _ = network_history_persist_interval.tick() => {
+                    if should_persist_network_history_on_interval(&self.app_state) {
+                        self.save_state_to_disk();
+                    }
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
@@ -1264,12 +1362,7 @@ impl App {
     }
 
     async fn flush_persistence_writer(&mut self) {
-        self.persistence_tx = None;
-        if let Some(handle) = self.persistence_task.take() {
-            if let Err(e) = handle.await {
-                tracing_event!(Level::ERROR, "Error joining persistence task: {}", e);
-            }
-        }
+        flush_persistence_writer_parts(&mut self.persistence_tx, &mut self.persistence_task).await;
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
@@ -1293,7 +1386,7 @@ impl App {
             return;
         }
 
-        let shutdown_timeout = time::sleep(Duration::from_secs(5));
+        let shutdown_timeout = time::sleep(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS));
         let mut draw_interval = time::interval(Duration::from_millis(100));
         tokio::pin!(shutdown_timeout);
 
@@ -1858,6 +1951,17 @@ impl App {
                 self.refresh_rss_derived();
                 self.app_state.ui.needs_redraw = true;
             }
+            AppCommand::NetworkHistoryLoaded(state) => {
+                NetworkHistoryTelemetry::apply_loaded_state(&mut self.app_state, state);
+                self.app_state.network_history_restore_pending = false;
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::NetworkHistoryPersisted {
+                request_id,
+                success,
+            } => {
+                apply_network_history_persist_result(&mut self.app_state, request_id, success);
+            }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
@@ -2204,7 +2308,59 @@ impl App {
     }
 
     fn calculate_stats(&mut self, sys: &mut System) {
+        let was_seeding = self.app_state.is_seeding;
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
+        NetworkHistoryTelemetry::on_second_tick(&mut self.app_state);
+        self.tuning_controller.on_second_tick();
+        self.app_state.tuning_countdown = self.tuning_controller.countdown_secs();
+        if was_seeding != self.app_state.is_seeding {
+            self.reset_tuning_for_objective_change();
+
+            let rm = self.resource_manager.clone();
+            let limits_map = self.app_state.limits.clone().into_map();
+            tokio::spawn(async move {
+                let _ = rm.update_limits(limits_map).await;
+            });
+        }
+
+        let history = if !self.app_state.is_seeding {
+            &self.app_state.avg_download_history
+        } else {
+            &self.app_state.avg_upload_history
+        };
+        let lookback = self.tuning_controller.lookback_secs();
+        let relevant_history = &history[history.len().saturating_sub(lookback)..];
+        self.tuning_controller.update_live_score(
+            relevant_history,
+            self.app_state.global_disk_thrash_score,
+            self.app_state.adaptive_max_scpb,
+        );
+        self.sync_tuning_state_from_controller();
+    }
+
+    fn startup_network_history_restore(&mut self) {
+        self.app_state.network_history_restore_pending = true;
+        let tx = self.app_command_tx.clone();
+        tokio::spawn(async move {
+            let load_result = tokio::task::spawn_blocking(load_network_history_state).await;
+            match load_result {
+                Ok(state) => {
+                    let _ = tx.send(AppCommand::NetworkHistoryLoaded(state)).await;
+                }
+                Err(e) => {
+                    tracing_event!(
+                        Level::ERROR,
+                        "Network history restore task failed to join: {}",
+                        e
+                    );
+                    let _ = tx
+                        .send(AppCommand::NetworkHistoryLoaded(
+                            NetworkHistoryPersistedState::default(),
+                        ))
+                        .await;
+                }
+            }
+        });
     }
 
     fn drain_latest_torrent_metrics(&mut self) {
@@ -2238,58 +2394,36 @@ impl App {
     }
 
     async fn tuning_resource_limits(&mut self) {
-        self.app_state.tuning_countdown = 90;
         let history = if !self.app_state.is_seeding {
             &self.app_state.avg_download_history
         } else {
             &self.app_state.avg_upload_history
         };
 
-        let relevant_history = &history[history.len().saturating_sub(60)..];
-        let new_raw_score = if relevant_history.is_empty() {
-            0
-        } else {
-            relevant_history.iter().sum::<u64>() / relevant_history.len() as u64
-        };
-        let current_scpb = self.app_state.global_disk_thrash_score;
-        let scpb_max = self.app_state.adaptive_max_scpb;
-        let penalty_factor = (current_scpb / scpb_max - 1.0).max(0.0);
-        let new_score = (new_raw_score as f64 / (1.0 + penalty_factor)) as u64;
-        self.app_state.current_tuning_score = new_score;
+        let lookback = self.tuning_controller.lookback_secs();
+        let relevant_history = &history[history.len().saturating_sub(lookback)..];
+        let evaluation = self.tuning_controller.evaluate_cycle(
+            &self.app_state.limits,
+            relevant_history,
+            self.app_state.global_disk_thrash_score,
+            self.app_state.adaptive_max_scpb,
+        );
+        self.sync_tuning_state_from_controller();
 
-        const BASELINE_ALPHA: f64 = 0.1; // Slower-moving average
-        let new_score_f64 = new_score as f64;
-        if self.app_state.baseline_speed_ema == 0.0 {
-            self.app_state.baseline_speed_ema = new_score_f64;
-        } else {
-            self.app_state.baseline_speed_ema = (new_score_f64 * BASELINE_ALPHA)
-                + (self.app_state.baseline_speed_ema * (1.0 - BASELINE_ALPHA));
-        }
-
-        let best_score = self.app_state.last_tuning_score;
-        if new_score > best_score {
-            self.app_state.last_tuning_score = new_score;
-            self.app_state.last_tuning_limits = self.app_state.limits.clone();
+        if evaluation.accepted_improvement {
             tracing_event!(
                 Level::DEBUG,
                 "Self-Tune: SUCCESS. New best score: {} (raw: {}, penalty: {:.2}x)",
-                new_score,
-                new_raw_score,
-                penalty_factor
+                evaluation.new_score,
+                evaluation.new_raw_score,
+                evaluation.penalty_factor
             );
         } else {
-            self.app_state.limits = self.app_state.last_tuning_limits.clone();
-
-            let baseline_u64 = self.app_state.baseline_speed_ema as u64;
-
-            const REALITY_CHECK_FACTOR: f64 = 2.0;
-            if best_score > 10_000
-                && best_score > (self.app_state.baseline_speed_ema * REALITY_CHECK_FACTOR) as u64
-            {
-                self.app_state.last_tuning_score = baseline_u64;
-                tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", new_score, new_raw_score, best_score, baseline_u64);
+            self.app_state.limits = evaluation.effective_limits.clone();
+            if evaluation.reality_check_applied {
+                tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", evaluation.new_score, evaluation.new_raw_score, evaluation.best_score_before, evaluation.baseline_u64);
             } else {
-                tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", new_score, new_raw_score, penalty_factor, best_score, baseline_u64);
+                tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", evaluation.new_score, evaluation.new_raw_score, evaluation.penalty_factor, evaluation.best_score_before, evaluation.baseline_u64);
             }
 
             let _ = self
@@ -2298,7 +2432,8 @@ impl App {
                 .await;
         }
 
-        let (next_limits, desc) = make_random_adjustment(self.app_state.limits.clone());
+        let (next_limits, desc) =
+            make_random_adjustment(self.app_state.limits.clone(), self.app_state.is_seeding);
         self.app_state.limits = next_limits;
 
         tracing_event!(Level::DEBUG, "Self-Tune: Trying next change... {}", desc);
@@ -2308,77 +2443,43 @@ impl App {
             .await;
     }
 
+    fn reschedule_tuning_deadline(&mut self) {
+        self.next_tuning_at =
+            time::Instant::now() + Duration::from_secs(self.tuning_controller.cadence_secs());
+    }
+
+    fn reset_tuning_for_objective_change(&mut self) {
+        self.app_state.limits =
+            normalize_limits_for_mode(&self.app_state.limits, self.app_state.is_seeding);
+        self.tuning_controller
+            .reset_for_objective_change(&self.app_state.limits);
+        self.sync_tuning_state_from_controller();
+        self.reschedule_tuning_deadline();
+    }
+
+    fn sync_tuning_state_from_controller(&mut self) {
+        let state = self.tuning_controller.state();
+        self.app_state.last_tuning_score = state.last_tuning_score;
+        self.app_state.current_tuning_score = state.current_tuning_score;
+        self.app_state.last_tuning_limits = state.last_tuning_limits.clone();
+        self.app_state.baseline_speed_ema = state.baseline_speed_ema;
+        self.app_state.tuning_countdown = self.tuning_controller.countdown_secs();
+    }
+
     fn save_state_to_disk(&mut self) {
-        self.client_configs.lifetime_downloaded = self.app_state.lifetime_downloaded_from_config
-            + self.app_state.session_total_downloaded;
-        self.client_configs.lifetime_uploaded =
-            self.app_state.lifetime_uploaded_from_config + self.app_state.session_total_uploaded;
+        let payload = build_persist_payload(&mut self.client_configs, &mut self.app_state);
+        let network_history_request_id = payload
+            .network_history
+            .as_ref()
+            .map(|request| request.request_id);
 
-        self.client_configs.torrent_sort_column = self.app_state.torrent_sort.0;
-        self.client_configs.torrent_sort_direction = self.app_state.torrent_sort.1;
-        self.client_configs.peer_sort_column = self.app_state.peer_sort.0;
-        self.client_configs.peer_sort_direction = self.app_state.peer_sort.1;
-        let old_validation_statuses: HashMap<String, bool> = self
-            .client_configs
-            .torrents
-            .iter()
-            .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
-            .collect();
-
-        self.client_configs.torrents = self
-            .app_state
-            .torrents
-            .values()
-            .map(|torrent| {
-                let torrent_state = &torrent.latest_state;
-                let previous_validation_status = old_validation_statuses
-                    .get(&torrent_state.torrent_or_magnet)
-                    .copied()
-                    .unwrap_or(false);
-
-                let final_validation_status = persisted_validation_status_from_piece_completion(
-                    torrent_state.number_of_pieces_total,
-                    torrent_state.number_of_pieces_completed,
-                    previous_validation_status,
-                );
-
-                TorrentSettings {
-                    torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
-                    name: torrent_state.torrent_name.clone(),
-                    validation_status: final_validation_status,
-                    download_path: torrent_state.download_path.clone(),
-                    container_name: torrent_state.container_name.clone(),
-                    torrent_control_state: torrent_state.torrent_control_state.clone(),
-                    file_priorities: torrent_state.file_priorities.clone(),
-                }
-            })
-            .collect();
-
-        const RSS_HISTORY_LIMIT: usize = 1000;
-        if self.app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
-            let overflow = self.app_state.rss_runtime.history.len() - RSS_HISTORY_LIMIT;
-            self.app_state.rss_runtime.history.drain(0..overflow);
-        }
-
-        let rss_state = RssPersistedState {
-            history: self.app_state.rss_runtime.history.clone(),
-            last_sync_at: self.app_state.rss_runtime.last_sync_at.clone(),
-            feed_errors: self.app_state.rss_runtime.feed_errors.clone(),
-        };
-
-        let payload = PersistPayload {
-            settings: self.client_configs.clone(),
-            rss_state,
-        };
-
-        if let Some(tx) = &self.persistence_tx {
-            tx.send_replace(Some(payload));
-            if tx.is_closed() {
-                tracing_event!(
-                    Level::ERROR,
-                    "Failed to queue persistence payload: persistence task unavailable"
-                );
-            }
+        if queue_persistence_payload(self.persistence_tx.as_ref(), payload).is_ok() {
+            self.app_state.pending_network_history_persist_request_id = network_history_request_id;
+        } else {
+            tracing_event!(
+                Level::ERROR,
+                "Failed to queue persistence payload: persistence task unavailable"
+            );
         }
     }
 
@@ -3236,102 +3337,6 @@ fn compose_system_warning(
     }
 }
 
-const MIN_STEP_RATE: f64 = 0.01;
-const MAX_STEP_RATE: f64 = 0.10;
-
-// --- Define Min/Max bounds for all resource types ---
-const MIN_PEERS: usize = 20;
-const MIN_DISK: usize = 2;
-const MIN_RESERVE: usize = 0;
-
-// --- Maximum attempts to find a valid trade per cycle ---
-const MAX_TRADE_ATTEMPTS: usize = 5;
-
-fn get_limit(limits: &CalculatedLimits, resource: ResourceType) -> usize {
-    match resource {
-        ResourceType::PeerConnection => limits.max_connected_peers,
-        ResourceType::DiskRead => limits.disk_read_permits,
-        ResourceType::DiskWrite => limits.disk_write_permits,
-        ResourceType::Reserve => limits.reserve_permits,
-    }
-}
-
-fn set_limit(limits: &mut CalculatedLimits, resource: ResourceType, value: usize) {
-    match resource {
-        ResourceType::PeerConnection => limits.max_connected_peers = value,
-        ResourceType::DiskRead => limits.disk_read_permits = value,
-        ResourceType::DiskWrite => limits.disk_write_permits = value,
-        ResourceType::Reserve => limits.reserve_permits = value,
-    }
-}
-
-/// Makes a random, proportional trade, retrying a few times if the first is blocked.
-/// This version is refactored to support any number of resources, including Reserve.
-fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, String) {
-    let mut rng = rand::rng();
-    let mut parameters = [
-        ResourceType::PeerConnection,
-        ResourceType::DiskRead,
-        ResourceType::DiskWrite,
-        ResourceType::Reserve, // Add Reserve to the trading pool
-    ];
-
-    for attempt in 0..MAX_TRADE_ATTEMPTS {
-        parameters.shuffle(&mut rng);
-        let source_param = parameters[0];
-        let dest_param = parameters[1];
-
-        let source_val = get_limit(&limits, source_param);
-        let dest_val = get_limit(&limits, dest_param);
-
-        let source_min = match source_param {
-            ResourceType::PeerConnection => MIN_PEERS,
-            ResourceType::DiskRead => MIN_DISK,
-            ResourceType::DiskWrite => MIN_DISK,
-            ResourceType::Reserve => MIN_RESERVE,
-        };
-
-        let step_rate = rng.random_range(MIN_STEP_RATE..=MAX_STEP_RATE);
-        let amount_to_trade = ((source_val as f64 * step_rate).ceil() as usize).max(1);
-
-        let can_give = source_val >= source_min.saturating_add(amount_to_trade);
-
-        if can_give {
-            // --- VALID TRADE FOUND ---
-
-            set_limit(
-                &mut limits,
-                source_param,
-                source_val.saturating_sub(amount_to_trade),
-            );
-            set_limit(
-                &mut limits,
-                dest_param,
-                dest_val.saturating_add(amount_to_trade),
-            );
-
-            let description = format!(
-                "Traded {} from {:?} to {:?} (Attempt {})",
-                amount_to_trade,
-                source_param,
-                dest_param,
-                attempt + 1
-            );
-            // Return immediately with the successful trade
-            return (limits, description);
-        }
-        // If trade wasn't possible, the loop continues to the next attempt...
-    }
-
-    // --- NO VALID TRADE FOUND after all attempts ---
-    // Return the original limits unchanged
-    let description = format!(
-        "Skipped all trade attempts ({}) this cycle: blocked by bounds",
-        MAX_TRADE_ATTEMPTS
-    );
-    (limits, description)
-}
-
 pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
     // Try Hex Decoding (Handles standard V1 and Hex-encoded V2 Multihash)
     if let Ok(bytes) = hex::decode(hash_string) {
@@ -3570,6 +3575,130 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
     new_settings.rss != old_settings.rss
 }
 
+fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
+    torrent_settings.torrent_control_state != TorrentControlState::Deleting
+}
+
+fn build_persist_payload(
+    client_configs: &mut Settings,
+    app_state: &mut AppState,
+) -> PersistPayload {
+    client_configs.lifetime_downloaded =
+        app_state.lifetime_downloaded_from_config + app_state.session_total_downloaded;
+    client_configs.lifetime_uploaded =
+        app_state.lifetime_uploaded_from_config + app_state.session_total_uploaded;
+
+    client_configs.torrent_sort_column = app_state.torrent_sort.0;
+    client_configs.torrent_sort_direction = app_state.torrent_sort.1;
+    client_configs.peer_sort_column = app_state.peer_sort.0;
+    client_configs.peer_sort_direction = app_state.peer_sort.1;
+    let old_validation_statuses: HashMap<String, bool> = client_configs
+        .torrents
+        .iter()
+        .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
+        .collect();
+
+    client_configs.torrents = app_state
+        .torrents
+        .values()
+        .map(|torrent| {
+            let torrent_state = &torrent.latest_state;
+            let previous_validation_status = old_validation_statuses
+                .get(&torrent_state.torrent_or_magnet)
+                .copied()
+                .unwrap_or(false);
+
+            let final_validation_status = persisted_validation_status_from_piece_completion(
+                torrent_state.number_of_pieces_total,
+                torrent_state.number_of_pieces_completed,
+                previous_validation_status,
+            );
+
+            TorrentSettings {
+                torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
+                name: torrent_state.torrent_name.clone(),
+                validation_status: final_validation_status,
+                download_path: torrent_state.download_path.clone(),
+                container_name: torrent_state.container_name.clone(),
+                torrent_control_state: torrent_state.torrent_control_state.clone(),
+                file_priorities: torrent_state.file_priorities.clone(),
+            }
+        })
+        .collect();
+
+    const RSS_HISTORY_LIMIT: usize = 1000;
+    if app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
+        let overflow = app_state.rss_runtime.history.len() - RSS_HISTORY_LIMIT;
+        app_state.rss_runtime.history.drain(0..overflow);
+    }
+
+    let rss_state = RssPersistedState {
+        history: app_state.rss_runtime.history.clone(),
+        last_sync_at: app_state.rss_runtime.last_sync_at.clone(),
+        feed_errors: app_state.rss_runtime.feed_errors.clone(),
+    };
+
+    let network_history = if app_state.network_history_restore_pending {
+        None
+    } else {
+        app_state.network_history_state.rollups = app_state.network_history_rollups.to_snapshot();
+        app_state.network_history_state.updated_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        app_state.next_network_history_persist_request_id = app_state
+            .next_network_history_persist_request_id
+            .saturating_add(1);
+        Some(NetworkHistoryPersistRequest {
+            request_id: app_state.next_network_history_persist_request_id,
+            state: app_state.network_history_state.clone(),
+        })
+    };
+
+    PersistPayload {
+        settings: client_configs.clone(),
+        rss_state,
+        network_history,
+    }
+}
+
+fn apply_network_history_persist_result(app_state: &mut AppState, request_id: u64, success: bool) {
+    if success && app_state.pending_network_history_persist_request_id == Some(request_id) {
+        app_state.network_history_dirty = false;
+        app_state.pending_network_history_persist_request_id = None;
+    }
+}
+
+fn should_persist_network_history_on_interval(app_state: &AppState) -> bool {
+    app_state.network_history_dirty
+}
+
+fn queue_persistence_payload(
+    tx: Option<&watch::Sender<Option<PersistPayload>>>,
+    payload: PersistPayload,
+) -> Result<(), ()> {
+    let Some(tx) = tx else {
+        return Err(());
+    };
+    tx.send_replace(Some(payload));
+    if tx.is_closed() {
+        return Err(());
+    }
+    Ok(())
+}
+
+async fn flush_persistence_writer_parts(
+    persistence_tx: &mut Option<watch::Sender<Option<PersistPayload>>>,
+    persistence_task: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    *persistence_tx = None;
+    if let Some(handle) = persistence_task.take() {
+        if let Err(e) = handle.await {
+            tracing_event!(Level::ERROR, "Error joining persistence task: {}", e);
+        }
+    }
+}
+
 fn prune_rss_feed_errors(
     feed_errors: &mut HashMap<String, FeedSyncError>,
     settings: &Settings,
@@ -3588,15 +3717,22 @@ fn prune_rss_feed_errors(
 #[cfg(test)]
 mod tests {
     use super::{
+        apply_network_history_persist_result, build_persist_payload,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        parse_hybrid_hashes, persisted_validation_status_from_piece_completion,
-        prune_rss_feed_errors, resolve_magnet_torrent_name, rss_settings_changed,
+        flush_persistence_writer_parts, parse_hybrid_hashes,
+        persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
+        queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
+        should_load_persisted_torrent, should_persist_network_history_on_interval,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
-        SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
-        UiState,
+        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
+        TorrentMetrics, TorrentSortColumn, UiState,
     };
+    use crate::config::TorrentSettings;
     use std::collections::HashMap;
+    use std::time::Duration;
+    use tokio::time;
+
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
         let mut display = TorrentDisplayState::default();
         display.latest_state.torrent_name = name.to_string();
@@ -3869,5 +4005,199 @@ mod tests {
             Some("dht warning".to_string())
         );
         assert_eq!(compose_system_warning(None, None), None);
+    }
+
+    #[test]
+    fn should_load_persisted_torrent_skips_only_deleting_entries() {
+        let running = TorrentSettings {
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+        let paused = TorrentSettings {
+            torrent_control_state: TorrentControlState::Paused,
+            ..Default::default()
+        };
+        let deleting = TorrentSettings {
+            torrent_control_state: TorrentControlState::Deleting,
+            ..Default::default()
+        };
+
+        assert!(should_load_persisted_torrent(&running));
+        assert!(should_load_persisted_torrent(&paused));
+        assert!(!should_load_persisted_torrent(&deleting));
+    }
+
+    #[tokio::test]
+    async fn reset_tuning_for_objective_change_reschedules_deadline() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        app.tuning_controller.on_second_tick();
+        app.app_state.tuning_countdown = app.tuning_controller.countdown_secs();
+        let stale_deadline = time::Instant::now() + Duration::from_secs(300);
+        app.next_tuning_at = stale_deadline;
+
+        app.reset_tuning_for_objective_change();
+
+        let reset_cadence = app.tuning_controller.cadence_secs();
+        let remaining = app
+            .next_tuning_at
+            .saturating_duration_since(time::Instant::now());
+
+        assert_eq!(app.app_state.tuning_countdown, reset_cadence);
+        assert!(app.next_tuning_at < stale_deadline);
+        assert!(remaining <= Duration::from_secs(reset_cadence));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[test]
+    fn network_history_interval_persistence_only_when_dirty() {
+        let mut app_state = AppState {
+            network_history_dirty: false,
+            ..Default::default()
+        };
+        assert!(!should_persist_network_history_on_interval(&app_state));
+
+        app_state.network_history_dirty = true;
+        assert!(should_persist_network_history_on_interval(&app_state));
+    }
+
+    #[test]
+    fn build_persist_payload_skips_network_history_while_restore_is_pending() {
+        let mut settings = crate::config::Settings::default();
+        let mut app_state = AppState {
+            network_history_restore_pending: true,
+            ..Default::default()
+        };
+        app_state.network_history_state.tiers.second_1s.push(
+            crate::persistence::network_history::NetworkHistoryPoint {
+                ts_unix: 41,
+                download_bps: 1000,
+                upload_bps: 100,
+                backoff_ms_max: 0,
+            },
+        );
+
+        let payload = build_persist_payload(&mut settings, &mut app_state);
+
+        assert!(payload.network_history.is_none());
+        assert_eq!(app_state.network_history_state.updated_at_unix, 0);
+        assert_eq!(app_state.next_network_history_persist_request_id, 0);
+    }
+
+    #[test]
+    fn build_persist_payload_syncs_rollup_snapshot_into_network_history_state() {
+        let mut settings = crate::config::Settings::default();
+        let snapshot = crate::persistence::network_history::NetworkHistoryRollupSnapshot {
+            second_to_minute: crate::persistence::network_history::PersistedRollupAccumulator {
+                count: 7,
+                dl_sum: 7_000,
+                ul_sum: 700,
+                backoff_max: 9,
+            },
+            ..Default::default()
+        };
+        let mut app_state = AppState {
+            network_history_rollups:
+                crate::persistence::network_history::NetworkHistoryRollupState::from_snapshot(
+                    &snapshot,
+                ),
+            ..Default::default()
+        };
+
+        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let network_history = payload
+            .network_history
+            .expect("network history payload should be present");
+
+        assert_eq!(network_history.state.rollups, snapshot);
+        assert_eq!(app_state.network_history_state.rollups, snapshot);
+    }
+
+    #[test]
+    fn apply_network_history_persist_result_clears_dirty_only_for_latest_success() {
+        let mut app_state = AppState {
+            network_history_dirty: true,
+            pending_network_history_persist_request_id: Some(2),
+            ..Default::default()
+        };
+
+        apply_network_history_persist_result(&mut app_state, 1, true);
+        assert!(app_state.network_history_dirty);
+        assert_eq!(
+            app_state.pending_network_history_persist_request_id,
+            Some(2)
+        );
+
+        apply_network_history_persist_result(&mut app_state, 2, false);
+        assert!(app_state.network_history_dirty);
+        assert_eq!(
+            app_state.pending_network_history_persist_request_id,
+            Some(2)
+        );
+
+        apply_network_history_persist_result(&mut app_state, 2, true);
+        assert!(!app_state.network_history_dirty);
+        assert_eq!(app_state.pending_network_history_persist_request_id, None);
+    }
+
+    #[tokio::test]
+    async fn queue_persistence_payload_carries_network_history_state() {
+        let (tx, mut rx) = tokio::sync::watch::channel::<Option<PersistPayload>>(None);
+        let mut network_history_state =
+            crate::persistence::network_history::NetworkHistoryPersistedState {
+                updated_at_unix: 42,
+                ..Default::default()
+            };
+        network_history_state.tiers.second_1s.push(
+            crate::persistence::network_history::NetworkHistoryPoint {
+                ts_unix: 41,
+                download_bps: 1000,
+                upload_bps: 100,
+                backoff_ms_max: 0,
+            },
+        );
+
+        let payload = PersistPayload {
+            settings: crate::config::Settings::default(),
+            rss_state: crate::persistence::rss::RssPersistedState::default(),
+            network_history: Some(super::NetworkHistoryPersistRequest {
+                request_id: 7,
+                state: network_history_state.clone(),
+            }),
+        };
+
+        assert!(queue_persistence_payload(Some(&tx), payload).is_ok());
+        assert!(rx.changed().await.is_ok());
+
+        let received = rx.borrow().clone().expect("payload should be present");
+        let network_history = received
+            .network_history
+            .expect("network history payload should be present");
+        assert_eq!(network_history.request_id, 7);
+        assert_eq!(
+            network_history.state.updated_at_unix,
+            network_history_state.updated_at_unix
+        );
+        assert_eq!(
+            network_history.state.tiers.second_1s,
+            network_history_state.tiers.second_1s
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_persistence_writer_parts_drops_sender_and_joins_task() {
+        let (tx, mut rx) = tokio::sync::watch::channel::<Option<PersistPayload>>(None);
+        let task = tokio::spawn(async move { while rx.changed().await.is_ok() {} });
+
+        let mut tx_opt = Some(tx);
+        let mut task_opt = Some(task);
+        flush_persistence_writer_parts(&mut tx_opt, &mut task_opt).await;
+
+        assert!(tx_opt.is_none());
+        assert!(task_opt.is_none());
     }
 }

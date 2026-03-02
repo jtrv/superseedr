@@ -13,13 +13,14 @@ use crate::app::{
 };
 use crate::config::Settings;
 use crate::config::SortDirection;
-use crate::theme::ThemeContext;
+use crate::persistence::network_history::NetworkHistoryPoint;
+use crate::theme::{ThemeContext, ThemeName};
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
-    format_latency, format_limit_bps, format_limit_delta, format_memory, format_permits_spans,
-    format_speed, format_time, generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text,
-    speed_to_style, truncate_with_ellipsis,
+    format_latency, format_limit_bps, format_memory, format_speed, format_time,
+    generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
+    truncate_with_ellipsis,
 };
 use crate::tui::layout::common::compute_smart_table_layout;
 use crate::tui::layout::common::compute_visible_peer_columns;
@@ -53,12 +54,43 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, Gauge, LineGauge, Padding, Paragraph, Row, Table, TableState, Wrap,
 };
 use strum::IntoEnumIterator;
-use throbber_widgets_tui::Throbber;
 use tracing::{event as tracing_event, Level};
 
 static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SECONDS_HISTORY_MAX: usize = 3600;
 const MINUTES_HISTORY_MAX: usize = 48 * 60;
+const TUNING_LABEL_WIDTH: usize = 14;
+
+fn build_time_aligned_window(
+    points: &[NetworkHistoryPoint],
+    step_secs: u64,
+    window_points: usize,
+    now_unix: u64,
+) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+    if window_points == 0 || step_secs == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    let mut dl = vec![0_u64; window_points];
+    let mut ul = vec![0_u64; window_points];
+    let mut backoff = vec![0_u64; window_points];
+    let end_ts = now_unix.saturating_sub(now_unix % step_secs);
+    let start_ts = end_ts.saturating_sub((window_points.saturating_sub(1) as u64) * step_secs);
+
+    for point in points {
+        if point.ts_unix < start_ts || point.ts_unix > end_ts {
+            continue;
+        }
+        let idx = ((point.ts_unix - start_ts) / step_secs) as usize;
+        if idx < window_points {
+            dl[idx] = point.download_bps;
+            ul[idx] = point.upload_bps;
+            backoff[idx] = backoff[idx].max(point.backoff_ms_max);
+        }
+    }
+
+    (dl, ul, backoff)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
@@ -379,9 +411,6 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
 
     if let Some(r) = plan.chart {
         draw_network_chart(f, app_state, r, ctx);
-    }
-    if let Some(r) = plan.sparklines {
-        draw_torrent_sparklines(f, app_state, r, ctx);
     }
     if let Some(r) = plan.peer_stream {
         draw_peer_stream(f, app_state, r, ctx);
@@ -1452,51 +1481,50 @@ pub fn draw_network_chart(
         }
         smoothed_data
     };
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
-    let (
-        dl_history_source,
-        ul_history_source,
-        backoff_history_source_ms,
-        time_window_points,
-        _time_unit_secs,
-    ) = match app_state.graph_mode {
+    let (points_to_show, step_secs, source_points) = match app_state.graph_mode {
+        GraphDisplayMode::OneMinute
+        | GraphDisplayMode::FiveMinutes
+        | GraphDisplayMode::TenMinutes
+        | GraphDisplayMode::ThirtyMinutes
+        | GraphDisplayMode::OneHour => (
+            app_state
+                .graph_mode
+                .as_seconds()
+                .clamp(1, SECONDS_HISTORY_MAX),
+            1_u64,
+            &app_state.network_history_state.tiers.second_1s,
+        ),
         GraphDisplayMode::ThreeHours
         | GraphDisplayMode::TwelveHours
         | GraphDisplayMode::TwentyFourHours => (
-            &app_state.minute_avg_dl_history,
-            &app_state.minute_avg_ul_history,
-            &app_state.minute_disk_backoff_history_ms,
-            MINUTES_HISTORY_MAX,
-            60,
+            (app_state.graph_mode.as_seconds() / 60).clamp(1, MINUTES_HISTORY_MAX),
+            60_u64,
+            &app_state.network_history_state.tiers.minute_1m,
         ),
-        _ => {
-            let points = app_state.graph_mode.as_seconds().min(SECONDS_HISTORY_MAX);
-            (
-                &app_state.avg_download_history,
-                &app_state.avg_upload_history,
-                &app_state.disk_backoff_history_ms,
-                points,
-                1,
-            )
-        }
+        GraphDisplayMode::SevenDays => (
+            7 * 24 * 4,
+            15 * 60_u64,
+            &app_state.network_history_state.tiers.minute_15m,
+        ),
+        GraphDisplayMode::ThirtyDays => (
+            30 * 24 * 4,
+            15 * 60_u64,
+            &app_state.network_history_state.tiers.minute_15m,
+        ),
+        GraphDisplayMode::OneYear => (
+            365 * 24,
+            60 * 60_u64,
+            &app_state.network_history_state.tiers.hour_1h,
+        ),
     };
 
-    let dl_len = dl_history_source.len();
-    let ul_len = ul_history_source.len();
-    let backoff_len = backoff_history_source_ms.len();
-
-    let available_points = dl_len.min(ul_len).min(backoff_len);
-    let points_to_show = time_window_points.min(available_points);
-
-    let dl_history_slice = &dl_history_source[dl_len.saturating_sub(points_to_show)..];
-    let ul_history_slice = &ul_history_source[ul_len.saturating_sub(points_to_show)..];
-
-    let skip_count = backoff_len.saturating_sub(points_to_show);
-    let backoff_history_relevant_ms: Vec<u64> = backoff_history_source_ms
-        .iter()
-        .skip(skip_count)
-        .copied()
-        .collect();
+    let (dl_history_slice, ul_history_slice, backoff_history_relevant_ms) =
+        build_time_aligned_window(source_points, step_secs, points_to_show, now_unix);
 
     let stable_max_speed = dl_history_slice
         .iter()
@@ -1508,8 +1536,8 @@ pub fn draw_network_chart(
 
     let smoothing_period = 5.0;
     let alpha = 2.0 / (smoothing_period + 1.0);
-    let smoothed_dl_data = smooth_data(dl_history_slice, alpha);
-    let smoothed_ul_data = smooth_data(ul_history_slice, alpha);
+    let smoothed_dl_data = smooth_data(&dl_history_slice, alpha);
+    let smoothed_ul_data = smooth_data(&ul_history_slice, alpha);
 
     let dl_data: Vec<(f64, f64)> = smoothed_dl_data
         .iter()
@@ -1596,6 +1624,9 @@ pub fn draw_network_chart(
         GraphDisplayMode::ThreeHours,
         GraphDisplayMode::TwelveHours,
         GraphDisplayMode::TwentyFourHours,
+        GraphDisplayMode::SevenDays,
+        GraphDisplayMode::ThirtyDays,
+        GraphDisplayMode::OneYear,
     ];
     let mut title_spans: Vec<Span> = vec![Span::styled(
         "Network Activity ",
@@ -1722,37 +1753,54 @@ pub fn draw_stats_panel(
         ));
     }
 
-    let thrash_text: String;
-    let thrash_style: Style;
+    let thrash_value_text: String;
+    let thrash_delta_text: String;
+    let thrash_delta_style: Style;
     let baseline_val = app_state.adaptive_max_scpb;
     let thrash_score_val = app_state.global_disk_thrash_score;
     let thrash_score_str = format!("{:.0}", thrash_score_val);
 
     if thrash_score_val < 0.01 {
-        thrash_text = format!("- ({})", thrash_score_str);
-        thrash_style = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0));
+        thrash_value_text = "0".to_string();
+        thrash_delta_text = "(0%)".to_string();
+        thrash_delta_style = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0));
     } else if baseline_val == 0.0 {
-        thrash_text = format!("∞ ({})", thrash_score_str);
-        thrash_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
+        thrash_value_text = thrash_score_str;
+        thrash_delta_text = "(∞%)".to_string();
+        thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
     } else {
         let diff = thrash_score_val - baseline_val;
         let thrash_percentage = (diff / baseline_val) * 100.0;
+        let thrash_pct_display = if thrash_percentage.abs() < 0.5 {
+            "0%".to_string()
+        } else {
+            format!("{:.0}%", thrash_percentage)
+        };
+        thrash_value_text = thrash_score_str;
 
         if thrash_percentage > -0.01 && thrash_percentage < 0.01 {
-            thrash_text = format!("0.0% ({})", thrash_score_str);
-            thrash_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
+            thrash_delta_text = "(0%)".to_string();
+            thrash_delta_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
         } else {
-            thrash_text = format!("{:+.1}% ({})", thrash_percentage, thrash_score_str);
+            thrash_delta_text = format!("({})", thrash_pct_display);
             if thrash_percentage > 15.0 {
-                thrash_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
+                thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
             } else if thrash_percentage > 0.0 {
-                thrash_style = ctx.apply(Style::default().fg(ctx.state_warning()));
+                thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_warning()));
             } else {
-                thrash_style = ctx.apply(Style::default().fg(ctx.state_success()));
+                thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_success()));
             }
         }
     }
 
+    let tune_delta_pct = if app_state.last_tuning_score > 0 {
+        let best = app_state.last_tuning_score as f64;
+        let current = app_state.current_tuning_score as f64;
+        Some(((current - best) / best) * 100.0)
+    } else {
+        Some(0.0)
+    };
+    let tune_header = format!("Self-Tune({}s): ", app_state.tuning_countdown);
     let stats_text = vec![
         Line::from(vec![
             Span::styled(
@@ -1930,69 +1978,61 @@ pub fn draw_stats_panel(
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "Next Tuning in: ",
+                tune_header,
                 ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
             ),
-            Span::raw(format!("{}s", app_state.tuning_countdown)),
+            Span::styled(
+                app_state.current_tuning_score.to_string(),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+            ),
+            if let Some(delta_pct) = tune_delta_pct {
+                let delta_style = if delta_pct > 0.0 {
+                    ctx.apply(Style::default().fg(ctx.state_success()))
+                } else if delta_pct < 0.0 {
+                    ctx.apply(Style::default().fg(ctx.state_error()))
+                } else {
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+                };
+                Span::styled(format!(" ({:+.0}%)", delta_pct), delta_style)
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
             Span::styled(
                 "Disk Thrash: ",
                 ctx.apply(Style::default().fg(ctx.accent_teal())),
             ),
-            Span::styled(thrash_text, ctx.apply(thrash_style)),
+            Span::raw(format!("{} ", thrash_value_text)),
+            Span::styled(thrash_delta_text, thrash_delta_style),
         ]),
-        Line::from(vec![
-            Span::styled(
-                "Reserve Pool:  ",
-                ctx.apply(Style::default().fg(ctx.accent_teal())),
-            ),
-            Span::raw(app_state.limits.reserve_permits.to_string()),
-            format_limit_delta(
-                ctx,
-                app_state.limits.reserve_permits,
-                app_state.last_tuning_limits.reserve_permits,
-            ),
-        ]),
-        {
-            let mut spans = format_permits_spans(
-                ctx,
-                "Peer Slots: ",
-                total_peers,
-                app_state.limits.max_connected_peers,
-                ctx.state_selected(),
-            );
-            spans.push(format_limit_delta(
-                ctx,
-                app_state.limits.max_connected_peers,
-                app_state.last_tuning_limits.max_connected_peers,
-            ));
-            Line::from(spans)
-        },
-        Line::from(vec![
-            Span::styled(
-                "Disk Reads:    ",
-                ctx.apply(Style::default().fg(ctx.state_success())),
-            ),
-            Span::raw(app_state.limits.disk_read_permits.to_string()),
-            format_limit_delta(
-                ctx,
-                app_state.limits.disk_read_permits,
-                app_state.last_tuning_limits.disk_read_permits,
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Disk Writes:   ",
-                ctx.apply(Style::default().fg(ctx.accent_sky())),
-            ),
-            Span::raw(app_state.limits.disk_write_permits.to_string()),
-            format_limit_delta(
-                ctx,
-                app_state.limits.disk_write_permits,
-                app_state.last_tuning_limits.disk_write_permits,
-            ),
-        ]),
+        build_tuning_numeric_line(
+            ctx,
+            "Reserve Slots:",
+            app_state.limits.reserve_permits,
+            app_state.last_tuning_limits.reserve_permits,
+            ctx.accent_teal(),
+        ),
+        build_tuning_peer_line(
+            ctx,
+            total_peers,
+            app_state.limits.max_connected_peers,
+            app_state.last_tuning_limits.max_connected_peers,
+        ),
+        build_tuning_numeric_line(
+            ctx,
+            "Read Slots:",
+            app_state.limits.disk_read_permits,
+            app_state.last_tuning_limits.disk_read_permits,
+            ctx.state_success(),
+        ),
+        build_tuning_numeric_line(
+            ctx,
+            "Write Slots:",
+            app_state.limits.disk_write_permits,
+            app_state.last_tuning_limits.disk_write_permits,
+            ctx.accent_sky(),
+        ),
     ];
 
     let (lvl, progress) = crate::tui::view::calculate_player_stats(app_state);
@@ -2045,6 +2085,71 @@ pub fn draw_stats_panel(
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
 
     f.render_widget(stats_paragraph, stats_chunk);
+}
+
+fn build_tuning_numeric_line(
+    ctx: &ThemeContext,
+    label: &str,
+    current: usize,
+    last: usize,
+    label_color: Color,
+) -> Line<'static> {
+    let delta = current as isize - last as isize;
+    let delta_style = if delta > 0 {
+        ctx.apply(Style::default().fg(ctx.state_success()))
+    } else if delta < 0 {
+        ctx.apply(Style::default().fg(ctx.state_error()))
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+    };
+    let delta_text = if delta > 0 {
+        format!(" (+{})", delta)
+    } else if delta < 0 {
+        format!(" ({})", delta)
+    } else {
+        String::new()
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<TUNING_LABEL_WIDTH$}", label),
+            ctx.apply(Style::default().fg(label_color)),
+        ),
+        Span::raw(" "),
+        Span::raw(current.to_string()),
+        Span::styled(delta_text, delta_style),
+    ])
+}
+
+fn build_tuning_peer_line(
+    ctx: &ThemeContext,
+    used: usize,
+    current_limit: usize,
+    last_limit: usize,
+) -> Line<'static> {
+    let delta = current_limit as isize - last_limit as isize;
+    let delta_style = if delta > 0 {
+        ctx.apply(Style::default().fg(ctx.state_success()))
+    } else if delta < 0 {
+        ctx.apply(Style::default().fg(ctx.state_error()))
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+    };
+    let delta_text = if delta > 0 {
+        format!(" (+{})", delta)
+    } else if delta < 0 {
+        format!(" ({})", delta)
+    } else {
+        String::new()
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<TUNING_LABEL_WIDTH$}", "Peer Slots:"),
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ),
+        Span::raw(" "),
+        Span::raw(format!("{} / {}", used, current_limit)),
+        Span::styled(delta_text, delta_style),
+    ])
 }
 
 fn rss_sync_countdown_label(next_sync_at: &str) -> Option<String> {
@@ -2131,7 +2236,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
             ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
         }
     };
-    let use_compact_legend = should_use_compact_peer_activity_legend(
+    let use_compact_legend = should_use_compact_peer_stream_legend(
         area.width.saturating_sub(2) as usize,
         connected_count,
         discovered_count,
@@ -2316,7 +2421,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
             Block::default()
                 .title_top(
                     Line::from(Span::styled(
-                        " Peer Activity Stream ",
+                        " Peer Stream ",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     ))
                     .alignment(Alignment::Left),
@@ -2331,7 +2436,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     f.render_widget(chart, area);
 }
 
-fn should_use_compact_peer_activity_legend(
+fn should_use_compact_peer_stream_legend(
     available_width: usize,
     connected: u64,
     discovered: u64,
@@ -2354,19 +2459,24 @@ pub fn draw_block_stream_and_disk_orb(
         return;
     }
 
+    // Decide split shape using the local pane geometry first; global screen mode can be too coarse
+    // and causes unreadable side-by-side micro-panels at transition widths.
+    let force_stacked = area.width < 34 || area.height > area.width.saturating_mul(2);
     let is_vertical_mode = app_state.screen_area.width < 100
         || (app_state.screen_area.height as f32 > app_state.screen_area.width as f32 * 0.6);
-    if is_vertical_mode {
-        let split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+
+    if !force_stacked && is_vertical_mode {
+        let split = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(area);
         draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
         draw_disk_health_panel(f, app_state, split[1], ctx);
-    } else {
-        let split =
-            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
-        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
-        draw_disk_health_panel(f, app_state, split[1], ctx);
+        return;
     }
+
+    let split =
+        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
+    draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+    draw_disk_health_panel(f, app_state, split[1], ctx);
 }
 
 fn draw_vertical_block_stream_panel(
@@ -2468,7 +2578,13 @@ fn disk_health_state_word(state_level: u8) -> &'static str {
 
 fn disk_health_status_color(ctx: &ThemeContext, state_level: u8) -> Color {
     match state_level {
-        0 => ctx.theme.semantic.subtext0,
+        0 => {
+            if ctx.theme.name == ThemeName::BlackHole {
+                ctx.theme.semantic.subtext1
+            } else {
+                ctx.theme.semantic.subtext0
+            }
+        }
         1 => ctx.state_info(),
         2 => ctx.state_warning(),
         _ => ctx.state_error(),
@@ -2510,8 +2626,9 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let phase = app_state.disk_health_phase;
 
     let orb_color = disk_health_status_color(ctx, app_state.disk_health_state_level);
-    let has_iops_activity = app_state.read_iops > 0 || app_state.write_iops > 0;
-    let orb_style = if has_iops_activity {
+    let has_disk_speed_activity =
+        app_state.avg_disk_read_bps > 0 || app_state.avg_disk_write_bps > 0;
+    let orb_style = if has_disk_speed_activity {
         ctx.apply(Style::default().fg(orb_color))
     } else {
         ctx.apply(Style::default().fg(orb_color).dim())
@@ -2896,173 +3013,6 @@ fn render_sparkles<'a>(
             style.add_modifier(Modifier::DIM)
         };
         spans.push(Span::styled(symbol, style));
-    }
-}
-
-pub fn draw_torrent_sparklines(
-    f: &mut Frame,
-    app_state: &AppState,
-    area: Rect,
-    ctx: &ThemeContext,
-) {
-    let torrent = app_state
-        .torrent_list_order
-        .get(app_state.ui.selected_torrent_index)
-        .and_then(|info_hash| app_state.torrents.get(info_hash));
-
-    let Some(torrent) = torrent else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-        f.render_widget(block, area);
-        return;
-    };
-
-    let dl_history = &torrent.download_history;
-    let ul_history = &torrent.upload_history;
-    const ACTIVITY_WINDOW: usize = 60;
-    let check_dl_slice = &dl_history[dl_history.len().saturating_sub(ACTIVITY_WINDOW)..];
-    let check_ul_slice = &ul_history[ul_history.len().saturating_sub(ACTIVITY_WINDOW)..];
-    let has_dl_activity = check_dl_slice.iter().any(|&s| s > 0);
-    let has_ul_activity = check_ul_slice.iter().any(|&s| s > 0);
-
-    if has_dl_activity && !has_ul_activity {
-        let width = area.width.saturating_sub(2).max(1) as usize;
-        let dl_slice = &dl_history[dl_history.len().saturating_sub(width)..];
-        let max_speed = dl_slice.iter().max().copied().unwrap_or(1);
-        let nice_max_speed = calculate_nice_upper_bound(max_speed).max(1);
-
-        let dl_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("DL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(dl_slice)
-            .max(nice_max_speed)
-            .style(ctx.apply(Style::default().fg(ctx.state_info())));
-        f.render_widget(dl_sparkline, area);
-    } else if !has_dl_activity && has_ul_activity {
-        let width = area.width.saturating_sub(2).max(1) as usize;
-        let ul_slice = &ul_history[ul_history.len().saturating_sub(width)..];
-        let max_speed = ul_slice.iter().max().copied().unwrap_or(1);
-        let nice_max_speed = calculate_nice_upper_bound(max_speed).max(1);
-        let ul_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("UL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(ul_slice)
-            .max(nice_max_speed)
-            .style(ctx.apply(Style::default().fg(ctx.state_success())));
-        f.render_widget(ul_sparkline, area);
-    } else if !has_dl_activity && !has_ul_activity {
-        let style = ctx.apply(Style::default().fg(ctx.state_selected()));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-        let inner_area = block.inner(area);
-        f.render_widget(block, area);
-
-        let vertical_chunks = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner_area);
-        let throbber_width = 23;
-        let horizontal_chunks = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(throbber_width),
-            Constraint::Min(0),
-        ])
-        .split(vertical_chunks[1]);
-        let inner_chunks = Layout::horizontal([
-            Constraint::Length(1),
-            Constraint::Length(21),
-            Constraint::Length(1),
-        ])
-        .split(horizontal_chunks[1]);
-
-        let throbber_left_area = inner_chunks[0];
-        let label_area = inner_chunks[1];
-        let throbber_right_area = inner_chunks[2];
-
-        let label_text = Paragraph::new(" Searching for Peers ")
-            .style(style)
-            .alignment(Alignment::Center);
-        let throbber_style = ctx.apply(
-            Style::default()
-                .fg(ctx.state_complete())
-                .add_modifier(Modifier::BOLD),
-        );
-        let throbber_widget = Throbber::default().style(throbber_style);
-
-        f.render_widget(label_text, label_area);
-        f.render_stateful_widget(
-            throbber_widget.clone(),
-            throbber_left_area,
-            &mut app_state.throbber_holder.borrow_mut().torrent_sparkline,
-        );
-        f.render_stateful_widget(
-            throbber_widget,
-            throbber_right_area,
-            &mut app_state.throbber_holder.borrow_mut().torrent_sparkline,
-        );
-    } else {
-        let sparkline_chunks =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-        let dl_sparkline_chunk = sparkline_chunks[0];
-        let ul_sparkline_chunk = sparkline_chunks[1];
-
-        let dl_width = dl_sparkline_chunk.width.saturating_sub(2).max(1) as usize;
-        let ul_width = ul_sparkline_chunk.width.saturating_sub(2).max(1) as usize;
-        let dl_slice = &dl_history[dl_history.len().saturating_sub(dl_width)..];
-        let ul_slice = &ul_history[ul_history.len().saturating_sub(ul_width)..];
-        let max_dl = dl_slice.iter().max().copied().unwrap_or(0);
-        let max_ul = ul_slice.iter().max().copied().unwrap_or(0);
-        let dl_nice_max = calculate_nice_upper_bound(max_dl).max(1);
-        let ul_nice_max = calculate_nice_upper_bound(max_ul).max(1);
-
-        let dl_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("DL (Peak: {})", format_speed(dl_nice_max)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(dl_slice)
-            .max(dl_nice_max)
-            .style(ctx.apply(Style::default().fg(ctx.state_info())));
-        f.render_widget(dl_sparkline, dl_sparkline_chunk);
-
-        let ul_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("UL (Peak: {})", format_speed(ul_nice_max)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(ul_slice)
-            .max(ul_nice_max)
-            .style(ctx.apply(Style::default().fg(ctx.state_success())));
-        f.render_widget(ul_sparkline, ul_sparkline_chunk);
     }
 }
 
@@ -4026,6 +3976,36 @@ mod tests {
     }
 
     #[test]
+    fn build_time_aligned_window_snaps_unaligned_now_to_step_boundary() {
+        let points = vec![
+            NetworkHistoryPoint {
+                ts_unix: 60,
+                download_bps: 10,
+                upload_bps: 20,
+                backoff_ms_max: 1,
+            },
+            NetworkHistoryPoint {
+                ts_unix: 120,
+                download_bps: 30,
+                upload_bps: 40,
+                backoff_ms_max: 2,
+            },
+            NetworkHistoryPoint {
+                ts_unix: 180,
+                download_bps: 50,
+                upload_bps: 60,
+                backoff_ms_max: 3,
+            },
+        ];
+
+        let (dl, ul, backoff) = build_time_aligned_window(&points, 60, 3, 190);
+
+        assert_eq!(dl, vec![10, 30, 50]);
+        assert_eq!(ul, vec![20, 40, 60]);
+        assert_eq!(backoff, vec![1, 2, 3]);
+    }
+
+    #[test]
     fn reducer_open_add_torrent_browser_emits_effect() {
         let mut app_state = AppState::default();
 
@@ -4339,7 +4319,11 @@ mod tests {
             let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
             assert_eq!(
                 disk_health_status_color(&ctx, 0),
-                ctx.theme.semantic.subtext0
+                if theme_name == ThemeName::BlackHole {
+                    ctx.theme.semantic.subtext1
+                } else {
+                    ctx.theme.semantic.subtext0
+                }
             );
             assert_eq!(disk_health_status_color(&ctx, 1), ctx.state_info());
             assert_eq!(disk_health_status_color(&ctx, 2), ctx.state_warning());
@@ -4354,7 +4338,11 @@ mod tests {
             let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
             assert_eq!(
                 disk_health_title_color(&ctx, 0),
-                ctx.theme.semantic.subtext0
+                if theme_name == ThemeName::BlackHole {
+                    ctx.theme.semantic.subtext1
+                } else {
+                    ctx.theme.semantic.subtext0
+                }
             );
             assert_eq!(disk_health_title_color(&ctx, 1), ctx.state_info());
             assert_eq!(disk_health_title_color(&ctx, 2), ctx.state_warning());
@@ -4383,13 +4371,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_activity_legend_compacts_when_width_is_tight() {
-        assert!(should_use_compact_peer_activity_legend(32, 5, 182, 104));
+    fn peer_stream_legend_compacts_when_width_is_tight() {
+        assert!(should_use_compact_peer_stream_legend(32, 5, 182, 104));
     }
 
     #[test]
-    fn peer_activity_legend_stays_verbose_when_width_allows() {
-        assert!(!should_use_compact_peer_activity_legend(90, 5, 182, 104));
+    fn peer_stream_legend_stays_verbose_when_width_allows() {
+        assert!(!should_use_compact_peer_stream_legend(90, 5, 182, 104));
     }
 
     #[tokio::test]

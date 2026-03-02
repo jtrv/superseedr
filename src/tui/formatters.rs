@@ -275,13 +275,16 @@ pub fn format_limit_bps(bps: u64) -> String {
 pub fn format_graph_time_label(duration_secs: usize) -> String {
     const MINUTE: usize = 60;
     const HOUR: usize = 60 * MINUTE;
+    const DAY: usize = 24 * HOUR;
 
     if duration_secs < MINUTE {
         format!("-{}s", duration_secs)
     } else if duration_secs < HOUR {
         format!("-{}m", duration_secs / MINUTE)
-    } else {
+    } else if duration_secs < DAY {
         format!("-{}h", duration_secs / HOUR)
+    } else {
+        format!("-{}d", duration_secs / DAY)
     }
 }
 
@@ -313,6 +316,15 @@ pub fn generate_x_axis_labels(
             .collect(),
         GraphDisplayMode::TwentyFourHours => (0..=6)
             .map(|i| format_graph_time_label(86400 - i * 14400)) // Every 4 hours
+            .collect(),
+        GraphDisplayMode::SevenDays => (0..=7)
+            .map(|i| format_graph_time_label(7 * 86_400 - i * 86_400)) // Daily ticks
+            .collect(),
+        GraphDisplayMode::ThirtyDays => (0..=6)
+            .map(|i| format_graph_time_label(30 * 86_400 - i * 5 * 86_400)) // Every 5 days
+            .collect(),
+        GraphDisplayMode::OneYear => (0..=12)
+            .map(|i| format_graph_time_label(365 * 86_400 - i * 30 * 86_400)) // ~monthly
             .collect(),
     };
 
@@ -377,36 +389,6 @@ pub fn parse_peer_id(peer_id: &[u8]) -> String {
     "Unknown".to_string()
 }
 
-pub fn format_permits_spans<'a>(
-    ctx: &'a ThemeContext,
-    label: &'a str,
-    used: usize,
-    total: usize,
-    base_color: Color,
-) -> Vec<Span<'a>> {
-    let usage_ratio = if total > 0 {
-        used as f64 / total as f64
-    } else {
-        0.0
-    };
-
-    let status_color = if usage_ratio > 0.9 {
-        ctx.state_error()
-    } else if usage_ratio > 0.7 {
-        ctx.state_warning()
-    } else {
-        ctx.theme.semantic.text
-    };
-
-    vec![
-        Span::styled(label, ctx.apply(Style::default().fg(base_color))),
-        Span::styled(
-            format!(" {} / {}", used, total),
-            ctx.apply(Style::default().fg(status_color)),
-        ),
-    ]
-}
-
 pub fn format_latency(duration: Duration) -> String {
     let micros = duration.as_micros();
     if micros < 1000 {
@@ -420,19 +402,6 @@ pub fn format_latency(duration: Duration) -> String {
 
 pub fn format_iops(iops: u32) -> String {
     format!("{} ops/s", iops)
-}
-
-pub fn format_limit_delta(ctx: &ThemeContext, current: usize, last: usize) -> Span<'static> {
-    let delta = current as isize - last as isize;
-    if delta == 0 {
-        return Span::raw("");
-    }
-    let (sign, style) = if delta > 0 {
-        ("+", ctx.apply(Style::default().fg(ctx.state_success())))
-    } else {
-        ("-", ctx.apply(Style::default().fg(ctx.state_error())))
-    };
-    Span::styled(format!(" ({}{})", sign, delta.abs()), ctx.apply(style))
 }
 
 pub fn sanitize_text(text: &str) -> String {

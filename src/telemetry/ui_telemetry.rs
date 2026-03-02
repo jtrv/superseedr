@@ -196,12 +196,6 @@ impl UiTelemetry {
     }
 
     pub fn on_second_tick(app_state: &mut AppState, sys: &mut System) {
-        app_state
-            .throbber_holder
-            .borrow_mut()
-            .torrent_sparkline
-            .calc_next();
-
         if matches!(app_state.mode, AppMode::PowerSaving) && !app_state.run_time.is_multiple_of(5) {
             app_state.run_time += 1;
             return;
@@ -401,12 +395,9 @@ impl UiTelemetry {
         if is_seeding != app_state.is_seeding {
             tracing_event!(
                 Level::DEBUG,
-                "Self-Tune: Objective changed to {}. Resetting score.",
+                "Self-Tune: Objective changed to {}.",
                 if is_seeding { "Seeding" } else { "Leeching" }
             );
-            app_state.last_tuning_score = 0;
-            app_state.current_tuning_score = 0;
-            app_state.last_tuning_limits = app_state.limits.clone();
 
             if is_seeding {
                 app_state.torrent_sort = (TorrentSortColumn::Up, SortDirection::Descending);
@@ -417,7 +408,6 @@ impl UiTelemetry {
             }
         }
         app_state.is_seeding = is_seeding;
-        app_state.tuning_countdown = app_state.tuning_countdown.saturating_sub(1);
     }
 }
 
@@ -578,9 +568,11 @@ mod tests {
         UiTelemetry,
     };
     use crate::app::{AppState, PeerInfo, TorrentDisplayState, TorrentMetrics};
+    use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
     use crate::telemetry::manager_telemetry::ManagerTelemetry;
     use std::collections::HashMap;
     use std::time::Duration;
+    use sysinfo::System;
 
     #[test]
     fn on_metrics_updates_totals_and_histories() {
@@ -811,5 +803,31 @@ mod tests {
         let before = app_state.disk_health_state_level;
         update_disk_health_state_level(&mut app_state);
         assert!(app_state.disk_health_state_level <= before);
+    }
+
+    #[test]
+    fn objective_switch_updates_mode_and_sorting() {
+        let mut app_state = AppState {
+            is_seeding: true,
+            ..Default::default()
+        };
+
+        let mut torrent = TorrentDisplayState::default();
+        torrent.latest_state.number_of_pieces_total = 10;
+        torrent.latest_state.number_of_pieces_completed = 9;
+        app_state.torrents.insert(vec![1; 20], torrent);
+
+        let mut sys = System::new();
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert!(!app_state.is_seeding);
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Down, SortDirection::Descending)
+        );
+        assert_eq!(
+            app_state.peer_sort,
+            (PeerSortColumn::DL, SortDirection::Descending)
+        );
     }
 }
