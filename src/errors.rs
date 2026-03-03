@@ -15,8 +15,38 @@ pub enum TrackerError {
     Tracker(String),
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {
-    #[error("An I/O error occurred")]
-    Io(#[from] std::io::Error),
+    #[error("I/O error ({kind:?}): {message}")]
+    Io {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+
+    #[error("Expected a regular file but found a different filesystem entry")]
+    UnexpectedType,
+
+    #[error("Size mismatch: expected {expected_size} bytes, found {observed_size} bytes")]
+    SizeMismatch {
+        expected_size: u64,
+        observed_size: u64,
+    },
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl StorageError {
+    pub fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        match self {
+            Self::Io { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
 }

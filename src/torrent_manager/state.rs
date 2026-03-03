@@ -162,6 +162,9 @@ pub enum Action {
         file_priorities: HashMap<usize, FilePriority>,
         container_name: Option<String>,
     },
+    SetDataAvailability {
+        available: bool,
+    },
     ValidationProgress {
         count: u32,
     },
@@ -335,6 +338,7 @@ pub struct TorrentState {
     pub container_name: Option<String>,
     pub multi_file_info: Option<MultiFileInfo>,
     pub file_priorities: HashMap<usize, FilePriority>,
+    pub data_available: bool,
     pub pending_disconnects: Vec<String>,
     pub pending_failures: Vec<String>,
     pub accepting_new_peers: bool,
@@ -374,6 +378,7 @@ impl Default for TorrentState {
             container_name: None,
             multi_file_info: None,
             file_priorities: HashMap::new(),
+            data_available: true,
             pending_disconnects: Vec::with_capacity(100),
             pending_failures: Vec::with_capacity(100),
             accepting_new_peers: true,
@@ -593,6 +598,10 @@ impl TorrentState {
             }
 
             Action::RecalculateChokes { random_seed } => {
+                if !self.data_available {
+                    return vec![Effect::DoNothing];
+                }
+
                 let mut effects = Vec::new();
 
                 let mut interested_peers: Vec<&mut PeerState> = self
@@ -1544,6 +1553,10 @@ impl TorrentState {
                 block_offset,
                 length,
             } => {
+                if !self.data_available {
+                    return vec![Effect::DoNothing];
+                }
+
                 if self.torrent.is_none() {
                     return vec![Effect::DoNothing];
                 }
@@ -2074,6 +2087,11 @@ impl TorrentState {
                 effects.extend(self.update(Action::CheckCompletion));
 
                 effects
+            }
+
+            Action::SetDataAvailability { available } => {
+                self.data_available = available;
+                vec![Effect::DoNothing]
             }
 
             Action::ValidationProgress { count } => {
@@ -2801,6 +2819,45 @@ mod tests {
         });
 
         assert_eq!(request, Some(0), "Should request piece 0 from peer_A");
+    }
+
+    #[test]
+    fn test_data_unavailable_blocks_unchoke_and_upload() {
+        let mut state = create_empty_state();
+        let torrent = create_dummy_torrent(1);
+        state.torrent = Some(torrent);
+        state.torrent_status = TorrentStatus::Standard;
+        state.data_available = false;
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.bitfield[0] = PieceStatus::Done;
+
+        add_peer(&mut state, "peer_A");
+        let peer = state.peers.get_mut("peer_A").unwrap();
+        peer.peer_is_interested_in_us = true;
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.am_choking = ChokeStatus::Choke;
+
+        let choke_effects = state.update(Action::RecalculateChokes { random_seed: 0 });
+        assert!(matches!(choke_effects.as_slice(), [Effect::DoNothing]));
+        assert_eq!(state.peers["peer_A"].am_choking, ChokeStatus::Choke);
+
+        let upload_effects = state.update(Action::RequestUpload {
+            peer_id: "peer_A".to_string(),
+            piece_index: 0,
+            block_offset: 0,
+            length: 16_384,
+        });
+        assert!(matches!(upload_effects.as_slice(), [Effect::DoNothing]));
+    }
+
+    #[test]
+    fn test_set_data_availability_does_not_emit_metrics() {
+        let mut state = create_empty_state();
+
+        let effects = state.update(Action::SetDataAvailability { available: false });
+
+        assert!(!state.data_available);
+        assert!(matches!(effects.as_slice(), [Effect::DoNothing]));
     }
 
     // --- SCENARIO 5: Piece Verification Success ---

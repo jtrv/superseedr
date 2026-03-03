@@ -94,6 +94,30 @@ impl MultiFileInfo {
     }
 }
 
+pub async fn probe_file_info(file_info: &FileInfo) -> (Option<StorageError>, Option<u64>) {
+    match fs::metadata(&file_info.path).await {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return (Some(StorageError::UnexpectedType), None);
+            }
+
+            let observed_size = metadata.len();
+            (
+                if observed_size == file_info.length {
+                    None
+                } else {
+                    Some(StorageError::SizeMismatch {
+                        expected_size: file_info.length,
+                        observed_size,
+                    })
+                },
+                Some(observed_size),
+            )
+        }
+        Err(error) => (Some(StorageError::from(error)), None),
+    }
+}
+
 /// Creates all necessary directories and pre-allocates all files for a torrent.
 /// This function works for both single and multi-file torrents.
 pub async fn create_and_allocate_files(
@@ -194,7 +218,7 @@ pub async fn read_data_from_disk(
         }
     }
 
-    Err(StorageError::Io(std::io::Error::new(
+    Err(StorageError::from(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         "Failed to read all data, offset likely out of bounds",
     )))
@@ -263,7 +287,7 @@ pub async fn write_data_to_disk(
         global_offset
     );
 
-    Err(StorageError::Io(std::io::Error::new(
+    Err(StorageError::from(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         "Failed to write all data, offset likely out of bounds",
     )))
@@ -317,7 +341,6 @@ pub async fn build_fs_tree(
 mod tests {
     use super::*;
     use crate::app::FilePriority;
-    use crate::errors::StorageError;
     use crate::torrent_file::InfoFile;
 
     use std::collections::HashMap;
@@ -564,8 +587,8 @@ mod tests {
 
         let res = read_data_from_disk(&mfi, 95, 10).await;
         assert!(res.is_err());
-        if let Err(StorageError::Io(err)) = res {
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        if let Err(err) = res {
+            assert_eq!(err.io_kind(), Some(std::io::ErrorKind::InvalidInput));
         } else {
             panic!("Expected Io Error");
         }
@@ -583,8 +606,8 @@ mod tests {
         let data = vec![1; 10];
         let res = write_data_to_disk(&mfi, 95, &data).await;
         assert!(res.is_err());
-        if let Err(StorageError::Io(err)) = res {
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        if let Err(err) = res {
+            assert_eq!(err.io_kind(), Some(std::io::ErrorKind::InvalidInput));
         } else {
             panic!("Expected Io Error");
         }

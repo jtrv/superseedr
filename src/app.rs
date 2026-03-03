@@ -49,6 +49,7 @@ use crate::integrations::{rss_ingest, rss_service, status, watcher};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
+use crate::torrent_manager::TorrentFileProbeStatus;
 use crate::torrent_manager::TorrentManager;
 use crate::torrent_manager::TorrentParameters;
 
@@ -103,6 +104,7 @@ const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
+const TORRENT_FILE_PROBE_INTERVAL_SECS: u64 = 15;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 #[derive(serde::Deserialize)]
@@ -477,7 +479,7 @@ pub struct PeerInfo {
     pub last_action: String,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TorrentMetrics {
     pub torrent_control_state: TorrentControlState,
     pub info_hash: Vec<u8>,
@@ -486,6 +488,7 @@ pub struct TorrentMetrics {
     pub download_path: Option<PathBuf>,
     pub container_name: Option<String>,
     pub file_priorities: HashMap<usize, FilePriority>,
+    pub data_available: bool,
     pub number_of_successfully_connected_peers: usize,
     pub number_of_pieces_total: u32,
     pub number_of_pieces_completed: u32,
@@ -514,9 +517,44 @@ pub struct TorrentMetrics {
     pub blocks_out_this_tick: u64,
 }
 
+impl Default for TorrentMetrics {
+    fn default() -> Self {
+        Self {
+            torrent_control_state: TorrentControlState::default(),
+            info_hash: Vec::new(),
+            torrent_or_magnet: String::new(),
+            torrent_name: String::new(),
+            download_path: None,
+            container_name: None,
+            file_priorities: HashMap::new(),
+            data_available: true,
+            number_of_successfully_connected_peers: 0,
+            number_of_pieces_total: 0,
+            number_of_pieces_completed: 0,
+            download_speed_bps: 0,
+            upload_speed_bps: 0,
+            bytes_downloaded_this_tick: 0,
+            bytes_uploaded_this_tick: 0,
+            session_total_downloaded: 0,
+            session_total_uploaded: 0,
+            eta: Duration::default(),
+            peers: Vec::new(),
+            activity_message: String::new(),
+            next_announce_in: Duration::default(),
+            total_size: 0,
+            bytes_written: 0,
+            blocks_in_history: Vec::new(),
+            blocks_out_history: Vec::new(),
+            blocks_in_this_tick: 0,
+            blocks_out_this_tick: 0,
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct TorrentDisplayState {
     pub latest_state: TorrentMetrics,
+    pub latest_file_probe_status: Option<TorrentFileProbeStatus>,
     pub download_history: Vec<u64>,
     pub upload_history: Vec<u64>,
 
@@ -1096,9 +1134,12 @@ impl App {
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
         let mut network_history_persist_interval =
             time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
+        let mut torrent_file_probe_interval =
+            time::interval(Duration::from_secs(TORRENT_FILE_PROBE_INTERVAL_SECS));
         self.reschedule_tuning_deadline();
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        torrent_file_probe_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let output_status_interval = self.client_configs.output_status_interval;
         let mut status_dump_timer = tokio::time::interval(std::time::Duration::from_secs(
@@ -1161,6 +1202,9 @@ impl App {
                     if should_persist_network_history_on_interval(&self.app_state) {
                         self.save_state_to_disk();
                     }
+                }
+                _ = torrent_file_probe_interval.tick() => {
+                    self.request_torrent_file_probes();
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
@@ -2081,6 +2125,117 @@ impl App {
 
                 self.app_state.ui.needs_redraw = true;
             }
+            ManagerEvent::FileProbeStatus { info_hash, status } => {
+                let mut availability_changed = false;
+                let mut availability_transition_log: Option<(
+                    String,
+                    bool,
+                    usize,
+                    Option<std::path::PathBuf>,
+                    Vec<String>,
+                )> = None;
+
+                if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
+                    let was_available = torrent.latest_state.data_available;
+                    torrent.latest_file_probe_status = Some(status.clone());
+
+                    match status {
+                        TorrentFileProbeStatus::PendingMetadata => {}
+                        TorrentFileProbeStatus::Files(files) => {
+                            let mut issue_count = 0usize;
+                            let mut issue_files = Vec::new();
+
+                            for entry in &files {
+                                if !entry.is_skipped && entry.error.is_some() {
+                                    issue_count += 1;
+                                    issue_files.push(format!(
+                                        "{}: {}",
+                                        entry.absolute_path.display(),
+                                        entry
+                                            .error
+                                            .as_ref()
+                                            .map(ToString::to_string)
+                                            .unwrap_or_default()
+                                    ));
+                                }
+                            }
+
+                            torrent.latest_state.data_available = issue_count == 0;
+                            availability_changed =
+                                was_available != torrent.latest_state.data_available;
+
+                            if availability_changed {
+                                let saved_location =
+                                    torrent.latest_state.download_path.as_ref().map(
+                                        |download_path| {
+                                            if let Some(container_name) =
+                                                torrent.latest_state.container_name.as_deref()
+                                            {
+                                                if !container_name.is_empty() {
+                                                    download_path.join(container_name)
+                                                } else {
+                                                    download_path.clone()
+                                                }
+                                            } else {
+                                                download_path.clone()
+                                            }
+                                        },
+                                    );
+                                availability_transition_log = Some((
+                                    torrent.latest_state.torrent_name.clone(),
+                                    torrent.latest_state.data_available,
+                                    issue_count,
+                                    saved_location,
+                                    issue_files,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if availability_changed {
+                    if let Some((
+                        torrent_name,
+                        is_available,
+                        issue_count,
+                        saved_location,
+                        issue_files,
+                    )) = availability_transition_log
+                    {
+                        if is_available {
+                            tracing_event!(
+                                Level::INFO,
+                                info_hash = %hex::encode(&info_hash),
+                                torrent = %torrent_name,
+                                saved_location = ?saved_location,
+                                "Torrent data became available again"
+                            );
+                        } else {
+                            tracing_event!(
+                                Level::WARN,
+                                info_hash = %hex::encode(&info_hash),
+                                torrent = %torrent_name,
+                                saved_location = ?saved_location,
+                                issues = issue_count,
+                                issue_files = ?issue_files,
+                                "Torrent data became unavailable"
+                            );
+                        }
+                    }
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        let available = self
+                            .app_state
+                            .torrents
+                            .get(&info_hash)
+                            .map(|torrent| torrent.latest_state.data_available)
+                            .unwrap_or(true);
+                        let _ = manager_tx.try_send(ManagerCommand::SetDataAvailability(available));
+                    }
+                    self.save_state_to_disk();
+                }
+
+                self.app_state.ui.needs_redraw = true;
+            }
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
                 if let FileBrowserMode::DownloadLocSelection {
                     preview_tree,
@@ -2480,6 +2635,12 @@ impl App {
                 Level::ERROR,
                 "Failed to queue persistence payload: persistence task unavailable"
             );
+        }
+    }
+
+    fn request_torrent_file_probes(&self) {
+        for manager_tx in self.torrent_manager_command_txs.values() {
+            let _ = manager_tx.try_send(ManagerCommand::ProbeFiles);
         }
     }
 
@@ -3729,6 +3890,9 @@ mod tests {
         TorrentMetrics, TorrentSortColumn, UiState,
     };
     use crate::config::TorrentSettings;
+    use crate::errors::StorageError;
+    use crate::telemetry::ui_telemetry::UiTelemetry;
+    use crate::torrent_manager::{FileProbeEntry, ManagerEvent, TorrentFileProbeStatus};
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::time;
@@ -4051,6 +4215,109 @@ mod tests {
         assert!(remaining <= Duration::from_secs(reset_cadence));
 
         let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn handle_manager_event_file_probe_status_marks_data_unavailable() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.torrent_name = "probe torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+
+        app.handle_manager_event(ManagerEvent::FileProbeStatus {
+            info_hash: info_hash.clone(),
+            status: TorrentFileProbeStatus::Files(vec![
+                FileProbeEntry {
+                    relative_path: "missing.bin".into(),
+                    absolute_path: "/tmp/missing.bin".into(),
+                    error: Some(StorageError::from(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    ))),
+                    is_skipped: false,
+                    expected_size: 10,
+                    observed_size: None,
+                },
+                FileProbeEntry {
+                    relative_path: "ok.bin".into(),
+                    absolute_path: "/tmp/ok.bin".into(),
+                    error: None,
+                    is_skipped: false,
+                    expected_size: 10,
+                    observed_size: Some(10),
+                },
+            ]),
+        });
+
+        let torrent = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent display should exist");
+        assert!(!torrent.latest_state.data_available);
+        assert_eq!(
+            torrent.latest_state.torrent_control_state,
+            TorrentControlState::Running
+        );
+        assert!(app.app_state.ui.needs_redraw);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[test]
+    fn build_persist_payload_preserves_validation_when_data_is_unavailable() {
+        let mut settings = crate::config::Settings::default();
+        let mut app_state = AppState::default();
+        let info_hash = b"persist_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_or_magnet = "sample.torrent".to_string();
+        display.latest_state.torrent_name = "sample".to_string();
+        display.latest_state.data_available = false;
+        display.latest_state.number_of_pieces_total = 4;
+        display.latest_state.number_of_pieces_completed = 4;
+
+        app_state.torrents.insert(info_hash.clone(), display);
+        app_state.torrent_list_order.push(info_hash);
+
+        let payload = build_persist_payload(&mut settings, &mut app_state);
+        assert_eq!(payload.settings.torrents.len(), 1);
+        assert!(payload.settings.torrents[0].validation_status);
+    }
+
+    #[test]
+    fn ui_telemetry_metrics_refresh_preserves_data_availability_flag() {
+        let mut app_state = AppState::default();
+        let info_hash = b"telemetry_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.data_available = false;
+        app_state.torrents.insert(info_hash.clone(), display);
+
+        let message = TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "sample".to_string(),
+            download_speed_bps: 123,
+            ..Default::default()
+        };
+
+        UiTelemetry::on_metrics(&mut app_state, message);
+
+        let torrent = app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent display should exist");
+        assert!(!torrent.latest_state.data_available);
+        assert_eq!(torrent.latest_state.download_speed_bps, 123);
     }
 
     #[test]

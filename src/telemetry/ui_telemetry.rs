@@ -143,6 +143,7 @@ impl UiTelemetry {
         display_state.latest_state.number_of_pieces_completed = message.number_of_pieces_completed;
         display_state.latest_state.download_speed_bps = message.download_speed_bps;
         display_state.latest_state.upload_speed_bps = message.upload_speed_bps;
+        display_state.latest_state.data_available = message.data_available;
         display_state.latest_state.session_total_downloaded = message.session_total_downloaded;
         display_state.latest_state.session_total_uploaded = message.session_total_uploaded;
         display_state.latest_state.eta = message.eta;

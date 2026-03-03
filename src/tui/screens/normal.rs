@@ -10,12 +10,13 @@ use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 use crate::app::{
     App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
+    TorrentDisplayState,
 };
 use crate::config::Settings;
 use crate::config::SortDirection;
 use crate::persistence::network_history::NetworkHistoryPoint;
 use crate::theme::{ThemeContext, ThemeName};
-use crate::torrent_manager::ManagerCommand;
+use crate::torrent_manager::{ManagerCommand, TorrentFileProbeStatus};
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
     format_latency, format_limit_bps, format_memory, format_speed, format_time,
@@ -1052,18 +1053,8 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                 Some(torrent) => {
                     let state = &torrent.latest_state;
                     let is_selected = i == app_state.ui.selected_torrent_index;
-
-                    let mut row_style = match state.torrent_control_state {
-                        TorrentControlState::Running => {
-                            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
-                        }
-                        TorrentControlState::Paused => {
-                            ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
-                        }
-                        TorrentControlState::Deleting => {
-                            ctx.apply(Style::default().fg(ctx.state_error()))
-                        }
-                    };
+                    let row_color = torrent_list_row_color(torrent, ctx);
+                    let mut row_style = ctx.apply(Style::default().fg(row_color));
                     row_style = ctx.apply(row_style);
 
                     if is_selected {
@@ -1081,6 +1072,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                 ColumnId::Status => {
                                     let display_pct = torrent_completion_percent(state);
                                     Cell::from(format!("{:.1}%", display_pct))
+                                        .style(ctx.apply(Style::default().fg(row_color)))
                                 }
                                 ColumnId::Name => {
                                     let name = if app_state.anonymize_torrent_names {
@@ -1090,26 +1082,28 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                     };
                                     let mut c = Cell::from(name);
                                     if is_selected {
-                                        let s = ctx.apply(
-                                            ctx.apply(Style::default().fg(ctx.state_warning())),
-                                        );
+                                        let s = ctx.apply(Style::default().fg(ctx.state_warning()));
                                         c = c.style(s);
                                     }
                                     c
                                 }
                                 ColumnId::DownSpeed => {
+                                    let style = if state.data_available {
+                                        speed_to_style(ctx, torrent.smoothed_download_speed_bps)
+                                    } else {
+                                        Style::default().fg(row_color)
+                                    };
                                     Cell::from(format_speed(torrent.smoothed_download_speed_bps))
-                                        .style(ctx.apply(speed_to_style(
-                                            ctx,
-                                            torrent.smoothed_download_speed_bps,
-                                        )))
+                                        .style(ctx.apply(style))
                                 }
                                 ColumnId::UpSpeed => {
+                                    let style = if state.data_available {
+                                        speed_to_style(ctx, torrent.smoothed_upload_speed_bps)
+                                    } else {
+                                        Style::default().fg(row_color)
+                                    };
                                     Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
-                                        .style(ctx.apply(speed_to_style(
-                                            ctx,
-                                            torrent.smoothed_upload_speed_bps,
-                                        )))
+                                        .style(ctx.apply(style))
                                 }
                             }
                         })
@@ -1215,16 +1209,65 @@ pub fn draw_details_panel(
     details_text_chunk: Rect,
     ctx: &ThemeContext,
 ) {
+    let selected_torrent = app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|h| app_state.torrents.get(h));
+
+    let critical_panel = selected_torrent.and_then(|torrent| {
+        selected_torrent_critical_details(torrent, app_state.anonymize_torrent_names)
+    });
+
     let details_block = Block::default()
         .title(Span::styled(
-            "Details",
-            ctx.apply(Style::default().fg(ctx.state_selected())),
+            critical_panel
+                .as_ref()
+                .map_or("Details", |panel| panel.title),
+            ctx.apply(Style::default().fg(if critical_panel.is_some() {
+                ctx.state_error()
+            } else {
+                ctx.state_selected()
+            })),
         ))
         .borders(Borders::ALL)
         .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+        .border_style(ctx.apply(Style::default().fg(if critical_panel.is_some() {
+            ctx.state_error()
+        } else {
+            ctx.theme.semantic.border
+        })));
     let details_inner_chunk = details_block.inner(details_text_chunk);
     f.render_widget(details_block, details_text_chunk);
+
+    if let Some(panel) = critical_panel {
+        let mut text_parts = panel.text.splitn(2, "\n\n");
+        let headline = text_parts.next().unwrap_or_default();
+        let body = text_parts.next().unwrap_or_default();
+        let critical_chunks = ratatui::layout::Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(details_inner_chunk);
+
+        f.render_widget(
+            Paragraph::new(headline).alignment(Alignment::Center).style(
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.state_error())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ),
+            critical_chunks[0],
+        );
+        f.render_widget(
+            Paragraph::new(body)
+                .wrap(Wrap { trim: true })
+                .style(ctx.apply(Style::default().fg(ctx.state_error()))),
+            critical_chunks[2],
+        );
+        return;
+    }
 
     let detail_rows = ratatui::layout::Layout::vertical([
         Constraint::Length(1),
@@ -1236,11 +1279,6 @@ pub fn draw_details_panel(
         Constraint::Length(1),
     ])
     .split(details_inner_chunk);
-
-    let selected_torrent = app_state
-        .torrent_list_order
-        .get(app_state.ui.selected_torrent_index)
-        .and_then(|h| app_state.torrents.get(h));
 
     if let Some(torrent) = selected_torrent {
         let state = &torrent.latest_state;
@@ -1455,6 +1493,84 @@ pub fn draw_details_panel(
             detail_rows[6],
         );
     }
+}
+
+fn torrent_list_row_color(torrent: &TorrentDisplayState, ctx: &ThemeContext) -> Color {
+    if !torrent.latest_state.data_available {
+        ctx.state_error()
+    } else {
+        match torrent.latest_state.torrent_control_state {
+            TorrentControlState::Running => ctx.theme.semantic.text,
+            TorrentControlState::Paused => ctx.theme.semantic.surface1,
+            TorrentControlState::Deleting => ctx.state_error(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CriticalDetailsPanel {
+    title: &'static str,
+    text: String,
+}
+
+fn selected_torrent_critical_details(
+    torrent: &TorrentDisplayState,
+    anonymize_torrent_names: bool,
+) -> Option<CriticalDetailsPanel> {
+    if torrent.latest_state.data_available {
+        return None;
+    }
+
+    let (issue_count, first_issue_path) = match &torrent.latest_file_probe_status {
+        Some(TorrentFileProbeStatus::Files(files)) => {
+            let mut issue_count = 0usize;
+            let mut first_issue_path = None;
+
+            for file in files {
+                if !file.is_skipped && file.error.is_some() {
+                    issue_count += 1;
+                    if first_issue_path.is_none() {
+                        first_issue_path = Some(file.relative_path.clone());
+                    }
+                }
+            }
+
+            (issue_count, first_issue_path)
+        }
+        _ => (0, None),
+    };
+
+    let saved_location = if let Some(download_path) = &torrent.latest_state.download_path {
+        if let Some(container_name) = torrent.latest_state.container_name.as_deref() {
+            if !container_name.is_empty() {
+                Some(download_path.join(container_name))
+            } else {
+                Some(download_path.clone())
+            }
+        } else {
+            Some(download_path.clone())
+        }
+    } else {
+        None
+    };
+
+    let display_path = if anonymize_torrent_names {
+        "/path/to/torrent/file".to_string()
+    } else {
+        match (saved_location, first_issue_path) {
+            (Some(saved_location), Some(first_issue_path)) => {
+                saved_location.join(first_issue_path).display().to_string()
+            }
+            (Some(saved_location), None) => saved_location.display().to_string(),
+            (None, Some(first_issue_path)) => first_issue_path.display().to_string(),
+            (None, None) => "-".to_string(),
+        }
+    };
+
+    Some(CriticalDetailsPanel {
+        title: "Critical",
+        text: format!("DATA UNAVAILABLE ({})\n\n{}", issue_count, display_path),
+    })
 }
 
 pub fn draw_network_chart(
@@ -3832,6 +3948,7 @@ mod tests {
         TorrentMetrics,
     };
     use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
+    use crate::errors::StorageError;
     use crate::theme::{Theme, ThemeContext, ThemeName};
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
@@ -4174,6 +4291,75 @@ mod tests {
 
         assert_eq!(app_state.peer_sort.0, PeerSortColumn::Flags);
         assert_eq!(app_state.peer_sort.1, SortDirection::Descending);
+    }
+
+    #[test]
+    fn critical_details_panel_returns_simple_text_for_unavailable_data() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.data_available = false;
+        torrent.latest_state.download_path = Some("/downloads".into());
+        torrent.latest_state.container_name = Some("sample".to_string());
+        torrent.latest_file_probe_status = Some(TorrentFileProbeStatus::Files(vec![
+            crate::torrent_manager::FileProbeEntry {
+                relative_path: "missing.bin".into(),
+                absolute_path: "/tmp/missing.bin".into(),
+                error: Some(StorageError::from(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ))),
+                is_skipped: false,
+                expected_size: 10,
+                observed_size: None,
+            },
+        ]));
+
+        let panel = selected_torrent_critical_details(&torrent, false)
+            .expect("critical panel should be present for unavailable data");
+        assert_eq!(panel.title, "Critical");
+        assert!(panel.text.contains("DATA UNAVAILABLE (1)"));
+        assert!(panel.text.contains("/downloads/sample/missing.bin"));
+    }
+
+    #[test]
+    fn critical_details_panel_masks_path_when_anonymized() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.data_available = false;
+        torrent.latest_state.download_path = Some("/downloads".into());
+        torrent.latest_state.container_name = Some("sample".to_string());
+        torrent.latest_file_probe_status = Some(TorrentFileProbeStatus::Files(vec![
+            crate::torrent_manager::FileProbeEntry {
+                relative_path: "missing.bin".into(),
+                absolute_path: "/tmp/missing.bin".into(),
+                error: Some(StorageError::from(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ))),
+                is_skipped: false,
+                expected_size: 10,
+                observed_size: None,
+            },
+        ]));
+
+        let panel = selected_torrent_critical_details(&torrent, true)
+            .expect("critical panel should be present for unavailable data");
+        assert_eq!(panel.title, "Critical");
+        assert!(panel.text.contains("DATA UNAVAILABLE (1)"));
+        assert!(panel.text.contains("/path/to/torrent/file"));
+        assert!(!panel.text.contains("/downloads/sample/missing.bin"));
+    }
+
+    #[test]
+    fn torrent_list_row_color_uses_error_when_data_is_unavailable() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let mut torrent = create_mock_display_state(0);
+
+        assert_eq!(
+            torrent_list_row_color(&torrent, &ctx),
+            ctx.theme.semantic.text
+        );
+
+        torrent.latest_state.data_available = false;
+        assert_eq!(torrent_list_row_color(&torrent, &ctx), ctx.state_error());
     }
 
     #[test]

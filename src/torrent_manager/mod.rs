@@ -7,6 +7,7 @@ pub mod merkle;
 pub mod piece_manager;
 pub mod state;
 
+use crate::errors::StorageError;
 use crate::Settings;
 
 use std::collections::HashMap;
@@ -58,6 +59,22 @@ pub struct DiskIoOperation {
     pub length: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileProbeEntry {
+    pub relative_path: PathBuf,
+    pub absolute_path: PathBuf,
+    pub error: Option<StorageError>,
+    pub is_skipped: bool,
+    pub expected_size: u64,
+    pub observed_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TorrentFileProbeStatus {
+    PendingMetadata,
+    Files(Vec<FileProbeEntry>),
+}
+
 #[derive(Debug)]
 pub enum ManagerEvent {
     DeletionComplete(Vec<u8>, Result<(), String>),
@@ -90,6 +107,10 @@ pub enum ManagerEvent {
     BlockSent {
         info_hash: Vec<u8>,
     },
+    FileProbeStatus {
+        info_hash: Vec<u8>,
+        status: TorrentFileProbeStatus,
+    },
     MetadataLoaded {
         info_hash: Vec<u8>,
         torrent: Box<Torrent>,
@@ -98,6 +119,8 @@ pub enum ManagerEvent {
 
 #[derive(Debug, Clone)]
 pub enum ManagerCommand {
+    ProbeFiles,
+    SetDataAvailability(bool),
     Pause,
     Resume,
     Shutdown,
