@@ -49,4 +49,16 @@ impl StorageError {
             _ => None,
         }
     }
+
+    pub fn indicates_data_unavailability(&self) -> bool {
+        match self {
+            Self::Io { kind, .. } => matches!(
+                kind,
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::UnexpectedEof
+            ),
+            Self::UnexpectedType | Self::SizeMismatch { .. } => true,
+        }
+    }
 }

@@ -6,6 +6,7 @@ mod command;
 mod config;
 mod errors;
 mod integrations;
+mod integrity_scheduler;
 mod networking;
 mod persistence;
 mod resource_manager;

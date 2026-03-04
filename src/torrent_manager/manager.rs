@@ -15,8 +15,8 @@ use crate::networking::ConnectionType;
 use crate::token_bucket::TokenBucket;
 
 use crate::torrent_manager::DiskIoOperation;
+use crate::torrent_manager::FileProbeBatchResult;
 use crate::torrent_manager::FileProbeEntry;
-use crate::torrent_manager::TorrentFileProbeStatus;
 
 use crate::config::Settings;
 
@@ -801,6 +801,7 @@ impl TorrentManager {
                         &resource_manager,
                         &mut shutdown_rx,
                         &event_tx,
+                        &info_hash,
                         op,
                         &peer_tx,
                     )
@@ -1568,6 +1569,7 @@ impl TorrentManager {
         resource_manager: &ResourceManagerClient,
         shutdown_rx: &mut broadcast::Receiver<()>,
         event_tx: &Sender<ManagerEvent>,
+        info_hash: &[u8],
         op: DiskIoOperation,
         peer_tx: &Sender<TorrentCommand>,
     ) -> Result<Vec<u8>, StorageError> {
@@ -1600,6 +1602,14 @@ impl TorrentManager {
                             return Ok(data);
                         }
                         Err(e) => {
+                            if e.indicates_data_unavailability() {
+                                let _ = event_tx.try_send(ManagerEvent::DataAvailabilityFault {
+                                    info_hash: info_hash.to_vec(),
+                                    piece_index: op.piece_index,
+                                    error: e.clone(),
+                                });
+                                return Err(e);
+                            }
                             event!(Level::WARN, piece = op.piece_index, error = ?e, "Disk read failed (IO Error).");
                         }
                     }
@@ -2185,13 +2195,37 @@ impl TorrentManager {
             .unwrap_or_else(|| absolute_path.to_path_buf())
     }
 
-    async fn collect_file_probe_entries(
+    async fn collect_file_probe_batch(
         torrent: &Torrent,
         multi_file_info: &MultiFileInfo,
-    ) -> Vec<FileProbeEntry> {
-        let mut files = Vec::new();
+        epoch: u64,
+        start_file_index: usize,
+        max_files: usize,
+    ) -> FileProbeBatchResult {
+        if start_file_index >= multi_file_info.files.len() {
+            return FileProbeBatchResult {
+                epoch,
+                scanned_files: 0,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            };
+        }
 
-        for (file_index, file_info) in multi_file_info.files.iter().enumerate() {
+        let end_file_index = multi_file_info
+            .files
+            .len()
+            .min(start_file_index.saturating_add(max_files));
+        let mut problem_files = Vec::new();
+
+        for (file_index, file_info) in multi_file_info
+            .files
+            .iter()
+            .enumerate()
+            .skip(start_file_index)
+            .take(end_file_index.saturating_sub(start_file_index))
+        {
             let relative_path =
                 Self::file_probe_relative_path(torrent, file_index, file_info.path.as_path());
 
@@ -2204,47 +2238,92 @@ impl TorrentManager {
             }
 
             let (error, observed_size) = probe_file_info(file_info).await;
-            if error.is_none() {
+            let Some(error) = error else {
                 continue;
-            }
-            files.push(FileProbeEntry {
+            };
+
+            problem_files.push(FileProbeEntry {
                 relative_path,
                 absolute_path: file_info.path.clone(),
                 error,
-                is_skipped: false,
                 expected_size: file_info.length,
                 observed_size,
             });
         }
 
-        files
+        let reached_end_of_manifest = end_file_index >= multi_file_info.files.len();
+
+        FileProbeBatchResult {
+            epoch,
+            scanned_files: end_file_index.saturating_sub(start_file_index),
+            next_file_index: if reached_end_of_manifest {
+                0
+            } else {
+                end_file_index
+            },
+            reached_end_of_manifest,
+            pending_metadata: false,
+            problem_files,
+        }
     }
 
-    async fn collect_file_probe_status(&self) -> TorrentFileProbeStatus {
+    async fn collect_file_probe_batch_result(
+        &self,
+        epoch: u64,
+        start_file_index: usize,
+        max_files: usize,
+    ) -> FileProbeBatchResult {
         if self.state.torrent_status == TorrentStatus::AwaitingMetadata {
-            return TorrentFileProbeStatus::PendingMetadata;
+            return FileProbeBatchResult {
+                epoch,
+                scanned_files: 0,
+                next_file_index: 0,
+                reached_end_of_manifest: false,
+                pending_metadata: true,
+                problem_files: Vec::new(),
+            };
         }
 
         let Some(torrent) = self.state.torrent.as_ref() else {
-            return TorrentFileProbeStatus::PendingMetadata;
+            return FileProbeBatchResult {
+                epoch,
+                scanned_files: 0,
+                next_file_index: 0,
+                reached_end_of_manifest: false,
+                pending_metadata: true,
+                problem_files: Vec::new(),
+            };
         };
 
         let Some(multi_file_info) = self.state.multi_file_info.as_ref() else {
-            return TorrentFileProbeStatus::PendingMetadata;
+            return FileProbeBatchResult {
+                epoch,
+                scanned_files: 0,
+                next_file_index: 0,
+                reached_end_of_manifest: false,
+                pending_metadata: true,
+                problem_files: Vec::new(),
+            };
         };
 
-        TorrentFileProbeStatus::Files(
-            Self::collect_file_probe_entries(torrent, multi_file_info).await,
-        )
+        Self::collect_file_probe_batch(torrent, multi_file_info, epoch, start_file_index, max_files)
+            .await
     }
 
-    async fn emit_file_probe_status(&self) {
-        let status = self.collect_file_probe_status().await;
+    async fn emit_file_probe_batch_result(
+        &self,
+        epoch: u64,
+        start_file_index: usize,
+        max_files: usize,
+    ) {
+        let result = self
+            .collect_file_probe_batch_result(epoch, start_file_index, max_files)
+            .await;
         let _ = self
             .manager_event_tx
-            .send(ManagerEvent::FileProbeStatus {
+            .send(ManagerEvent::FileProbeBatchResult {
                 info_hash: self.state.info_hash.clone(),
-                status,
+                result,
             })
             .await;
     }
@@ -2353,8 +2432,13 @@ impl TorrentManager {
                 Some(manager_command) = self.manager_command_rx.recv() => {
                     event!(Level::TRACE, ?manager_command);
                     match manager_command {
-                        ManagerCommand::ProbeFiles => {
-                            self.emit_file_probe_status().await;
+                        ManagerCommand::ProbeFileBatch {
+                            epoch,
+                            start_file_index,
+                            max_files,
+                        } => {
+                            self.emit_file_probe_batch_result(epoch, start_file_index, max_files)
+                                .await;
                         }
                         ManagerCommand::SetDataAvailability(available) => {
                             self.apply_action(Action::SetDataAvailability { available });
@@ -5172,22 +5256,24 @@ mod resource_tests {
         std::fs::write(temp_dir.join("ok.bin"), vec![0u8; 8]).unwrap();
         std::fs::write(temp_dir.join("short.bin"), vec![0u8; 4]).unwrap();
 
-        let files = TorrentManager::collect_file_probe_entries(&torrent, &multi_file_info).await;
+        let result =
+            TorrentManager::collect_file_probe_batch(&torrent, &multi_file_info, 0, 0, usize::MAX)
+                .await;
+        let files = result.problem_files;
 
         assert_eq!(files.len(), 2);
         assert!(files.iter().any(|entry| {
             entry.relative_path.ends_with("missing.bin")
-                && entry.error.as_ref().and_then(StorageError::io_kind)
-                    == Some(std::io::ErrorKind::NotFound)
+                && entry.error.io_kind() == Some(std::io::ErrorKind::NotFound)
         }));
         assert!(files.iter().any(|entry| {
             entry.relative_path.ends_with("short.bin")
                 && matches!(
                     entry.error,
-                    Some(StorageError::SizeMismatch {
+                    StorageError::SizeMismatch {
                         expected_size: 32,
                         observed_size: 4
-                    })
+                    }
                 )
                 && entry.observed_size == Some(4)
         }));
@@ -5233,8 +5319,10 @@ mod resource_tests {
             ..Default::default()
         };
 
-        let files = TorrentManager::collect_file_probe_entries(&torrent, &multi_file_info).await;
-        assert!(files.is_empty());
+        let result =
+            TorrentManager::collect_file_probe_batch(&torrent, &multi_file_info, 0, 0, usize::MAX)
+                .await;
+        assert!(result.problem_files.is_empty());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

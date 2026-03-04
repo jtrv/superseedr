@@ -46,6 +46,10 @@ use crate::tuning::{make_random_adjustment, normalize_limits_for_mode, TuningCon
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
 use crate::integrations::{rss_ingest, rss_service, status, watcher};
+use crate::integrity_scheduler::{
+    IntegrityScheduler, ProbeBatchOutcome, TorrentIntegritySnapshot,
+    INTEGRITY_SCHEDULER_TICK_INTERVAL,
+};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
@@ -104,7 +108,6 @@ const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
-const TORRENT_FILE_PROBE_INTERVAL_SECS: u64 = 15;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 #[derive(serde::Deserialize)]
@@ -813,6 +816,7 @@ pub struct App {
     pub watcher: RecommendedWatcher,
     pub tuning_controller: TuningController,
     pub next_tuning_at: time::Instant,
+    pub integrity_scheduler: IntegrityScheduler,
 }
 
 #[derive(Clone)]
@@ -1053,6 +1057,7 @@ impl App {
             notify_rx,
             tuning_controller,
             next_tuning_at: initial_tuning_deadline,
+            integrity_scheduler: IntegrityScheduler::new(Instant::now()),
         };
         app.refresh_system_warning();
 
@@ -1134,12 +1139,11 @@ impl App {
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
         let mut network_history_persist_interval =
             time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
-        let mut torrent_file_probe_interval =
-            time::interval(Duration::from_secs(TORRENT_FILE_PROBE_INTERVAL_SECS));
+        let mut integrity_scheduler_interval = time::interval(INTEGRITY_SCHEDULER_TICK_INTERVAL);
         self.reschedule_tuning_deadline();
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        torrent_file_probe_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        integrity_scheduler_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let output_status_interval = self.client_configs.output_status_interval;
         let mut status_dump_timer = tokio::time::interval(std::time::Duration::from_secs(
@@ -1203,8 +1207,8 @@ impl App {
                         self.save_state_to_disk();
                     }
                 }
-                _ = torrent_file_probe_interval.tick() => {
-                    self.request_torrent_file_probes();
+                _ = integrity_scheduler_interval.tick() => {
+                    self.advance_integrity_scheduler(INTEGRITY_SCHEDULER_TICK_INTERVAL);
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
@@ -2108,6 +2112,7 @@ impl App {
                 self.torrent_manager_command_txs.remove(&info_hash);
                 self.torrent_manager_incoming_peer_txs.remove(&info_hash);
                 self.torrent_metric_watch_rxs.remove(&info_hash);
+                self.integrity_scheduler.remove_torrent(&info_hash);
                 self.app_state
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
@@ -2122,10 +2127,86 @@ impl App {
 
                 self.save_state_to_disk();
                 self.refresh_rss_derived();
+                self.dispatch_integrity_probe_batches();
 
                 self.app_state.ui.needs_redraw = true;
             }
-            ManagerEvent::FileProbeStatus { info_hash, status } => {
+            ManagerEvent::DataAvailabilityFault {
+                info_hash,
+                piece_index,
+                error,
+            } => {
+                self.integrity_scheduler
+                    .on_data_availability_fault(&info_hash);
+
+                let mut availability_changed = false;
+                let mut availability_transition_log: Option<(
+                    String,
+                    usize,
+                    Option<std::path::PathBuf>,
+                    String,
+                )> = None;
+
+                if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
+                    let was_available = torrent.latest_state.data_available;
+                    torrent.latest_state.data_available = false;
+                    availability_changed = was_available;
+
+                    if availability_changed {
+                        let saved_location =
+                            torrent
+                                .latest_state
+                                .download_path
+                                .as_ref()
+                                .map(|download_path| {
+                                    if let Some(container_name) =
+                                        torrent.latest_state.container_name.as_deref()
+                                    {
+                                        if !container_name.is_empty() {
+                                            download_path.join(container_name)
+                                        } else {
+                                            download_path.clone()
+                                        }
+                                    } else {
+                                        download_path.clone()
+                                    }
+                                });
+                        availability_transition_log = Some((
+                            torrent.latest_state.torrent_name.clone(),
+                            piece_index as usize,
+                            saved_location,
+                            error.to_string(),
+                        ));
+                    }
+                }
+
+                if availability_changed {
+                    if let Some((torrent_name, piece_index, saved_location, error_text)) =
+                        availability_transition_log
+                    {
+                        tracing_event!(
+                            Level::WARN,
+                            info_hash = %hex::encode(&info_hash),
+                            torrent = %torrent_name,
+                            piece = piece_index,
+                            saved_location = ?saved_location,
+                            error = %error_text,
+                            "Foreground disk read marked torrent data unavailable"
+                        );
+                    }
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        let _ = manager_tx.try_send(ManagerCommand::SetDataAvailability(false));
+                    }
+                    self.save_state_to_disk();
+                }
+
+                self.dispatch_integrity_probe_batches();
+                self.app_state.ui.needs_redraw = true;
+            }
+            ManagerEvent::FileProbeBatchResult { info_hash, result } => {
+                let completed_sweep = self
+                    .integrity_scheduler
+                    .on_probe_batch_result(&info_hash, result);
                 let mut availability_changed = false;
                 let mut availability_transition_log: Option<(
                     String,
@@ -2136,30 +2217,23 @@ impl App {
                 )> = None;
 
                 if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
-                    let was_available = torrent.latest_state.data_available;
-                    torrent.latest_file_probe_status = Some(status.clone());
+                    match completed_sweep {
+                        Some(ProbeBatchOutcome::PendingMetadata) => {
+                            torrent.latest_file_probe_status =
+                                Some(TorrentFileProbeStatus::PendingMetadata);
+                        }
+                        Some(ProbeBatchOutcome::CompletedSweep { problem_files }) => {
+                            let was_available = torrent.latest_state.data_available;
+                            let issue_count = problem_files.len();
+                            let issue_files = problem_files
+                                .iter()
+                                .map(|entry| {
+                                    format!("{}: {}", entry.absolute_path.display(), entry.error)
+                                })
+                                .collect::<Vec<_>>();
 
-                    match status {
-                        TorrentFileProbeStatus::PendingMetadata => {}
-                        TorrentFileProbeStatus::Files(files) => {
-                            let mut issue_count = 0usize;
-                            let mut issue_files = Vec::new();
-
-                            for entry in &files {
-                                if !entry.is_skipped && entry.error.is_some() {
-                                    issue_count += 1;
-                                    issue_files.push(format!(
-                                        "{}: {}",
-                                        entry.absolute_path.display(),
-                                        entry
-                                            .error
-                                            .as_ref()
-                                            .map(ToString::to_string)
-                                            .unwrap_or_default()
-                                    ));
-                                }
-                            }
-
+                            torrent.latest_file_probe_status =
+                                Some(TorrentFileProbeStatus::Files(problem_files));
                             torrent.latest_state.data_available = issue_count == 0;
                             availability_changed =
                                 was_available != torrent.latest_state.data_available;
@@ -2190,6 +2264,7 @@ impl App {
                                 ));
                             }
                         }
+                        None => {}
                     }
                 }
 
@@ -2234,9 +2309,13 @@ impl App {
                     self.save_state_to_disk();
                 }
 
+                self.dispatch_integrity_probe_batches();
                 self.app_state.ui.needs_redraw = true;
             }
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
+                self.integrity_scheduler.on_metadata_loaded(&info_hash);
+                self.dispatch_integrity_probe_batches();
+
                 if let FileBrowserMode::DownloadLocSelection {
                     preview_tree,
                     preview_state,
@@ -2638,10 +2717,54 @@ impl App {
         }
     }
 
-    fn request_torrent_file_probes(&self) {
-        for manager_tx in self.torrent_manager_command_txs.values() {
-            let _ = manager_tx.try_send(ManagerCommand::ProbeFiles);
+    fn current_integrity_snapshots(&self) -> Vec<TorrentIntegritySnapshot> {
+        self.app_state
+            .torrents
+            .iter()
+            .filter_map(|(info_hash, torrent)| {
+                if torrent.latest_state.torrent_control_state == TorrentControlState::Deleting {
+                    return None;
+                }
+
+                Some(TorrentIntegritySnapshot {
+                    info_hash: info_hash.clone(),
+                    data_available: torrent.latest_state.data_available,
+                    download_path: torrent.latest_state.download_path.clone(),
+                    download_speed_bps: torrent.latest_state.download_speed_bps,
+                    upload_speed_bps: torrent.latest_state.upload_speed_bps,
+                })
+            })
+            .collect()
+    }
+
+    fn dispatch_integrity_probe_batches(&mut self) {
+        self.integrity_scheduler
+            .sync_torrents(self.current_integrity_snapshots());
+
+        for request in self.integrity_scheduler.drain_due_probe_requests() {
+            let send_result = self
+                .torrent_manager_command_txs
+                .get(&request.info_hash)
+                .map(|manager_tx| {
+                    manager_tx.try_send(ManagerCommand::ProbeFileBatch {
+                        epoch: request.epoch,
+                        start_file_index: request.start_file_index,
+                        max_files: request.max_files,
+                    })
+                });
+
+            match send_result {
+                Some(Ok(())) => {}
+                _ => self
+                    .integrity_scheduler
+                    .on_dispatch_failed(&request.info_hash),
+            }
         }
+    }
+
+    fn advance_integrity_scheduler(&mut self, dt: Duration) {
+        self.integrity_scheduler.advance_time(dt);
+        self.dispatch_integrity_probe_batches();
     }
 
     // Constantly ensures all table selected indices are in-bounds
@@ -2925,6 +3048,7 @@ impl App {
                         .run(torrent_control_state == TorrentControlState::Paused)
                         .await;
                 });
+                self.dispatch_integrity_probe_batches();
             }
             Err(e) => {
                 tracing_event!(
@@ -3043,6 +3167,7 @@ impl App {
                         .run(torrent_control_state == TorrentControlState::Paused)
                         .await;
                 });
+                self.dispatch_integrity_probe_batches();
             }
             Err(e) => {
                 tracing_event!(
@@ -3892,9 +4017,12 @@ mod tests {
     use crate::config::TorrentSettings;
     use crate::errors::StorageError;
     use crate::telemetry::ui_telemetry::UiTelemetry;
-    use crate::torrent_manager::{FileProbeEntry, ManagerEvent, TorrentFileProbeStatus};
+    use crate::torrent_manager::{
+        FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
+    };
     use std::collections::HashMap;
     use std::time::Duration;
+    use tokio::sync::mpsc;
     use tokio::time;
 
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
@@ -4230,30 +4358,28 @@ mod tests {
         display.latest_state.torrent_name = "probe torrent".to_string();
         display.latest_state.torrent_control_state = TorrentControlState::Running;
         app.app_state.torrents.insert(info_hash.clone(), display);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
 
-        app.handle_manager_event(ManagerEvent::FileProbeStatus {
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
             info_hash: info_hash.clone(),
-            status: TorrentFileProbeStatus::Files(vec![
-                FileProbeEntry {
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 2,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: vec![FileProbeEntry {
                     relative_path: "missing.bin".into(),
                     absolute_path: "/tmp/missing.bin".into(),
-                    error: Some(StorageError::from(std::io::Error::new(
+                    error: StorageError::from(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
                         "No such file or directory",
-                    ))),
-                    is_skipped: false,
+                    )),
                     expected_size: 10,
                     observed_size: None,
-                },
-                FileProbeEntry {
-                    relative_path: "ok.bin".into(),
-                    absolute_path: "/tmp/ok.bin".into(),
-                    error: None,
-                    is_skipped: false,
-                    expected_size: 10,
-                    observed_size: Some(10),
-                },
-            ]),
+                }],
+            },
         });
 
         let torrent = app
@@ -4267,6 +4393,254 @@ mod tests {
             TorrentControlState::Running
         );
         assert!(app.app_state.ui.needs_redraw);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn partial_probe_result_does_not_clear_previous_unavailable_state() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"partial_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.torrent_name = "partial probe torrent".to_string();
+        display.latest_state.data_available = false;
+        display.latest_file_probe_status =
+            Some(TorrentFileProbeStatus::Files(vec![FileProbeEntry {
+                relative_path: "missing.bin".into(),
+                absolute_path: "/tmp/missing.bin".into(),
+                error: StorageError::from(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory",
+                )),
+                expected_size: 10,
+                observed_size: None,
+            }]));
+        app.app_state.torrents.insert(info_hash.clone(), display);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
+            info_hash: info_hash.clone(),
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 128,
+                next_file_index: 128,
+                reached_end_of_manifest: false,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            },
+        });
+
+        let torrent = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent display should exist");
+        assert!(!torrent.latest_state.data_available);
+        assert_eq!(
+            torrent.latest_file_probe_status,
+            Some(TorrentFileProbeStatus::Files(vec![FileProbeEntry {
+                relative_path: "missing.bin".into(),
+                absolute_path: "/tmp/missing.bin".into(),
+                error: StorageError::from(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory",
+                )),
+                expected_size: 10,
+                observed_size: None,
+            }]))
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn dispatch_integrity_probe_batches_requests_work_immediately() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"dispatch_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "dispatch probe torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.dispatch_integrity_probe_batches();
+
+        let command = manager_rx.recv().await.expect("expected probe command");
+        assert!(matches!(
+            command,
+            ManagerCommand::ProbeFileBatch {
+                epoch: 0,
+                start_file_index: 0,
+                max_files: _
+            }
+        ));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn metadata_loaded_dispatches_probe_without_waiting_for_tick() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"metadata_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "metadata probe torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+        app.dispatch_integrity_probe_batches();
+
+        let first_command = manager_rx
+            .recv()
+            .await
+            .expect("expected initial probe command");
+        assert!(matches!(
+            first_command,
+            ManagerCommand::ProbeFileBatch { .. }
+        ));
+
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
+            info_hash: info_hash.clone(),
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 0,
+                next_file_index: 0,
+                reached_end_of_manifest: false,
+                pending_metadata: true,
+                problem_files: Vec::new(),
+            },
+        });
+
+        let torrent = crate::torrent_file::Torrent::default();
+        app.handle_manager_event(ManagerEvent::MetadataLoaded {
+            info_hash: info_hash.clone(),
+            torrent: Box::new(torrent),
+        });
+
+        let second_command = manager_rx
+            .recv()
+            .await
+            .expect("expected immediate post-metadata probe command");
+        assert!(matches!(
+            second_command,
+            ManagerCommand::ProbeFileBatch { .. }
+        ));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn data_availability_fault_marks_torrent_unavailable_and_schedules_same_path() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let faulted_info_hash = b"faulted_probe_hash".to_vec();
+        let sibling_info_hash = b"sibling_probe_hash".to_vec();
+
+        let mut faulted = TorrentDisplayState::default();
+        faulted.latest_state.info_hash = faulted_info_hash.clone();
+        faulted.latest_state.torrent_name = "faulted probe torrent".to_string();
+        faulted.latest_state.torrent_control_state = TorrentControlState::Running;
+        faulted.latest_state.download_path = Some("/downloads/shared".into());
+        app.app_state
+            .torrents
+            .insert(faulted_info_hash.clone(), faulted);
+
+        let mut sibling = TorrentDisplayState::default();
+        sibling.latest_state.info_hash = sibling_info_hash.clone();
+        sibling.latest_state.torrent_name = "sibling probe torrent".to_string();
+        sibling.latest_state.torrent_control_state = TorrentControlState::Running;
+        sibling.latest_state.download_path = Some("/downloads/shared".into());
+        app.app_state
+            .torrents
+            .insert(sibling_info_hash.clone(), sibling);
+
+        let (faulted_tx, mut faulted_rx) = mpsc::channel(4);
+        let (sibling_tx, mut sibling_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(faulted_info_hash.clone(), faulted_tx);
+        app.torrent_manager_command_txs
+            .insert(sibling_info_hash.clone(), sibling_tx);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+
+        app.handle_manager_event(ManagerEvent::DataAvailabilityFault {
+            info_hash: faulted_info_hash.clone(),
+            piece_index: 5,
+            error: StorageError::from(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory",
+            )),
+        });
+
+        let faulted_first = faulted_rx
+            .recv()
+            .await
+            .expect("expected first faulted torrent command");
+        let faulted_second = faulted_rx
+            .recv()
+            .await
+            .expect("expected second faulted torrent command");
+        let sibling_cmd = sibling_rx
+            .recv()
+            .await
+            .expect("expected sibling torrent probe command");
+        assert!(matches!(
+            faulted_first,
+            ManagerCommand::SetDataAvailability(false)
+        ));
+        assert!(matches!(
+            faulted_second,
+            ManagerCommand::ProbeFileBatch {
+                start_file_index: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sibling_cmd,
+            ManagerCommand::ProbeFileBatch {
+                start_file_index: 0,
+                ..
+            }
+        ));
+
+        let faulted_torrent = app
+            .app_state
+            .torrents
+            .get(&faulted_info_hash)
+            .expect("faulted torrent display should exist");
+        let sibling_torrent = app
+            .app_state
+            .torrents
+            .get(&sibling_info_hash)
+            .expect("sibling torrent display should exist");
+        assert!(!faulted_torrent.latest_state.data_available);
+        assert!(sibling_torrent.latest_state.data_available);
 
         let _ = app.shutdown_tx.send(());
     }

@@ -63,10 +63,19 @@ pub struct DiskIoOperation {
 pub struct FileProbeEntry {
     pub relative_path: PathBuf,
     pub absolute_path: PathBuf,
-    pub error: Option<StorageError>,
-    pub is_skipped: bool,
+    pub error: StorageError,
     pub expected_size: u64,
     pub observed_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileProbeBatchResult {
+    pub epoch: u64,
+    pub scanned_files: usize,
+    pub next_file_index: usize,
+    pub reached_end_of_manifest: bool,
+    pub pending_metadata: bool,
+    pub problem_files: Vec<FileProbeEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +87,11 @@ pub enum TorrentFileProbeStatus {
 #[derive(Debug)]
 pub enum ManagerEvent {
     DeletionComplete(Vec<u8>, Result<(), String>),
+    DataAvailabilityFault {
+        info_hash: Vec<u8>,
+        piece_index: u32,
+        error: StorageError,
+    },
     DiskReadStarted {
         info_hash: Vec<u8>,
         op: DiskIoOperation,
@@ -107,9 +121,9 @@ pub enum ManagerEvent {
     BlockSent {
         info_hash: Vec<u8>,
     },
-    FileProbeStatus {
+    FileProbeBatchResult {
         info_hash: Vec<u8>,
-        status: TorrentFileProbeStatus,
+        result: FileProbeBatchResult,
     },
     MetadataLoaded {
         info_hash: Vec<u8>,
@@ -119,7 +133,11 @@ pub enum ManagerEvent {
 
 #[derive(Debug, Clone)]
 pub enum ManagerCommand {
-    ProbeFiles,
+    ProbeFileBatch {
+        epoch: u64,
+        start_file_index: usize,
+        max_files: usize,
+    },
     SetDataAvailability(bool),
     Pause,
     Resume,

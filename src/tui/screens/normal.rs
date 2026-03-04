@@ -1522,21 +1522,10 @@ fn selected_torrent_critical_details(
     }
 
     let (issue_count, first_issue_path) = match &torrent.latest_file_probe_status {
-        Some(TorrentFileProbeStatus::Files(files)) => {
-            let mut issue_count = 0usize;
-            let mut first_issue_path = None;
-
-            for file in files {
-                if !file.is_skipped && file.error.is_some() {
-                    issue_count += 1;
-                    if first_issue_path.is_none() {
-                        first_issue_path = Some(file.relative_path.clone());
-                    }
-                }
-            }
-
-            (issue_count, first_issue_path)
-        }
+        Some(TorrentFileProbeStatus::Files(files)) => (
+            files.len(),
+            files.first().map(|file| file.relative_path.clone()),
+        ),
         _ => (0, None),
     };
 
@@ -4303,11 +4292,10 @@ mod tests {
             crate::torrent_manager::FileProbeEntry {
                 relative_path: "missing.bin".into(),
                 absolute_path: "/tmp/missing.bin".into(),
-                error: Some(StorageError::from(std::io::Error::new(
+                error: StorageError::from(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "No such file or directory",
-                ))),
-                is_skipped: false,
+                )),
                 expected_size: 10,
                 observed_size: None,
             },
@@ -4330,11 +4318,10 @@ mod tests {
             crate::torrent_manager::FileProbeEntry {
                 relative_path: "missing.bin".into(),
                 absolute_path: "/tmp/missing.bin".into(),
-                error: Some(StorageError::from(std::io::Error::new(
+                error: StorageError::from(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "No such file or directory",
-                ))),
-                is_skipped: false,
+                )),
                 expected_size: 10,
                 observed_size: None,
             },
