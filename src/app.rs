@@ -19,6 +19,10 @@ use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
     TorrentSettings, TorrentSortColumn,
 };
+use crate::persistence::activity_history::{
+    load_activity_history_state, save_activity_history_state, ActivityHistoryPersistedState,
+    ActivityHistoryRollupState,
+};
 use crate::persistence::network_history::{
     load_network_history_state, save_network_history_state, NetworkHistoryPersistedState,
     NetworkHistoryRollupState,
@@ -38,6 +42,7 @@ use crate::config::get_watch_path;
 use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
+use crate::telemetry::activity_history_telemetry::ActivityHistoryTelemetry;
 use crate::telemetry::network_history_telemetry::NetworkHistoryTelemetry;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
@@ -373,6 +378,75 @@ impl GraphDisplayMode {
     }
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub enum ChartPanelView {
+    #[default]
+    Network,
+    Cpu,
+    Ram,
+    Disk,
+    Tuning,
+    TorrentOverlay,
+}
+
+impl ChartPanelView {
+    pub fn to_string(self) -> &'static str {
+        match self {
+            Self::Network => "NET",
+            Self::Cpu => "CPU",
+            Self::Ram => "RAM",
+            Self::Disk => "DISK",
+            Self::Tuning => "TUNE",
+            Self::TorrentOverlay => "TOR",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Network => Self::Cpu,
+            Self::Cpu => Self::Ram,
+            Self::Ram => Self::Disk,
+            Self::Disk => Self::Tuning,
+            Self::Tuning => Self::TorrentOverlay,
+            Self::TorrentOverlay => Self::Network,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Network => Self::TorrentOverlay,
+            Self::Cpu => Self::Network,
+            Self::Ram => Self::Cpu,
+            Self::Disk => Self::Ram,
+            Self::Tuning => Self::Disk,
+            Self::TorrentOverlay => Self::Tuning,
+        }
+    }
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub enum OverlayGraphMode {
+    #[default]
+    Net,
+    SplitDirectional,
+}
+
+impl OverlayGraphMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Net => Self::SplitDirectional,
+            Self::SplitDirectional => Self::Net,
+        }
+    }
+
+    pub fn to_string(self) -> &'static str {
+        match self {
+            Self::Net => "NET",
+            Self::SplitDirectional => "DL+UL",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SelectedHeader {
     Torrent(usize),
@@ -412,7 +486,12 @@ pub enum AppCommand {
     RssDownloadSelected(RssHistoryEntry),
     RssDownloadPreview(RssPreviewItem),
     NetworkHistoryLoaded(NetworkHistoryPersistedState),
+    ActivityHistoryLoaded(ActivityHistoryPersistedState),
     NetworkHistoryPersisted {
+        request_id: u64,
+        success: bool,
+    },
+    ActivityHistoryPersisted {
         request_id: u64,
         success: bool,
     },
@@ -758,6 +837,8 @@ pub struct AppState {
     pub torrent_sort: (TorrentSortColumn, SortDirection),
     pub peer_sort: (PeerSortColumn, SortDirection),
 
+    pub chart_panel_view: ChartPanelView,
+    pub overlay_graph_mode: OverlayGraphMode,
     pub graph_mode: GraphDisplayMode,
     pub minute_avg_dl_history: Vec<u64>,
     pub minute_avg_ul_history: Vec<u64>,
@@ -767,6 +848,12 @@ pub struct AppState {
     pub network_history_restore_pending: bool,
     pub next_network_history_persist_request_id: u64,
     pub pending_network_history_persist_request_id: Option<u64>,
+    pub activity_history_state: ActivityHistoryPersistedState,
+    pub activity_history_rollups: ActivityHistoryRollupState,
+    pub activity_history_dirty: bool,
+    pub activity_history_restore_pending: bool,
+    pub next_activity_history_persist_request_id: u64,
+    pub pending_activity_history_persist_request_id: Option<u64>,
 
     pub last_tuning_score: u64,
     pub current_tuning_score: u64,
@@ -829,10 +916,17 @@ pub struct NetworkHistoryPersistRequest {
 }
 
 #[derive(Clone)]
+pub struct ActivityHistoryPersistRequest {
+    pub request_id: u64,
+    pub state: ActivityHistoryPersistedState,
+}
+
+#[derive(Clone)]
 pub struct PersistPayload {
     pub settings: Settings,
     pub rss_state: RssPersistedState,
     pub network_history: Option<NetworkHistoryPersistRequest>,
+    pub activity_history: Option<ActivityHistoryPersistRequest>,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -859,6 +953,10 @@ impl App {
                     .network_history
                     .as_ref()
                     .map(|request| request.request_id);
+                let activity_history_request_id = payload
+                    .activity_history
+                    .as_ref()
+                    .map(|request| request.request_id);
                 let write_result = tokio::task::spawn_blocking(move || {
                     save_settings(&payload.settings)
                         .map_err(|e| format!("Failed to auto-save settings: {}", e))?;
@@ -867,6 +965,11 @@ impl App {
                     if let Some(network_history) = payload.network_history {
                         save_network_history_state(&network_history.state).map_err(|e| {
                             format!("Failed to auto-save network history state: {}", e)
+                        })?;
+                    }
+                    if let Some(activity_history) = payload.activity_history {
+                        save_activity_history_state(&activity_history.state).map_err(|e| {
+                            format!("Failed to auto-save activity history state: {}", e)
                         })?;
                     }
                     Ok::<(), String>(())
@@ -887,6 +990,14 @@ impl App {
                                 })
                                 .await;
                         }
+                        if let Some(request_id) = activity_history_request_id {
+                            let _ = persistence_app_command_tx
+                                .send(AppCommand::ActivityHistoryPersisted {
+                                    request_id,
+                                    success: true,
+                                })
+                                .await;
+                        }
                     }
                     Ok(Err(e)) => {
                         tracing_event!(Level::ERROR, "{}", e);
@@ -898,12 +1009,28 @@ impl App {
                                 })
                                 .await;
                         }
+                        if let Some(request_id) = activity_history_request_id {
+                            let _ = persistence_app_command_tx
+                                .send(AppCommand::ActivityHistoryPersisted {
+                                    request_id,
+                                    success: false,
+                                })
+                                .await;
+                        }
                     }
                     Err(e) => {
                         tracing_event!(Level::ERROR, "Persistence writer join failed: {}", e);
                         if let Some(request_id) = network_history_request_id {
                             let _ = persistence_app_command_tx
                                 .send(AppCommand::NetworkHistoryPersisted {
+                                    request_id,
+                                    success: false,
+                                })
+                                .await;
+                        }
+                        if let Some(request_id) = activity_history_request_id {
+                            let _ = persistence_app_command_tx
+                                .send(AppCommand::ActivityHistoryPersisted {
                                     request_id,
                                     success: false,
                                 })
@@ -1134,6 +1261,7 @@ impl App {
 
         self.startup_crossterm_event_listener();
         self.startup_network_history_restore();
+        self.startup_activity_history_restore();
 
         let mut sys = System::new();
 
@@ -2007,11 +2135,22 @@ impl App {
                 self.app_state.network_history_restore_pending = false;
                 self.app_state.ui.needs_redraw = true;
             }
+            AppCommand::ActivityHistoryLoaded(state) => {
+                ActivityHistoryTelemetry::apply_loaded_state(&mut self.app_state, state);
+                self.app_state.activity_history_restore_pending = false;
+                self.app_state.ui.needs_redraw = true;
+            }
             AppCommand::NetworkHistoryPersisted {
                 request_id,
                 success,
             } => {
                 apply_network_history_persist_result(&mut self.app_state, request_id, success);
+            }
+            AppCommand::ActivityHistoryPersisted {
+                request_id,
+                success,
+            } => {
+                apply_activity_history_persist_result(&mut self.app_state, request_id, success);
             }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
@@ -2577,6 +2716,7 @@ impl App {
             self.app_state.adaptive_max_scpb,
         );
         self.sync_tuning_state_from_controller();
+        ActivityHistoryTelemetry::on_second_tick(&mut self.app_state);
     }
 
     fn startup_network_history_restore(&mut self) {
@@ -2597,6 +2737,31 @@ impl App {
                     let _ = tx
                         .send(AppCommand::NetworkHistoryLoaded(
                             NetworkHistoryPersistedState::default(),
+                        ))
+                        .await;
+                }
+            }
+        });
+    }
+
+    fn startup_activity_history_restore(&mut self) {
+        self.app_state.activity_history_restore_pending = true;
+        let tx = self.app_command_tx.clone();
+        tokio::spawn(async move {
+            let load_result = tokio::task::spawn_blocking(load_activity_history_state).await;
+            match load_result {
+                Ok(state) => {
+                    let _ = tx.send(AppCommand::ActivityHistoryLoaded(state)).await;
+                }
+                Err(e) => {
+                    tracing_event!(
+                        Level::ERROR,
+                        "Activity history restore task failed to join: {}",
+                        e
+                    );
+                    let _ = tx
+                        .send(AppCommand::ActivityHistoryLoaded(
+                            ActivityHistoryPersistedState::default(),
                         ))
                         .await;
                 }
@@ -2713,9 +2878,15 @@ impl App {
             .network_history
             .as_ref()
             .map(|request| request.request_id);
+        let activity_history_request_id = payload
+            .activity_history
+            .as_ref()
+            .map(|request| request.request_id);
 
         if queue_persistence_payload(self.persistence_tx.as_ref(), payload).is_ok() {
             self.app_state.pending_network_history_persist_request_id = network_history_request_id;
+            self.app_state.pending_activity_history_persist_request_id =
+                activity_history_request_id;
         } else {
             tracing_event!(
                 Level::ERROR,
@@ -3980,10 +4151,30 @@ fn build_persist_payload(
         })
     };
 
+    let activity_history = if app_state.activity_history_restore_pending {
+        None
+    } else {
+        app_state
+            .activity_history_rollups
+            .sync_snapshots_to_state(&mut app_state.activity_history_state);
+        app_state.activity_history_state.updated_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        app_state.next_activity_history_persist_request_id = app_state
+            .next_activity_history_persist_request_id
+            .saturating_add(1);
+        Some(ActivityHistoryPersistRequest {
+            request_id: app_state.next_activity_history_persist_request_id,
+            state: app_state.activity_history_state.clone(),
+        })
+    };
+
     PersistPayload {
         settings: client_configs.clone(),
         rss_state,
         network_history,
+        activity_history,
     }
 }
 
@@ -3994,8 +4185,15 @@ fn apply_network_history_persist_result(app_state: &mut AppState, request_id: u6
     }
 }
 
+fn apply_activity_history_persist_result(app_state: &mut AppState, request_id: u64, success: bool) {
+    if success && app_state.pending_activity_history_persist_request_id == Some(request_id) {
+        app_state.activity_history_dirty = false;
+        app_state.pending_activity_history_persist_request_id = None;
+    }
+}
+
 fn should_persist_network_history_on_interval(app_state: &AppState) -> bool {
-    app_state.network_history_dirty
+    app_state.network_history_dirty || app_state.activity_history_dirty
 }
 
 fn queue_persistence_payload(
@@ -4848,6 +5046,7 @@ mod tests {
                 request_id: 7,
                 state: network_history_state.clone(),
             }),
+            activity_history: None,
         };
 
         assert!(queue_persistence_payload(Some(&tx), payload).is_ok());

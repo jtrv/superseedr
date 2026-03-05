@@ -379,7 +379,21 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "t / T",
                         ctx.apply(Style::default().fg(ctx.accent_teal())),
                     )),
-                    Cell::from("Switch network graph time scale forward/backward"),
+                    Cell::from("Switch graph time scale forward/backward"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "g / G",
+                        ctx.apply(Style::default().fg(ctx.accent_teal())),
+                    )),
+                    Cell::from("Switch chart panel view forward/backward"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "o",
+                        ctx.apply(Style::default().fg(ctx.accent_teal())),
+                    )),
+                    Cell::from("Toggle torrent overlay between net and DL/UL split"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

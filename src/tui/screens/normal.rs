@@ -5,8 +5,10 @@ use crate::app::sort_and_filter_torrent_list_state;
 use crate::app::torrent_completion_percent;
 use crate::app::AppCommand;
 use crate::app::BrowserPane;
+use crate::app::ChartPanelView;
 use crate::app::FileBrowserMode;
 use crate::app::GraphDisplayMode;
+use crate::app::OverlayGraphMode;
 use crate::app::PeerInfo;
 use crate::app::{
     App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
@@ -14,6 +16,7 @@ use crate::app::{
 };
 use crate::config::Settings;
 use crate::config::SortDirection;
+use crate::persistence::activity_history::{ActivityHistoryPoint, ActivityHistorySeries};
 use crate::persistence::network_history::NetworkHistoryPoint;
 use crate::theme::{ThemeContext, ThemeName};
 use crate::torrent_manager::{ManagerCommand, TorrentFileProbeStatus};
@@ -40,6 +43,7 @@ use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -93,6 +97,88 @@ fn build_time_aligned_window(
     (dl, ul, backoff)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryTier {
+    Second1s,
+    Minute1m,
+    Minute15m,
+    Hour1h,
+}
+
+fn graph_window_spec(mode: GraphDisplayMode) -> (usize, u64, HistoryTier) {
+    match mode {
+        GraphDisplayMode::OneMinute
+        | GraphDisplayMode::FiveMinutes
+        | GraphDisplayMode::TenMinutes
+        | GraphDisplayMode::ThirtyMinutes
+        | GraphDisplayMode::OneHour => (
+            mode.as_seconds().clamp(1, SECONDS_HISTORY_MAX),
+            1_u64,
+            HistoryTier::Second1s,
+        ),
+        GraphDisplayMode::ThreeHours
+        | GraphDisplayMode::TwelveHours
+        | GraphDisplayMode::TwentyFourHours => (
+            (mode.as_seconds() / 60).clamp(1, MINUTES_HISTORY_MAX),
+            60_u64,
+            HistoryTier::Minute1m,
+        ),
+        GraphDisplayMode::SevenDays => (7 * 24 * 4, 15 * 60_u64, HistoryTier::Minute15m),
+        GraphDisplayMode::ThirtyDays => (30 * 24 * 4, 15 * 60_u64, HistoryTier::Minute15m),
+        GraphDisplayMode::OneYear => (365 * 24, 60 * 60_u64, HistoryTier::Hour1h),
+    }
+}
+
+fn build_time_aligned_pair_window(
+    points: &[ActivityHistoryPoint],
+    step_secs: u64,
+    window_points: usize,
+    now_unix: u64,
+) -> (Vec<u64>, Vec<u64>) {
+    if window_points == 0 || step_secs == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut primary = vec![0_u64; window_points];
+    let mut secondary = vec![0_u64; window_points];
+    let end_ts = now_unix.saturating_sub(now_unix % step_secs);
+    let start_ts = end_ts.saturating_sub((window_points.saturating_sub(1) as u64) * step_secs);
+
+    for point in points {
+        if point.ts_unix < start_ts || point.ts_unix > end_ts {
+            continue;
+        }
+        let idx = ((point.ts_unix - start_ts) / step_secs) as usize;
+        if idx < window_points {
+            primary[idx] = point.primary;
+            secondary[idx] = point.secondary;
+        }
+    }
+
+    (primary, secondary)
+}
+
+fn activity_points_for_tier(
+    series: &ActivityHistorySeries,
+    tier: HistoryTier,
+) -> &[ActivityHistoryPoint] {
+    match tier {
+        HistoryTier::Second1s => &series.tiers.second_1s,
+        HistoryTier::Minute1m => &series.tiers.minute_1m,
+        HistoryTier::Minute15m => &series.tiers.minute_15m,
+        HistoryTier::Hour1h => &series.tiers.hour_1h,
+    }
+}
+
+fn network_points_for_tier(app_state: &AppState, tier: HistoryTier) -> &[NetworkHistoryPoint] {
+    match tier {
+        HistoryTier::Second1s => &app_state.network_history_state.tiers.second_1s,
+        HistoryTier::Minute1m => &app_state.network_history_state.tiers.minute_1m,
+        HistoryTier::Minute15m => &app_state.network_history_state.tiers.minute_15m,
+        HistoryTier::Hour1h => &app_state.network_history_state.tiers.hour_1h,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     ClearSystemError,
@@ -101,8 +187,11 @@ pub enum UiAction {
     ToggleAnonymizeNames,
     EnterPowerSaving,
     RequestQuit,
+    ChartViewNext,
+    ChartViewPrev,
     GraphNext,
     GraphPrev,
+    OverlayModeToggle,
     OpenAddTorrentBrowser,
     OpenDeleteConfirm {
         with_files: bool,
@@ -187,6 +276,20 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
+        UiAction::ChartViewNext => {
+            app_state.chart_panel_view = app_state.chart_panel_view.next();
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::ChartViewPrev => {
+            app_state.chart_panel_view = app_state.chart_panel_view.prev();
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
         UiAction::GraphNext => {
             app_state.graph_mode = app_state.graph_mode.next();
             ReduceResult {
@@ -196,6 +299,13 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
         }
         UiAction::GraphPrev => {
             app_state.graph_mode = app_state.graph_mode.prev();
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::OverlayModeToggle => {
+            app_state.overlay_graph_mode = app_state.overlay_graph_mode.toggle();
             ReduceResult {
                 redraw: true,
                 effects: Vec::new(),
@@ -372,8 +482,11 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('x') => Some(UiAction::ToggleAnonymizeNames),
         KeyCode::Char('z') => Some(UiAction::EnterPowerSaving),
         KeyCode::Char('Q') => Some(UiAction::RequestQuit),
+        KeyCode::Char('g') => Some(UiAction::ChartViewNext),
+        KeyCode::Char('G') => Some(UiAction::ChartViewPrev),
         KeyCode::Char('t') => Some(UiAction::GraphNext),
         KeyCode::Char('T') => Some(UiAction::GraphPrev),
+        KeyCode::Char('o') => Some(UiAction::OverlayModeToggle),
         KeyCode::Char('a') => Some(UiAction::OpenAddTorrentBrowser),
         KeyCode::Char('d') => Some(UiAction::OpenDeleteConfirm { with_files: false }),
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
@@ -892,6 +1005,11 @@ pub fn draw_footer(
         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
     );
     push_if_fits(
+        "[g]",
+        "raph",
+        ctx.apply(Style::default().fg(ctx.state_warning())),
+    );
+    push_if_fits(
         "[<]theme[>]",
         "",
         ctx.apply(Style::default().fg(ctx.state_selected())),
@@ -930,6 +1048,11 @@ pub fn draw_footer(
         "[T]",
         "time++",
         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+    );
+    push_if_fits(
+        "[o]",
+        "overlay",
+        ctx.apply(Style::default().fg(ctx.accent_teal())),
     );
     push_if_fits(
         "[[]",
@@ -1601,136 +1724,431 @@ pub fn draw_network_chart(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    let (points_to_show, step_secs, source_points) = match app_state.graph_mode {
-        GraphDisplayMode::OneMinute
-        | GraphDisplayMode::FiveMinutes
-        | GraphDisplayMode::TenMinutes
-        | GraphDisplayMode::ThirtyMinutes
-        | GraphDisplayMode::OneHour => (
-            app_state
-                .graph_mode
-                .as_seconds()
-                .clamp(1, SECONDS_HISTORY_MAX),
-            1_u64,
-            &app_state.network_history_state.tiers.second_1s,
-        ),
-        GraphDisplayMode::ThreeHours
-        | GraphDisplayMode::TwelveHours
-        | GraphDisplayMode::TwentyFourHours => (
-            (app_state.graph_mode.as_seconds() / 60).clamp(1, MINUTES_HISTORY_MAX),
-            60_u64,
-            &app_state.network_history_state.tiers.minute_1m,
-        ),
-        GraphDisplayMode::SevenDays => (
-            7 * 24 * 4,
-            15 * 60_u64,
-            &app_state.network_history_state.tiers.minute_15m,
-        ),
-        GraphDisplayMode::ThirtyDays => (
-            30 * 24 * 4,
-            15 * 60_u64,
-            &app_state.network_history_state.tiers.minute_15m,
-        ),
-        GraphDisplayMode::OneYear => (
-            365 * 24,
-            60 * 60_u64,
-            &app_state.network_history_state.tiers.hour_1h,
-        ),
-    };
-
-    let (dl_history_slice, ul_history_slice, backoff_history_relevant_ms) =
-        build_time_aligned_window(source_points, step_secs, points_to_show, now_unix);
-
-    let stable_max_speed = dl_history_slice
-        .iter()
-        .chain(ul_history_slice.iter())
-        .max()
-        .copied()
-        .unwrap_or(10_000);
-    let nice_max_speed = calculate_nice_upper_bound(stable_max_speed);
-
+    let (points_to_show, step_secs, tier) = graph_window_spec(app_state.graph_mode);
     let smoothing_period = 5.0;
     let alpha = 2.0 / (smoothing_period + 1.0);
-    let smoothed_dl_data = smooth_data(&dl_history_slice, alpha);
-    let smoothed_ul_data = smooth_data(&ul_history_slice, alpha);
 
-    let dl_data: Vec<(f64, f64)> = smoothed_dl_data
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (i as f64, s as f64))
-        .collect();
-    let ul_data: Vec<(f64, f64)> = smoothed_ul_data
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (i as f64, s as f64))
-        .collect();
+    let mut dataset_specs: Vec<(String, Color, bool, Option<ratatui::widgets::GraphType>)> =
+        Vec::new();
+    let mut dataset_data: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut y_axis_upper: f64;
+    let y_axis_labels: Vec<Span>;
 
-    let backoff_marker_data: Vec<(f64, f64)> = backoff_history_relevant_ms
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &ms)| {
-            if ms > 0 {
-                let y_val = smoothed_dl_data.get(i).copied().unwrap_or(0) as f64;
-                Some((i as f64, y_val))
-            } else {
-                None
+    match app_state.chart_panel_view {
+        ChartPanelView::Network => {
+            let source_points = network_points_for_tier(app_state, tier);
+            let (dl_history_slice, ul_history_slice, backoff_history_relevant_ms) =
+                build_time_aligned_window(source_points, step_secs, points_to_show, now_unix);
+            let stable_max_speed = dl_history_slice
+                .iter()
+                .chain(ul_history_slice.iter())
+                .max()
+                .copied()
+                .unwrap_or(10_000);
+            let nice_max_speed = calculate_nice_upper_bound(stable_max_speed);
+            y_axis_upper = nice_max_speed as f64;
+            y_axis_labels = vec![
+                Span::raw("0"),
+                Span::styled(
+                    format_speed(nice_max_speed / 2),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+                Span::styled(
+                    format_speed(nice_max_speed),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+            ];
+
+            let smoothed_dl_data = smooth_data(&dl_history_slice, alpha);
+            let smoothed_ul_data = smooth_data(&ul_history_slice, alpha);
+            let dl_data: Vec<(f64, f64)> = smoothed_dl_data
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| (i as f64, s as f64))
+                .collect();
+            let ul_data: Vec<(f64, f64)> = smoothed_ul_data
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| (i as f64, s as f64))
+                .collect();
+            dataset_data.push(dl_data);
+            dataset_specs.push((
+                "Download".to_string(),
+                ctx.state_info(),
+                true,
+                None,
+            ));
+            dataset_data.push(ul_data);
+            dataset_specs.push((
+                "Upload".to_string(),
+                ctx.state_success(),
+                true,
+                None,
+            ));
+
+            let backoff_marker_data: Vec<(f64, f64)> = backoff_history_relevant_ms
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &ms)| {
+                    if ms > 0 {
+                        Some((
+                            i as f64,
+                            smoothed_dl_data.get(i).copied().unwrap_or(0) as f64,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            dataset_data.push(backoff_marker_data);
+            dataset_specs.push((
+                "File Limits".to_string(),
+                ctx.state_error(),
+                true,
+                Some(ratatui::widgets::GraphType::Scatter),
+            ));
+        }
+        ChartPanelView::Cpu => {
+            let points = activity_points_for_tier(&app_state.activity_history_state.cpu, tier);
+            let (cpu_x10, _) =
+                build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+            let smoothed = smooth_data(&cpu_x10, alpha);
+            let cpu_data: Vec<(f64, f64)> = smoothed
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as f64, v as f64 / 10.0))
+                .collect();
+            dataset_data.push(cpu_data);
+            dataset_specs.push((
+                "CPU".to_string(),
+                ctx.state_error(),
+                true,
+                Some(ratatui::widgets::GraphType::Line),
+            ));
+            y_axis_upper = 100.0;
+            y_axis_labels = vec![
+                Span::raw("0%"),
+                Span::styled(
+                    "50%",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+                Span::styled(
+                    "100%",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+            ];
+        }
+        ChartPanelView::Ram => {
+            let points = activity_points_for_tier(&app_state.activity_history_state.ram, tier);
+            let (ram_x10, _) =
+                build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+            let smoothed = smooth_data(&ram_x10, alpha);
+            let ram_data: Vec<(f64, f64)> = smoothed
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as f64, v as f64 / 10.0))
+                .collect();
+            dataset_data.push(ram_data);
+            dataset_specs.push((
+                "RAM".to_string(),
+                ctx.state_warning(),
+                true,
+                Some(ratatui::widgets::GraphType::Line),
+            ));
+            y_axis_upper = 100.0;
+            y_axis_labels = vec![
+                Span::raw("0%"),
+                Span::styled(
+                    "50%",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+                Span::styled(
+                    "100%",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+            ];
+        }
+        ChartPanelView::Disk => {
+            let points = activity_points_for_tier(&app_state.activity_history_state.disk, tier);
+            let (read_history, write_history) =
+                build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+            let stable_max_speed = read_history
+                .iter()
+                .chain(write_history.iter())
+                .max()
+                .copied()
+                .unwrap_or(10_000);
+            let nice_max_speed = calculate_nice_upper_bound(stable_max_speed);
+            y_axis_upper = nice_max_speed as f64;
+            y_axis_labels = vec![
+                Span::raw("0"),
+                Span::styled(
+                    format_speed(nice_max_speed / 2),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+                Span::styled(
+                    format_speed(nice_max_speed),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+            ];
+
+            let smoothed_read = smooth_data(&read_history, alpha);
+            let smoothed_write = smooth_data(&write_history, alpha);
+            let read_data: Vec<(f64, f64)> = smoothed_read
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as f64, v as f64))
+                .collect();
+            let write_data: Vec<(f64, f64)> = smoothed_write
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as f64, v as f64))
+                .collect();
+            dataset_data.push(read_data);
+            dataset_specs.push((
+                "Disk Read".to_string(),
+                ctx.state_success(),
+                true,
+                Some(ratatui::widgets::GraphType::Line),
+            ));
+            dataset_data.push(write_data);
+            dataset_specs.push((
+                "Disk Write".to_string(),
+                ctx.accent_sky(),
+                true,
+                Some(ratatui::widgets::GraphType::Line),
+            ));
+        }
+        ChartPanelView::Tuning => {
+            let points = activity_points_for_tier(&app_state.activity_history_state.tuning, tier);
+            let (current_series, best_series) =
+                build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+            let stable_max = current_series
+                .iter()
+                .chain(best_series.iter())
+                .max()
+                .copied()
+                .unwrap_or(1)
+                .max(1);
+            y_axis_upper = calculate_nice_upper_bound(stable_max) as f64;
+            y_axis_labels = vec![
+                Span::raw("0"),
+                Span::styled(
+                    (y_axis_upper as u64 / 2).to_string(),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+                Span::styled(
+                    (y_axis_upper as u64).to_string(),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                ),
+            ];
+
+            let current_data: Vec<(f64, f64)> = current_series
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as f64, v as f64))
+                .collect();
+            let best_data: Vec<(f64, f64)> = best_series
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as f64, v as f64))
+                .collect();
+            dataset_data.push(current_data);
+            dataset_specs.push((
+                "Current".to_string(),
+                ctx.theme.semantic.text,
+                true,
+                Some(ratatui::widgets::GraphType::Line),
+            ));
+            dataset_data.push(best_data);
+            dataset_specs.push((
+                "Best".to_string(),
+                ctx.state_success(),
+                false,
+                Some(ratatui::widgets::GraphType::Line),
+            ));
+        }
+        ChartPanelView::TorrentOverlay => {
+            let selected_hash = app_state
+                .torrent_list_order
+                .get(app_state.ui.selected_torrent_index)
+                .cloned();
+
+            let mut ranked: Vec<(Vec<u8>, u64)> = app_state
+                .torrent_list_order
+                .iter()
+                .filter_map(|info_hash| {
+                    app_state.torrents.get(info_hash).map(|torrent| {
+                        (
+                            info_hash.clone(),
+                            torrent
+                                .smoothed_download_speed_bps
+                                .saturating_add(torrent.smoothed_upload_speed_bps),
+                        )
+                    })
+                })
+                .filter(|(_, speed)| *speed > 0)
+                .collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let mut chosen_hashes: Vec<Vec<u8>> =
+                ranked.into_iter().take(5).map(|(hash, _)| hash).collect();
+
+            if let Some(selected) = selected_hash {
+                if !chosen_hashes.iter().any(|existing| existing == &selected) {
+                    chosen_hashes.push(selected);
+                }
             }
-        })
-        .collect();
 
-    let backoff_dataset = ratatui::widgets::Dataset::default()
-        .name("File Limits")
-        .marker(ratatui::symbols::Marker::Braille)
-        .graph_type(ratatui::widgets::GraphType::Scatter)
-        .style(
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.state_error())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .data(&backoff_marker_data);
+            let mut seen = HashSet::new();
+            chosen_hashes.retain(|hash| seen.insert(hash.clone()));
 
-    let datasets = vec![
-        ratatui::widgets::Dataset::default()
-            .name("Download")
-            .marker(ratatui::symbols::Marker::Braille)
-            .style(
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.state_info())
-                        .add_modifier(Modifier::BOLD),
+            let palette = [
+                ctx.state_info(),
+                ctx.state_success(),
+                ctx.state_warning(),
+                ctx.accent_teal(),
+                ctx.accent_sapphire(),
+                ctx.accent_sky(),
+                ctx.accent_peach(),
+                ctx.accent_maroon(),
+                ctx.state_selected(),
+                ctx.theme.semantic.text,
+            ];
+
+            let mut max_overlay_speed = 1_u64;
+            for info_hash in chosen_hashes {
+                let key = hex::encode(&info_hash);
+                let points = app_state
+                    .activity_history_state
+                    .torrents
+                    .get(&key)
+                    .map(|series| activity_points_for_tier(series, tier))
+                    .unwrap_or(&[]);
+                let (dl_hist, ul_hist) =
+                    build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+                let base_idx = info_hash.iter().fold(0_u64, |acc, b| {
+                    acc.wrapping_mul(131).wrapping_add(*b as u64)
+                }) as usize;
+                let color = palette[base_idx % palette.len()];
+
+                let label = if app_state.anonymize_torrent_names {
+                    format!("torrent-{}", &key[..key.len().min(6)])
+                } else {
+                    app_state
+                        .torrents
+                        .get(&info_hash)
+                        .map(|torrent| {
+                            truncate_with_ellipsis(&torrent.latest_state.torrent_name, 18)
+                        })
+                        .unwrap_or_else(|| format!("torrent-{}", &key[..key.len().min(6)]))
+                };
+
+                match app_state.overlay_graph_mode {
+                    OverlayGraphMode::Net => {
+                        let net_hist: Vec<u64> = dl_hist
+                            .iter()
+                            .zip(ul_hist.iter())
+                            .map(|(dl, ul)| dl.saturating_add(*ul))
+                            .collect();
+                        let smoothed = smooth_data(&net_hist, alpha);
+                        max_overlay_speed =
+                            max_overlay_speed.max(smoothed.iter().copied().max().unwrap_or(0));
+                        let data: Vec<(f64, f64)> = smoothed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i as f64, v as f64))
+                            .collect();
+                        dataset_data.push(data);
+                        dataset_specs.push((
+                            label,
+                            color,
+                            true,
+                            Some(ratatui::widgets::GraphType::Line),
+                        ));
+                    }
+                    OverlayGraphMode::SplitDirectional => {
+                        let smoothed_dl = smooth_data(&dl_hist, alpha);
+                        let smoothed_ul = smooth_data(&ul_hist, alpha);
+                        max_overlay_speed =
+                            max_overlay_speed.max(smoothed_dl.iter().copied().max().unwrap_or(0));
+                        max_overlay_speed =
+                            max_overlay_speed.max(smoothed_ul.iter().copied().max().unwrap_or(0));
+                        let dl_data: Vec<(f64, f64)> = smoothed_dl
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i as f64, v as f64))
+                            .collect();
+                        let ul_data: Vec<(f64, f64)> = smoothed_ul
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i as f64, v as f64))
+                            .collect();
+                        dataset_data.push(dl_data);
+                        dataset_specs.push((
+                            format!("{} DL", label),
+                            color,
+                            true,
+                            Some(ratatui::widgets::GraphType::Line),
+                        ));
+                        dataset_data.push(ul_data);
+                        dataset_specs.push((
+                            format!("{} UL", label),
+                            color,
+                            false,
+                            Some(ratatui::widgets::GraphType::Line),
+                        ));
+                    }
+                }
+            }
+
+            let nice_max_speed = calculate_nice_upper_bound(max_overlay_speed.max(1));
+            y_axis_upper = nice_max_speed as f64;
+            y_axis_labels = vec![
+                Span::raw("0"),
+                Span::styled(
+                    format_speed(nice_max_speed / 2),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
-            )
-            .data(&dl_data),
-        ratatui::widgets::Dataset::default()
-            .name("Upload")
-            .marker(ratatui::symbols::Marker::Braille)
-            .style(
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.state_success())
-                        .add_modifier(Modifier::BOLD),
+                Span::styled(
+                    format_speed(nice_max_speed),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
-            )
-            .data(&ul_data),
-        backoff_dataset,
-    ];
+            ];
+        }
+    }
 
-    let y_speed_axis_labels = vec![
-        Span::raw("0"),
-        Span::styled(
-            format_speed(nice_max_speed / 2),
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-        ),
-        Span::styled(
-            format_speed(nice_max_speed),
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-        ),
-    ];
+    if y_axis_upper < 1.0 {
+        y_axis_upper = 1.0;
+    }
+
+    let mut datasets: Vec<ratatui::widgets::Dataset> = Vec::with_capacity(dataset_specs.len());
+    for (idx, (name, color, emphasize, graph_type)) in dataset_specs.iter().enumerate() {
+        let mut style = Style::default().fg(*color);
+        if *emphasize {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let mut dataset = ratatui::widgets::Dataset::default()
+            .name(name.clone())
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(ctx.apply(style))
+            .data(&dataset_data[idx]);
+        if let Some(graph_type) = graph_type {
+            dataset = dataset.graph_type(*graph_type);
+        }
+        datasets.push(dataset);
+    }
+
     let x_labels = generate_x_axis_labels(ctx, app_state.graph_mode);
 
+    let all_views = [
+        ChartPanelView::Network,
+        ChartPanelView::Cpu,
+        ChartPanelView::Ram,
+        ChartPanelView::Disk,
+        ChartPanelView::Tuning,
+        ChartPanelView::TorrentOverlay,
+    ];
     let all_modes = [
         GraphDisplayMode::OneMinute,
         GraphDisplayMode::FiveMinutes,
@@ -1745,9 +2163,38 @@ pub fn draw_network_chart(
         GraphDisplayMode::OneYear,
     ];
     let mut title_spans: Vec<Span> = vec![Span::styled(
-        "Network Activity ",
+        "Activity ",
         ctx.apply(Style::default().fg(ctx.accent_peach())),
     )];
+    for (i, &view) in all_views.iter().enumerate() {
+        let is_active = view == app_state.chart_panel_view;
+        let style = if is_active {
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.state_warning())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ctx.apply(Style::default().fg(ctx.theme.semantic.surface0))
+        };
+        title_spans.push(Span::styled(view.to_string(), style));
+        if i < all_views.len().saturating_sub(1) {
+            title_spans.push(Span::styled(
+                " ",
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ));
+        }
+    }
+    if app_state.chart_panel_view == ChartPanelView::TorrentOverlay {
+        title_spans.push(Span::styled(
+            format!(" [{}]", app_state.overlay_graph_mode.to_string()),
+            ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+        ));
+    }
+    title_spans.push(Span::styled(
+        " | ",
+        ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+    ));
     for (i, &mode) in all_modes.iter().enumerate() {
         let is_active = mode == app_state.graph_mode;
         let mode_str = mode.to_string();
@@ -1789,8 +2236,8 @@ pub fn draw_network_chart(
         .y_axis(
             ratatui::widgets::Axis::default()
                 .style(ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)))
-                .bounds([0.0, nice_max_speed as f64])
-                .labels(y_speed_axis_labels),
+                .bounds([0.0, y_axis_upper])
+                .labels(y_axis_labels),
         )
         .legend_position(Some(ratatui::widgets::LegendPosition::TopRight));
 
@@ -4091,6 +4538,49 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::GraphPrev);
         assert_eq!(app_state.graph_mode, initial);
+    }
+
+    #[test]
+    fn reducer_chart_view_actions_cycle_mode() {
+        let mut app_state = AppState::default();
+        let initial = app_state.chart_panel_view;
+
+        reduce_ui_action(&mut app_state, UiAction::ChartViewNext);
+        assert_eq!(app_state.chart_panel_view, initial.next());
+
+        reduce_ui_action(&mut app_state, UiAction::ChartViewPrev);
+        assert_eq!(app_state.chart_panel_view, initial);
+    }
+
+    #[test]
+    fn reducer_overlay_mode_toggle_switches_between_net_and_split() {
+        let mut app_state = AppState::default();
+        assert_eq!(app_state.overlay_graph_mode, OverlayGraphMode::Net);
+
+        reduce_ui_action(&mut app_state, UiAction::OverlayModeToggle);
+        assert_eq!(
+            app_state.overlay_graph_mode,
+            OverlayGraphMode::SplitDirectional
+        );
+
+        reduce_ui_action(&mut app_state, UiAction::OverlayModeToggle);
+        assert_eq!(app_state.overlay_graph_mode, OverlayGraphMode::Net);
+    }
+
+    #[test]
+    fn keymap_includes_chart_view_and_overlay_controls() {
+        assert_eq!(
+            map_key_to_ui_action(KeyCode::Char('g')),
+            Some(UiAction::ChartViewNext)
+        );
+        assert_eq!(
+            map_key_to_ui_action(KeyCode::Char('G')),
+            Some(UiAction::ChartViewPrev)
+        );
+        assert_eq!(
+            map_key_to_ui_action(KeyCode::Char('o')),
+            Some(UiAction::OverlayModeToggle)
+        );
     }
 
     #[test]
