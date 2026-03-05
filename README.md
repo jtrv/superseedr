@@ -82,7 +82,7 @@ superseedr
 - 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
-## Running with Docker
+## 🐳 Running with Docker
 
 Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
 
@@ -182,7 +182,7 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 </details>
 
-## Integrations & Automation
+## 🔗 Integrations & Automation
 
 Superseedr includes several integration points designed for automation, headless operation, and easy pairing with VPN containers like Gluetun.
 For dockerized interoperability tests, see `docs/integration-harness.md`.
