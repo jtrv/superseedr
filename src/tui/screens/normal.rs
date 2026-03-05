@@ -1869,57 +1869,6 @@ pub fn draw_network_chart(
                 ),
             ];
         }
-        ChartPanelView::Disk => {
-            let points = activity_points_for_tier(&app_state.activity_history_state.disk, tier);
-            let (read_history, write_history) =
-                build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
-            let stable_max_speed = read_history
-                .iter()
-                .chain(write_history.iter())
-                .max()
-                .copied()
-                .unwrap_or(10_000);
-            let nice_max_speed = calculate_nice_upper_bound(stable_max_speed);
-            y_axis_upper = nice_max_speed as f64;
-            y_axis_labels = vec![
-                Span::raw("0"),
-                Span::styled(
-                    format_speed(nice_max_speed / 2),
-                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                ),
-                Span::styled(
-                    format_speed(nice_max_speed),
-                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                ),
-            ];
-
-            let smoothed_read = smooth_data(&read_history, alpha);
-            let smoothed_write = smooth_data(&write_history, alpha);
-            let read_data: Vec<(f64, f64)> = smoothed_read
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i as f64, v as f64))
-                .collect();
-            let write_data: Vec<(f64, f64)> = smoothed_write
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i as f64, v as f64))
-                .collect();
-            dataset_data.push(read_data);
-            dataset_specs.push((
-                "Disk Read".to_string(),
-                ctx.state_success(),
-                true,
-                Some(ratatui::widgets::GraphType::Line),
-            ));
-            dataset_data.push(write_data);
-            dataset_specs.push((
-                "Disk Write".to_string(),
-                ctx.accent_sky(),
-                true,
-                Some(ratatui::widgets::GraphType::Line),
-            ));
-        }
         ChartPanelView::Tuning => {
             let points = activity_points_for_tier(&app_state.activity_history_state.tuning, tier);
             let (current_series, best_series) =
@@ -2146,7 +2095,6 @@ pub fn draw_network_chart(
         ChartPanelView::Network,
         ChartPanelView::Cpu,
         ChartPanelView::Ram,
-        ChartPanelView::Disk,
         ChartPanelView::Tuning,
         ChartPanelView::TorrentOverlay,
     ];

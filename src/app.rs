@@ -384,7 +384,6 @@ pub enum ChartPanelView {
     Network,
     Cpu,
     Ram,
-    Disk,
     Tuning,
     TorrentOverlay,
 }
@@ -395,7 +394,6 @@ impl ChartPanelView {
             Self::Network => "NET",
             Self::Cpu => "CPU",
             Self::Ram => "RAM",
-            Self::Disk => "DISK",
             Self::Tuning => "TUNE",
             Self::TorrentOverlay => "TOR",
         }
@@ -405,8 +403,7 @@ impl ChartPanelView {
         match self {
             Self::Network => Self::Cpu,
             Self::Cpu => Self::Ram,
-            Self::Ram => Self::Disk,
-            Self::Disk => Self::Tuning,
+            Self::Ram => Self::Tuning,
             Self::Tuning => Self::TorrentOverlay,
             Self::TorrentOverlay => Self::Network,
         }
@@ -417,8 +414,7 @@ impl ChartPanelView {
             Self::Network => Self::TorrentOverlay,
             Self::Cpu => Self::Network,
             Self::Ram => Self::Cpu,
-            Self::Disk => Self::Ram,
-            Self::Tuning => Self::Disk,
+            Self::Tuning => Self::Ram,
             Self::TorrentOverlay => Self::Tuning,
         }
     }
