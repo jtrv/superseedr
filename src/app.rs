@@ -424,32 +424,6 @@ impl ChartPanelView {
     }
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Debug)]
-pub enum OverlayGraphMode {
-    #[default]
-    Net,
-    SplitDirectional,
-    Disk,
-}
-
-impl OverlayGraphMode {
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Net => Self::SplitDirectional,
-            Self::SplitDirectional => Self::Disk,
-            Self::Disk => Self::Net,
-        }
-    }
-
-    pub fn to_string(self) -> &'static str {
-        match self {
-            Self::Net => "NET",
-            Self::SplitDirectional => "DL+UL",
-            Self::Disk => "DISK",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SelectedHeader {
     Torrent(usize),
@@ -841,7 +815,6 @@ pub struct AppState {
     pub peer_sort: (PeerSortColumn, SortDirection),
 
     pub chart_panel_view: ChartPanelView,
-    pub overlay_graph_mode: OverlayGraphMode,
     pub graph_mode: GraphDisplayMode,
     pub minute_avg_dl_history: Vec<u64>,
     pub minute_avg_ul_history: Vec<u64>,

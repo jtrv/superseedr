@@ -390,15 +390,6 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "o",
-                        ctx.apply(Style::default().fg(ctx.accent_teal())),
-                    )),
-                    Cell::from(
-                        "Next chart view, or cycle TOR overlay between net, DL/UL split, and disk",
-                    ),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled(
                         "[ / ]",
                         ctx.apply(Style::default().fg(ctx.accent_teal())),
                     )),
