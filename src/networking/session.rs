@@ -45,6 +45,48 @@ use crate::torrent_manager::state::MAX_PIPELINE_DEPTH;
 
 const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
 const MAX_WINDOW: usize = MAX_PIPELINE_DEPTH;
+const PEER_FLOOD_WINDOW: Duration = Duration::from_secs(1);
+const PEER_FLOOD_DISCONNECT_BUDGET_PER_WINDOW: u32 = 131_072;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerFloodAction {
+    Allow,
+    DisconnectAndLog,
+}
+
+#[derive(Clone, Copy)]
+struct PeerFloodGate {
+    window_started_at: Instant,
+    used_budget: u32,
+}
+
+impl PeerFloodGate {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started_at: now,
+            used_budget: 0,
+        }
+    }
+
+    fn check(&mut self, now: Instant, cost: u32) -> PeerFloodAction {
+        if now.duration_since(self.window_started_at) >= PEER_FLOOD_WINDOW {
+            self.window_started_at = now;
+            self.used_budget = 0;
+        }
+
+        if cost == 0 {
+            return PeerFloodAction::Allow;
+        }
+
+        self.used_budget = self.used_budget.saturating_add(cost);
+
+        if self.used_budget > PEER_FLOOD_DISCONNECT_BUDGET_PER_WINDOW {
+            return PeerFloodAction::DisconnectAndLog;
+        }
+
+        PeerFloodAction::Allow
+    }
+}
 
 struct DisconnectGuard {
     peer_ip_port: String,
@@ -115,7 +157,7 @@ pub struct PeerSession {
     blocks_received_interval: usize,
     prev_speed: f64,
     pending_window_shrink: usize,
-    peer_upload_queue_len: usize,
+    peer_flood_gate: PeerFloodGate,
     last_piece_received: Instant,
 
     #[cfg(test)]
@@ -126,6 +168,7 @@ impl PeerSession {
     pub fn new(params: PeerSessionParameters) -> Self {
         // Increased channel size to prevent internal bottlenecks
         let (writer_tx, writer_rx) = mpsc::channel::<Message>(1000);
+        let now = Instant::now();
 
         Self {
             info_hash: params.info_hash,
@@ -153,8 +196,8 @@ impl PeerSession {
             blocks_received_interval: 0,
             prev_speed: 0.0,
             pending_window_shrink: 0,
-            peer_upload_queue_len: 0,
-            last_piece_received: Instant::now(),
+            peer_flood_gate: PeerFloodGate::new(now),
+            last_piece_received: now,
 
             #[cfg(test)]
             testing_window_monitor: None,
@@ -278,6 +321,19 @@ impl PeerSession {
                 Some(msg) = peer_msg_rx.recv() => {
                     inactivity_timeout.as_mut().reset(Instant::now() + Duration::from_secs(120));
 
+                    match self.incoming_peer_message_flood_action() {
+                        PeerFloodAction::Allow => {}
+                        PeerFloodAction::DisconnectAndLog => {
+                            tracing::warn!(
+                                "Peer {} exceeded inbound message budget (limit: {}/s). Disconnecting after {}.",
+                                self.peer_ip_port,
+                                PEER_FLOOD_DISCONNECT_BUDGET_PER_WINDOW,
+                                Self::dropped_peer_message_label(&msg)
+                            );
+                            break 'session Ok(());
+                        }
+                    }
+
                     match msg {
                         Message::Piece(index, begin, data) => {
                             let block_len = data.len() as u32;
@@ -353,15 +409,9 @@ impl PeerSession {
                         Message::Have(idx) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::Have(self.peer_ip_port.clone(), idx)); }
                         Message::Bitfield(bf) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::PeerBitfield(self.peer_ip_port.clone(), bf)); }
                         Message::Request(i, b, l) => {
-                            if self.peer_upload_queue_len < MAX_WINDOW {
-                                self.peer_upload_queue_len += 1;
-                                let _ = self.torrent_manager_tx.try_send(
-                                    TorrentCommand::RequestUpload(self.peer_ip_port.clone(), i, b, l)
-                                );
-                            } else {
-                                // Drop the request if they are flooding us
-                                tracing::warn!("Peer {} upload queue full. Dropping request.", self.peer_ip_port);
-                            }
+                            let _ = self.torrent_manager_tx.try_send(
+                                TorrentCommand::RequestUpload(self.peer_ip_port.clone(), i, b, l)
+                            );
                         }
 
                         Message::Cancel(i, b, l) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::CancelUpload(self.peer_ip_port.clone(), i, b, l)); }
@@ -526,9 +576,6 @@ impl PeerSession {
             }
 
             TorrentCommand::Upload(index, begin, data) => {
-                if self.peer_upload_queue_len > 0 {
-                    self.peer_upload_queue_len -= 1;
-                }
                 let _ = self.writer_tx.try_send(Message::Piece(index, begin, data));
             }
             TorrentCommand::PeerBitfield(_, bf) => {
@@ -594,6 +641,32 @@ impl PeerSession {
             _ => {}
         }
         Ok(true)
+    }
+
+    fn incoming_peer_message_flood_action(&mut self) -> PeerFloodAction {
+        self.peer_flood_gate.check(Instant::now(), 1)
+    }
+
+    fn dropped_peer_message_label(message: &Message) -> &'static str {
+        match message {
+            Message::Request(..) => "request",
+            Message::Cancel(..) => "cancel",
+            Message::Piece(..) => "piece",
+            Message::Choke => "choke",
+            Message::Unchoke => "unchoke",
+            Message::Interested => "interested",
+            Message::NotInterested => "not interested",
+            Message::Have(..) => "have",
+            Message::Bitfield(..) => "bitfield",
+            Message::Extended(..) => "extended",
+            Message::KeepAlive => "keep-alive",
+            Message::Port(..) => "port",
+            Message::Handshake(..) => "handshake",
+            Message::ExtendedHandshake(..) => "extended handshake",
+            Message::HashRequest(..) => "hash request",
+            Message::HashPiece(..) => "hash piece",
+            Message::HashReject(..) => "hash reject",
+        }
     }
 
     #[cfg(feature = "pex")]
@@ -1023,6 +1096,110 @@ mod tests {
             "Failed to receive all 5 fragmented requests. Got: {:?}",
             requested_pieces
         );
+    }
+
+    #[tokio::test]
+    async fn test_requests_continue_after_cancels() {
+        let (mut network, _client_cmd_tx, mut manager_rx, _) = spawn_test_session().await;
+
+        perform_handshake(&mut network).await;
+
+        let start_drain = Instant::now();
+        while start_drain.elapsed() < Duration::from_millis(500) {
+            match timeout(Duration::from_millis(50), manager_rx.recv()).await {
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+
+        for i in 0..MAX_WINDOW {
+            let request =
+                generate_message(Message::Request(0, (i as u32) * 16_384, 16_384)).unwrap();
+            network.write_all(&request).await.unwrap();
+        }
+
+        let mut forwarded_requests = 0;
+        while forwarded_requests < MAX_WINDOW {
+            match timeout(Duration::from_secs(1), manager_rx.recv()).await {
+                Ok(Some(TorrentCommand::RequestUpload(_, piece_index, block_offset, length))) => {
+                    assert_eq!(piece_index, 0);
+                    assert_eq!(block_offset, (forwarded_requests as u32) * 16_384);
+                    assert_eq!(length, 16_384);
+                    forwarded_requests += 1;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("Session died while forwarding upload requests"),
+                Err(_) => panic!(
+                    "Timed out waiting for RequestUpload {}/{}",
+                    forwarded_requests, MAX_WINDOW
+                ),
+            }
+        }
+
+        for i in 0..MAX_WINDOW {
+            let cancel = generate_message(Message::Cancel(0, (i as u32) * 16_384, 16_384)).unwrap();
+            network.write_all(&cancel).await.unwrap();
+        }
+
+        let mut forwarded_cancels = 0;
+        while forwarded_cancels < MAX_WINDOW {
+            match timeout(Duration::from_secs(1), manager_rx.recv()).await {
+                Ok(Some(TorrentCommand::CancelUpload(_, piece_index, block_offset, length))) => {
+                    assert_eq!(piece_index, 0);
+                    assert_eq!(block_offset, (forwarded_cancels as u32) * 16_384);
+                    assert_eq!(length, 16_384);
+                    forwarded_cancels += 1;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("Session died while forwarding upload cancels"),
+                Err(_) => panic!(
+                    "Timed out waiting for CancelUpload {}/{}",
+                    forwarded_cancels, MAX_WINDOW
+                ),
+            }
+        }
+
+        let fresh_request =
+            generate_message(Message::Request(1, 0, 16_384)).expect("fresh request message");
+        network.write_all(&fresh_request).await.unwrap();
+
+        match timeout(Duration::from_millis(250), manager_rx.recv()).await {
+            Ok(Some(TorrentCommand::RequestUpload(_, piece_index, block_offset, length))) => {
+                assert_eq!(piece_index, 1);
+                assert_eq!(block_offset, 0);
+                assert_eq!(length, 16_384);
+            }
+            Ok(Some(other)) => panic!("Expected RequestUpload after cancels, got {:?}", other),
+            Ok(None) => panic!("Session died before forwarding fresh request"),
+            Err(_) => panic!("Fresh request was not forwarded after all cancels"),
+        }
+    }
+
+    #[test]
+    fn test_peer_flood_gate_resets_after_window_rollover() {
+        let now = Instant::now();
+        let mut gate = PeerFloodGate::new(now);
+
+        assert_eq!(
+            gate.check(now, PEER_FLOOD_DISCONNECT_BUDGET_PER_WINDOW),
+            PeerFloodAction::Allow
+        );
+        assert_eq!(
+            gate.check(now + PEER_FLOOD_WINDOW, 1),
+            PeerFloodAction::Allow
+        );
+    }
+
+    #[test]
+    fn test_peer_flood_gate_disconnects_after_disconnect_budget() {
+        let now = Instant::now();
+        let mut gate = PeerFloodGate::new(now);
+
+        assert_eq!(
+            gate.check(now, PEER_FLOOD_DISCONNECT_BUDGET_PER_WINDOW),
+            PeerFloodAction::Allow
+        );
+        assert_eq!(gate.check(now, 1), PeerFloodAction::DisconnectAndLog);
     }
 
     #[tokio::test]
