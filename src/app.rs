@@ -388,6 +388,7 @@ pub enum ChartPanelView {
     Disk,
     Tuning,
     TorrentOverlay,
+    MultiTorrentOverlay,
 }
 
 impl ChartPanelView {
@@ -399,6 +400,7 @@ impl ChartPanelView {
             Self::Disk => "DISK",
             Self::Tuning => "TUNE",
             Self::TorrentOverlay => "TOR",
+            Self::MultiTorrentOverlay => "MULTI",
         }
     }
 
@@ -409,18 +411,20 @@ impl ChartPanelView {
             Self::Ram => Self::Disk,
             Self::Disk => Self::Tuning,
             Self::Tuning => Self::TorrentOverlay,
-            Self::TorrentOverlay => Self::Network,
+            Self::TorrentOverlay => Self::MultiTorrentOverlay,
+            Self::MultiTorrentOverlay => Self::Network,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Network => Self::TorrentOverlay,
+            Self::Network => Self::MultiTorrentOverlay,
             Self::Cpu => Self::Network,
             Self::Ram => Self::Cpu,
             Self::Disk => Self::Ram,
             Self::Tuning => Self::Disk,
             Self::TorrentOverlay => Self::Tuning,
+            Self::MultiTorrentOverlay => Self::TorrentOverlay,
         }
     }
 }
