@@ -2171,6 +2171,7 @@ impl TorrentManager {
                 is_multi_file: !torrent.info.files.is_empty(),
                 file_count: Some(multi_file_info.files.len()),
                 data_available: self.state.data_available,
+                is_complete: self.state.torrent_status == TorrentStatus::Done,
                 number_of_successfully_connected_peers,
                 number_of_pieces_total,
                 number_of_pieces_completed,

@@ -50,8 +50,26 @@ impl StorageError {
                 std::io::ErrorKind::NotFound
                     | std::io::ErrorKind::PermissionDenied
                     | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::IsADirectory
+                    | std::io::ErrorKind::NotADirectory
             ),
             Self::UnexpectedType | Self::SizeMismatch { .. } => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StorageError;
+
+    #[test]
+    fn wrong_type_path_io_errors_mark_data_unavailable() {
+        for kind in [
+            std::io::ErrorKind::IsADirectory,
+            std::io::ErrorKind::NotADirectory,
+        ] {
+            let error = StorageError::from(std::io::Error::new(kind, "wrong entry type"));
+            assert!(error.indicates_data_unavailability());
         }
     }
 }

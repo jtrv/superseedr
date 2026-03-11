@@ -37,6 +37,7 @@ pub enum IntegrityPriorityClass {
 pub struct TorrentIntegritySnapshot {
     pub info_hash: Vec<u8>,
     pub data_available: bool,
+    pub is_downloading: bool,
     pub file_count: Option<usize>,
     pub saved_location: Option<PathBuf>,
     pub download_speed_bps: u64,
@@ -67,6 +68,7 @@ struct IntegrityTorrentState {
     pending_metadata: bool,
     availability: DataAvailabilityState,
     has_completed_probe: bool,
+    is_downloading: bool,
     is_active: bool,
     file_count: Option<usize>,
     saved_location: Option<PathBuf>,
@@ -86,6 +88,7 @@ impl IntegrityTorrentState {
             pending_metadata: false,
             availability: DataAvailabilityState::Unknown,
             has_completed_probe: false,
+            is_downloading: false,
             is_active: false,
             file_count: None,
             saved_location: None,
@@ -191,6 +194,7 @@ impl IntegrityScheduler {
                 .or_insert_with(|| IntegrityTorrentState::new(self.now));
 
             state.is_active = snapshot.download_speed_bps > 0 || snapshot.upload_speed_bps > 0;
+            state.is_downloading = snapshot.is_downloading;
             state.file_count = snapshot.file_count;
             state.saved_location = snapshot.saved_location;
 
@@ -224,12 +228,15 @@ impl IntegrityScheduler {
     }
 
     pub fn next_probe_in(&self, info_hash: &[u8]) -> Option<Duration> {
-        self.torrents.get(info_hash).map(|state| {
-            if state.in_flight || state.next_due_at <= self.now {
-                Duration::ZERO
-            } else {
-                state.next_due_at.saturating_duration_since(self.now)
-            }
+        let state = self.torrents.get(info_hash)?;
+        if state.is_downloading && !matches!(state.availability, DataAvailabilityState::Unavailable)
+        {
+            return None;
+        }
+        Some(if state.in_flight || state.next_due_at <= self.now {
+            Duration::ZERO
+        } else {
+            state.next_due_at.saturating_duration_since(self.now)
         })
     }
 
@@ -330,7 +337,12 @@ impl IntegrityScheduler {
     fn pick_next_due_torrent(&self) -> Option<Vec<u8>> {
         self.torrents
             .iter()
-            .filter(|(_, state)| !state.in_flight && state.next_due_at <= self.now)
+            .filter(|(_, state)| {
+                !state.in_flight
+                    && state.next_due_at <= self.now
+                    && (!state.is_downloading
+                        || matches!(state.availability, DataAvailabilityState::Unavailable))
+            })
             .min_by(|(left_hash, left_state), (right_hash, right_state)| {
                 priority_rank(left_state.priority_class())
                     .cmp(&priority_rank(right_state.priority_class()))
@@ -426,10 +438,28 @@ mod tests {
         TorrentIntegritySnapshot {
             info_hash: info_hash.to_vec(),
             data_available,
+            is_downloading: false,
             file_count,
             saved_location: saved_location.map(PathBuf::from),
             download_speed_bps,
             upload_speed_bps,
+        }
+    }
+
+    fn downloading_snapshot(
+        info_hash: &[u8],
+        data_available: bool,
+        file_count: Option<usize>,
+        saved_location: Option<&str>,
+    ) -> TorrentIntegritySnapshot {
+        TorrentIntegritySnapshot {
+            info_hash: info_hash.to_vec(),
+            data_available,
+            is_downloading: true,
+            file_count,
+            saved_location: saved_location.map(PathBuf::from),
+            download_speed_bps: 0,
+            upload_speed_bps: 0,
         }
     }
 
@@ -532,6 +562,44 @@ mod tests {
 
         scheduler.advance_time(Duration::from_secs(1));
         assert_eq!(scheduler.drain_due_probe_requests().len(), 1);
+    }
+
+    #[test]
+    fn healthy_probes_are_suppressed_while_torrent_is_still_downloading() {
+        let now = Instant::now();
+        let mut scheduler = IntegrityScheduler::new(now);
+        scheduler.sync_torrents([downloading_snapshot(
+            b"active-download",
+            true,
+            Some(10),
+            Some("/downloads/active"),
+        )]);
+
+        assert!(scheduler.drain_due_probe_requests().is_empty());
+        assert_eq!(scheduler.next_probe_in(b"active-download"), None);
+    }
+
+    #[test]
+    fn downloading_torrent_still_probes_immediately_after_data_fault() {
+        let now = Instant::now();
+        let mut scheduler = IntegrityScheduler::new(now);
+        scheduler.sync_torrents([downloading_snapshot(
+            b"faulted-download",
+            true,
+            Some(10),
+            Some("/downloads/faulted"),
+        )]);
+
+        assert!(scheduler.drain_due_probe_requests().is_empty());
+
+        scheduler.on_data_availability_fault(b"faulted-download");
+
+        let request = scheduler
+            .drain_due_probe_requests()
+            .into_iter()
+            .next()
+            .expect("expected recovery probe for faulted download");
+        assert_eq!(request.info_hash, b"faulted-download".to_vec());
     }
 
     #[test]

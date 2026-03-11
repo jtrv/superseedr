@@ -32,6 +32,8 @@ This design also leaves a clear path for future random small hash audits:
 - Availability is computed on completed full-manifest passes (partial clean batches do not clear unavailable state).
 - Transition-only availability logging is in place (unavailable/recovered).
 - Foreground read faults now trigger immediate scheduler recovery handling and same-download-path fanout probing.
+- Scheduled background probes are currently suppressed for incomplete torrents. The scheduler resumes regular healthy probing only after the manager reports the torrent complete.
+- Fault-driven recovery probes bypass that suppression, so foreground disk-read availability faults still trigger immediate recovery checks even while a torrent is incomplete.
 - In-flight probe batch lease timeout reclaim is in place (with epoch bump to ignore stale late results).
 - Small-manifest healthy cadence rule is in place (`file_count < 1000` uses `60s` healthy revisit).
 - `file_count` is now plumbed through `TorrentMetrics` so scheduler policy can use it.
@@ -406,6 +408,7 @@ Rules:
 ## Assumptions and Defaults
 - No new user-facing config is added in `settings.toml`.
 - Healthy background integrity work is conservative by default.
+- Incomplete torrents do not receive scheduled background probes; recovery is driven by foreground faults until completion.
 - Unavailable torrents are prioritized for faster recovery detection.
 - Metadata probing stays outside the read-permit pool.
 - Future hash audits use the existing `DiskRead` permit pool.

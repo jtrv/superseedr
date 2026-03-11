@@ -598,49 +598,49 @@ impl TorrentState {
             }
 
             Action::RecalculateChokes { random_seed } => {
-                if !self.data_available {
-                    return vec![Effect::DoNothing];
-                }
-
                 let mut effects = Vec::new();
+                let mut unchoke_candidates = HashSet::new();
 
-                let mut interested_peers: Vec<&mut PeerState> = self
-                    .peers
-                    .values_mut()
-                    .filter(|p| p.peer_is_interested_in_us)
-                    .collect();
-
-                if self.torrent_status == TorrentStatus::Done {
-                    interested_peers
-                        .sort_by(|a, b| b.bytes_uploaded_to_peer.cmp(&a.bytes_uploaded_to_peer));
-                } else {
-                    interested_peers.sort_by(|a, b| {
-                        b.bytes_downloaded_from_peer
-                            .cmp(&a.bytes_downloaded_from_peer)
-                    });
-                }
-
-                let mut unchoke_candidates: HashSet<String> = interested_peers
-                    .iter()
-                    .take(UPLOAD_SLOTS_DEFAULT)
-                    .map(|p| p.ip_port.clone())
-                    .collect();
-
-                if self.optimistic_unchoke_timer.is_some_and(|t| {
-                    self.now.saturating_duration_since(t) > Duration::from_secs(30)
-                }) {
-                    let optimistic_candidates: Vec<&mut PeerState> = interested_peers
-                        .into_iter()
-                        .filter(|p| !unchoke_candidates.contains(&p.ip_port))
+                if self.data_available {
+                    let mut interested_peers: Vec<&mut PeerState> = self
+                        .peers
+                        .values_mut()
+                        .filter(|p| p.peer_is_interested_in_us)
                         .collect();
 
-                    if !optimistic_candidates.is_empty() {
-                        let idx = (random_seed as usize) % optimistic_candidates.len();
-                        let chosen_id = optimistic_candidates[idx].ip_port.clone();
-                        unchoke_candidates.insert(chosen_id);
+                    if self.torrent_status == TorrentStatus::Done {
+                        interested_peers.sort_by(|a, b| {
+                            b.bytes_uploaded_to_peer.cmp(&a.bytes_uploaded_to_peer)
+                        });
+                    } else {
+                        interested_peers.sort_by(|a, b| {
+                            b.bytes_downloaded_from_peer
+                                .cmp(&a.bytes_downloaded_from_peer)
+                        });
                     }
 
-                    self.optimistic_unchoke_timer = Some(self.now);
+                    unchoke_candidates = interested_peers
+                        .iter()
+                        .take(UPLOAD_SLOTS_DEFAULT)
+                        .map(|p| p.ip_port.clone())
+                        .collect();
+
+                    if self.optimistic_unchoke_timer.is_some_and(|t| {
+                        self.now.saturating_duration_since(t) > Duration::from_secs(30)
+                    }) {
+                        let optimistic_candidates: Vec<&mut PeerState> = interested_peers
+                            .into_iter()
+                            .filter(|p| !unchoke_candidates.contains(&p.ip_port))
+                            .collect();
+
+                        if !optimistic_candidates.is_empty() {
+                            let idx = (random_seed as usize) % optimistic_candidates.len();
+                            let chosen_id = optimistic_candidates[idx].ip_port.clone();
+                            unchoke_candidates.insert(chosen_id);
+                        }
+
+                        self.optimistic_unchoke_timer = Some(self.now);
+                    }
                 }
 
                 for peer in self.peers.values_mut() {
@@ -664,7 +664,11 @@ impl TorrentState {
                     peer.bytes_uploaded_to_peer = 0;
                 }
 
-                effects
+                if effects.is_empty() {
+                    vec![Effect::DoNothing]
+                } else {
+                    effects
+                }
             }
 
             Action::CheckCompletion => {
@@ -2091,7 +2095,7 @@ impl TorrentState {
 
             Action::SetDataAvailability { available } => {
                 self.data_available = available;
-                vec![Effect::DoNothing]
+                self.update(Action::RecalculateChokes { random_seed: 0 })
             }
 
             Action::ValidationProgress { count } => {
@@ -2858,6 +2862,27 @@ mod tests {
 
         assert!(!state.data_available);
         assert!(matches!(effects.as_slice(), [Effect::DoNothing]));
+    }
+
+    #[test]
+    fn test_set_data_availability_rechokes_existing_upload_slots() {
+        let mut state = create_empty_state();
+        state.torrent = Some(create_dummy_torrent(1));
+        state.torrent_status = TorrentStatus::Done;
+
+        add_peer(&mut state, "peer_A");
+        let peer = state.peers.get_mut("peer_A").unwrap();
+        peer.peer_is_interested_in_us = true;
+        peer.am_choking = ChokeStatus::Unchoke;
+
+        let effects = state.update(Action::SetDataAvailability { available: false });
+
+        assert!(!state.data_available);
+        assert_eq!(state.peers["peer_A"].am_choking, ChokeStatus::Choke);
+        assert!(effects.iter().any(|effect| {
+            matches!(effect, Effect::SendToPeer { peer_id, cmd }
+                if peer_id == "peer_A" && matches!(**cmd, TorrentCommand::PeerChoke))
+        }));
     }
 
     // --- SCENARIO 5: Piece Verification Success ---

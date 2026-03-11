@@ -560,6 +560,7 @@ pub struct TorrentMetrics {
     pub file_count: Option<usize>,
     pub file_priorities: HashMap<usize, FilePriority>,
     pub data_available: bool,
+    pub is_complete: bool,
     pub number_of_successfully_connected_peers: usize,
     pub number_of_pieces_total: u32,
     pub number_of_pieces_completed: u32,
@@ -601,6 +602,7 @@ impl Default for TorrentMetrics {
             file_count: None,
             file_priorities: HashMap::new(),
             data_available: true,
+            is_complete: false,
             number_of_successfully_connected_peers: 0,
             number_of_pieces_total: 0,
             number_of_pieces_completed: 0,
@@ -2344,6 +2346,8 @@ impl App {
                         Some(ProbeBatchOutcome::SweepInProgress) => {}
                         Some(ProbeBatchOutcome::CompletedSweep { problem_files }) => {
                             let was_available = torrent.latest_state.data_available;
+                            let next_availability =
+                                probe_result_availability.unwrap_or(was_available);
                             let issue_count = problem_files.len();
                             let issue_files = problem_files
                                 .iter()
@@ -2354,15 +2358,17 @@ impl App {
 
                             torrent.latest_file_probe_status =
                                 Some(TorrentFileProbeStatus::Files(problem_files));
-                            let saved_location =
-                                Self::torrent_saved_location(&torrent.latest_state);
-                            availability_transition_log = Some((
-                                torrent.latest_state.torrent_name.clone(),
-                                probe_result_availability.unwrap_or(was_available),
-                                issue_count,
-                                saved_location,
-                                issue_files,
-                            ));
+                            if next_availability != was_available {
+                                let saved_location =
+                                    Self::torrent_saved_location(&torrent.latest_state);
+                                availability_transition_log = Some((
+                                    torrent.latest_state.torrent_name.clone(),
+                                    next_availability,
+                                    issue_count,
+                                    saved_location,
+                                    issue_files,
+                                ));
+                            }
 
                             if matches!(probe_result_availability, Some(false)) {
                                 torrent.latest_state.data_available = false;
@@ -2895,6 +2901,7 @@ impl App {
                 Some(TorrentIntegritySnapshot {
                     info_hash: info_hash.clone(),
                     data_available: torrent.latest_state.data_available,
+                    is_downloading: !torrent.latest_state.is_complete,
                     file_count: torrent.latest_state.file_count,
                     saved_location: Self::torrent_saved_location(&torrent.latest_state),
                     download_speed_bps: torrent.latest_state.download_speed_bps,
@@ -5174,6 +5181,48 @@ mod tests {
             .get(&info_hash)
             .expect("torrent display should exist");
         assert!(!torrent.latest_state.data_available);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn healthy_probe_for_available_torrent_does_not_request_recovery_again() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"already_healthy_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "steady healthy torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        display.latest_state.data_available = true;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
+            info_hash,
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            },
+        });
+
+        assert!(matches!(
+            manager_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
         let _ = app.shutdown_tx.send(());
     }

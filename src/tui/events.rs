@@ -54,7 +54,7 @@ fn translate_event(event: CrosstermEvent, app: &mut App, now: Instant) -> Vec<Cr
     }
 
     let buffered_key = match &event {
-        CrosstermEvent::Key(key) if should_buffer_normal_key(app, *key) => Some(*key),
+        CrosstermEvent::Key(key) if should_buffer_paste_burst_key(app, *key) => Some(*key),
         _ => None,
     };
 
@@ -93,8 +93,8 @@ fn convert_burst_flush(flush: PasteBurstFlushResult) -> Vec<CrosstermEvent> {
     }
 }
 
-fn should_buffer_normal_key(app: &App, key: KeyEvent) -> bool {
-    matches!(app.app_state.mode, AppMode::Normal)
+fn should_buffer_paste_burst_key(app: &App, key: KeyEvent) -> bool {
+    matches!(app.app_state.mode, AppMode::Normal | AppMode::Welcome)
         && !app.app_state.ui.is_searching
         && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         && matches!(key.code, KeyCode::Char(_))
@@ -182,7 +182,11 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
             help::handle_event(event, &mut app.app_state);
         }
         AppMode::Welcome => {
-            welcome::handle_event(event, &mut app.app_state);
+            if matches!(event, CrosstermEvent::Paste(_)) {
+                normal::handle_event(event, app).await;
+            } else {
+                welcome::handle_event(event, &mut app.app_state);
+            }
         }
         AppMode::Normal => normal::handle_event(event, app).await,
         AppMode::PowerSaving => power::handle_event(event, &mut app.app_state),
@@ -538,6 +542,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn welcome_screen_paste_burst_flushes_as_synthetic_paste() {
+        let mut app = build_test_app().await;
+        app.app_state.mode = AppMode::Welcome;
+        let start = Instant::now();
+        let magnet = "magnet:?xt=urn:btih:fedcba9876543210fedcba9876543210fedcba98";
+
+        for (offset, ch) in magnet.chars().enumerate() {
+            handle_event_at(
+                CrosstermEvent::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &mut app,
+                start + std::time::Duration::from_millis(offset as u64),
+            )
+            .await;
+        }
+
+        let translated = flush_due_events(
+            &mut app,
+            start
+                + std::time::Duration::from_millis((magnet.len() - 1) as u64)
+                + PasteBurst::flush_delay(),
+        );
+        assert!(matches!(translated.as_slice(), [CrosstermEvent::Paste(text)] if text == magnet));
+        assert!(matches!(app.app_state.mode, AppMode::Welcome));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn unsupported_burst_replays_original_keys() {
         let mut app = build_test_app().await;
         let start = Instant::now();
@@ -585,6 +616,24 @@ mod tests {
             translated.as_slice(),
             [CrosstermEvent::Key(_), CrosstermEvent::Paste(_)]
         ));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn explicit_paste_on_welcome_screen_uses_normal_paste_handler() {
+        let mut app = build_test_app().await;
+        app.app_state.mode = AppMode::Welcome;
+        let magnet = "magnet:?xt=urn:btih:00112233445566778899aabbccddeeff00112233";
+
+        handle_event_at(
+            CrosstermEvent::Paste(magnet.to_string()),
+            &mut app,
+            Instant::now(),
+        )
+        .await;
+
+        assert!(matches!(app.app_state.mode, AppMode::Normal));
+        assert_eq!(app.app_state.pending_torrent_link, magnet);
         let _ = app.shutdown_tx.send(());
     }
 
