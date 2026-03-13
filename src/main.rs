@@ -98,10 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = integrations::cli::Cli::parse();
+    let loaded_settings = load_settings()?;
     let mut command_processed = false;
 
     if let Some(direct_input) = cli.input {
-        if let Some((watch_path, _)) = config::get_watch_path() {
+        if let Some(watch_path) = config::resolve_command_watch_path(&loaded_settings) {
+            let _ = fs::create_dir_all(&watch_path);
             tracing::info!("Processing direct input: {}", direct_input);
             integrations::cli::process_input(&direct_input, &watch_path);
             command_processed = true;
@@ -109,7 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!("Could not get watch path to process direct input.");
         }
     } else if let Some(command) = cli.command {
-        if let Some((watch_path, _)) = config::get_watch_path() {
+        if let Some(watch_path) = config::resolve_command_watch_path(&loaded_settings) {
+            let _ = fs::create_dir_all(&watch_path);
             command_processed = true;
             match command {
                 integrations::cli::Commands::StopClient => {
@@ -126,7 +129,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else {
             tracing::error!("Could not get watch path to process subcommand.");
-            command_processed = false; // Couldn't process if path failed
         }
     }
     if command_processed {
@@ -147,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if proceed_to_app {
-        let mut client_configs = load_settings();
+        let mut client_configs = loaded_settings;
 
         #[cfg(all(feature = "dht", feature = "pex"))]
         {
@@ -159,8 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("\nThis safety check prevents accidental use of forbidden features on private trackers.");
 
                 // Get the config file path to show the user
-                let config_path_str = config::get_app_paths()
-                    .map(|(config_dir, _)| config_dir.join("settings.toml"))
+                let config_path_str = config::shared_settings_path()
+                    .or_else(|| config::get_app_paths().map(|(config_dir, _)| config_dir.join("settings.toml")))
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Unable to determine config path.".to_string());
 
@@ -309,3 +311,7 @@ fn generate_client_id_string() -> String {
 
     format!("{}{}", CLIENT_PREFIX, random_chars)
 }
+
+
+
+

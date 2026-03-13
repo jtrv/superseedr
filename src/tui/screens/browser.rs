@@ -1510,7 +1510,9 @@ pub fn confirm_config_path_selection(
 
         match target_item {
             ConfigItem::DefaultDownloadFolder => {
-                new_settings.default_download_folder = Some(selected_path)
+                if !crate::config::is_shared_config_mode() {
+                    new_settings.default_download_folder = Some(selected_path)
+                }
             }
             ConfigItem::WatchFolder => new_settings.watch_folder = Some(selected_path),
             _ => {}
@@ -2307,3 +2309,4 @@ mod tests {
         assert_eq!(nodes[0].children[0].payload.priority, FilePriority::Skip);
     }
 }
+

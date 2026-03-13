@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::AppCommand;
-use crate::config::{get_watch_path, Settings};
+use crate::config::{get_watch_path, is_shared_config_path, shared_config_watch_paths, Settings};
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,19 @@ pub fn create_watcher(
                 watch_path,
                 e
             );
+        }
+    }
+
+    for shared_path in shared_config_watch_paths() {
+        if let Err(e) = watcher.watch(&shared_path, RecursiveMode::NonRecursive) {
+            tracing_event!(
+                Level::WARN,
+                "Failed to watch shared config path {:?}: {}",
+                shared_path,
+                e
+            );
+        } else {
+            tracing_event!(Level::INFO, "Watching shared config path: {:?}", shared_path);
         }
     }
 
@@ -95,6 +108,10 @@ pub fn scan_watch_folders(settings: &Settings) -> Vec<AppCommand> {
 }
 
 pub fn path_to_command(path: &Path) -> Option<AppCommand> {
+    if is_shared_config_path(path) {
+        return Some(AppCommand::ReloadSharedConfig);
+    }
+
     if !path.is_file() {
         return None;
     }
@@ -209,3 +226,5 @@ mod tests {
         let _ = fs::remove_dir(dir);
     }
 }
+
+

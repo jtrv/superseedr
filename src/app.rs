@@ -14,7 +14,7 @@ use strum_macros::EnumIter;
 
 use crate::torrent_manager::DiskIoOperation;
 
-use crate::config::{get_app_paths, save_settings};
+use crate::config::{get_app_paths, load_settings, save_settings};
 use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
     TorrentSettings, TorrentSortColumn,
@@ -480,6 +480,7 @@ pub enum AppCommand {
         success: bool,
     },
     UpdateConfig(Settings),
+    ReloadSharedConfig,
     UpdateVersionAvailable(String),
 }
 
@@ -1674,6 +1675,189 @@ impl App {
         crate::tui::screens::rss::recompute_rss_derived(&mut self.app_state, &self.client_configs);
     }
 
+    fn remove_torrent_runtime(&mut self, info_hash: &[u8]) {
+        self.app_state.torrents.remove(info_hash);
+        self.torrent_manager_command_txs.remove(info_hash);
+        self.torrent_manager_incoming_peer_txs.remove(info_hash);
+        self.torrent_metric_watch_rxs.remove(info_hash);
+        self.integrity_scheduler.remove_torrent(info_hash);
+        self.app_state
+            .torrent_list_order
+            .retain(|candidate| candidate.as_slice() != info_hash);
+        clamp_selected_indices_in_state(&mut self.app_state);
+        self.refresh_rss_derived();
+        self.dispatch_integrity_probe_batches();
+    }
+
+    async fn reconcile_config_torrents(&mut self, old_settings: &Settings, new_settings: &Settings) {
+        let old_by_hash = torrents_by_info_hash(old_settings);
+        let new_by_hash = torrents_by_info_hash(new_settings);
+
+        for info_hash in old_by_hash.keys() {
+            if new_by_hash.contains_key(info_hash) {
+                continue;
+            }
+
+            tracing_event!(
+                Level::INFO,
+                info_hash = %hex::encode(info_hash),
+                "Shared config removed torrent; shutting down local manager"
+            );
+
+            if let Some(torrent) = self.app_state.torrents.get_mut(info_hash) {
+                torrent.latest_state.torrent_control_state = TorrentControlState::Deleting;
+            }
+
+            if let Some(manager_tx) = self.torrent_manager_command_txs.get(info_hash) {
+                let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+            } else {
+                self.remove_torrent_runtime(info_hash);
+            }
+        }
+
+        for (info_hash, torrent_config) in &new_by_hash {
+            if !old_by_hash.contains_key(info_hash) {
+                if !should_load_persisted_torrent(torrent_config) {
+                    continue;
+                }
+
+                tracing_event!(
+                    Level::INFO,
+                    info_hash = %hex::encode(info_hash),
+                    "Shared config added torrent; loading locally"
+                );
+
+                if torrent_config.torrent_or_magnet.starts_with("magnet:") {
+                    self.add_magnet_torrent(
+                        torrent_config.name.clone(),
+                        torrent_config.torrent_or_magnet.clone(),
+                        torrent_config.download_path.clone(),
+                        torrent_config.validation_status,
+                        torrent_config.torrent_control_state.clone(),
+                        torrent_config.file_priorities.clone(),
+                        torrent_config.container_name.clone(),
+                    )
+                    .await;
+                } else {
+                    self.add_torrent_from_file(
+                        PathBuf::from(&torrent_config.torrent_or_magnet),
+                        torrent_config.download_path.clone(),
+                        torrent_config.validation_status,
+                        torrent_config.torrent_control_state.clone(),
+                        torrent_config.file_priorities.clone(),
+                        torrent_config.container_name.clone(),
+                    )
+                    .await;
+                }
+
+                continue;
+            }
+
+            let Some(previous) = old_by_hash.get(info_hash) else {
+                continue;
+            };
+
+            if let Some(torrent) = self.app_state.torrents.get_mut(info_hash) {
+                torrent.latest_state.download_path = torrent_config.download_path.clone();
+                torrent.latest_state.container_name = torrent_config.container_name.clone();
+                torrent.latest_state.file_priorities = torrent_config.file_priorities.clone();
+                torrent.latest_state.torrent_control_state = torrent_config.torrent_control_state.clone();
+                if !torrent_config.name.is_empty() {
+                    torrent.latest_state.torrent_name = torrent_config.name.clone();
+                }
+            }
+
+            if let Some(manager_tx) = self.torrent_manager_command_txs.get(info_hash) {
+                if previous.download_path != torrent_config.download_path
+                    || previous.file_priorities != torrent_config.file_priorities
+                    || previous.container_name != torrent_config.container_name
+                {
+                    if let Some(path) = torrent_config.download_path.clone() {
+                        let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig {
+                            torrent_data_path: path,
+                            file_priorities: torrent_config.file_priorities.clone(),
+                            container_name: torrent_config.container_name.clone(),
+                        });
+                    }
+                }
+
+                if previous.torrent_control_state != torrent_config.torrent_control_state {
+                    match torrent_config.torrent_control_state {
+                        TorrentControlState::Paused => {
+                            let _ = manager_tx.try_send(ManagerCommand::Pause);
+                        }
+                        TorrentControlState::Running => {
+                            let _ = manager_tx.try_send(ManagerCommand::Resume);
+                        }
+                        TorrentControlState::Deleting => {
+                            let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn apply_settings_update(&mut self, new_settings: Settings, persist: bool) {
+        let old_settings = self.client_configs.clone();
+        self.client_configs = new_settings.clone();
+        let _ = self.rss_settings_tx.send(self.client_configs.clone());
+        let rss_changed = rss_settings_changed(&old_settings, &new_settings);
+
+        if new_settings.ui_theme != old_settings.ui_theme {
+            self.app_state.theme = Theme::builtin(new_settings.ui_theme);
+        }
+
+        if new_settings.client_port != old_settings.client_port {
+            tracing::info!(
+                "Config update: Port changed to {}",
+                new_settings.client_port
+            );
+            self.rebind_listener(new_settings.client_port).await;
+        }
+
+        if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps {
+            self.global_dl_bucket
+                .set_rate(new_settings.global_download_limit_bps as f64);
+        }
+        if new_settings.global_upload_limit_bps != old_settings.global_upload_limit_bps {
+            self.global_ul_bucket
+                .set_rate(new_settings.global_upload_limit_bps as f64);
+        }
+
+        if new_settings.watch_folder != old_settings.watch_folder {
+            if let Some(ref old_path) = old_settings.watch_folder {
+                if let Err(e) = self.watcher.unwatch(&old_path) {
+                    tracing::info!("Failed to unwatch old folder {:?}: {}", old_path, e);
+                }
+            }
+
+            if let Some(new_path) = &self.client_configs.watch_folder {
+                if let Err(e) = self.watcher.watch(new_path, RecursiveMode::NonRecursive) {
+                    tracing::error!("Failed to watch new folder: {}", e);
+                }
+            }
+        }
+
+        self.reconcile_config_torrents(&old_settings, &new_settings).await;
+
+        if rss_changed {
+            prune_rss_feed_errors(
+                &mut self.app_state.rss_runtime.feed_errors,
+                &self.client_configs,
+            );
+            self.refresh_rss_derived();
+            let _ = self.rss_sync_tx.try_send(());
+        }
+
+        if persist {
+            self.save_state_to_disk();
+        }
+
+        self.app_state.system_error = None;
+        self.app_state.ui.needs_redraw = true;
+    }
+
     async fn handle_app_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::AddTorrentFromFile(path) => {
@@ -2166,66 +2350,23 @@ impl App {
                 apply_activity_history_persist_result(&mut self.app_state, request_id, success);
             }
             AppCommand::UpdateConfig(new_settings) => {
-                let old_settings = self.client_configs.clone();
-                self.client_configs = new_settings.clone();
-                let _ = self.rss_settings_tx.send(self.client_configs.clone());
-                let rss_changed = rss_settings_changed(&old_settings, &new_settings);
-
-                if new_settings.ui_theme != old_settings.ui_theme {
-                    self.app_state.theme = Theme::builtin(new_settings.ui_theme);
-                }
-
-                // 1. Handle Port Change (Re-bind Listener)
-                if new_settings.client_port != old_settings.client_port {
-                    tracing::info!(
-                        "Config update: Port changed to {}",
-                        new_settings.client_port
-                    );
-                    // Reuse your existing port logic or extract it to a helper
-                    self.rebind_listener(new_settings.client_port).await;
-                }
-
-                // 2. Handle Bandwidth Limit Changes (Update Buckets)
-                if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps
-                {
-                    self.global_dl_bucket
-                        .set_rate(new_settings.global_download_limit_bps as f64);
-                }
-                if new_settings.global_upload_limit_bps != old_settings.global_upload_limit_bps {
-                    self.global_ul_bucket
-                        .set_rate(new_settings.global_upload_limit_bps as f64);
-                }
-
-                if new_settings.watch_folder != old_settings.watch_folder {
-                    if let Some(old_path) = old_settings.watch_folder {
-                        if let Err(e) = self.watcher.unwatch(&old_path) {
-                            tracing::info!("Failed to unwatch old folder {:?}: {}", old_path, e);
-                        }
-                    }
-
-                    if let Some(new_path) = &self.client_configs.watch_folder {
-                        if let Err(e) = self.watcher.watch(new_path, RecursiveMode::NonRecursive) {
-                            tracing::error!("Failed to watch new folder: {}", e);
-                        }
-                    }
-                }
-
-                // Refresh RSS preview immediately when feed/filter config changes.
-                if rss_changed {
-                    prune_rss_feed_errors(
-                        &mut self.app_state.rss_runtime.feed_errors,
-                        &self.client_configs,
-                    );
-                    self.refresh_rss_derived();
-                    let _ = self.rss_sync_tx.try_send(());
-                }
-
-                // 3. Persist to Disk
-                self.save_state_to_disk();
-
-                // 4. Force Redraw
-                self.app_state.ui.needs_redraw = true;
+                self.apply_settings_update(new_settings, true).await;
             }
+            AppCommand::ReloadSharedConfig => match load_settings() {
+                Ok(new_settings) => {
+                    if new_settings != self.client_configs {
+                        self.apply_settings_update(new_settings, false).await;
+                    }
+                }
+                Err(error) => {
+                    tracing_event!(Level::ERROR, "Failed to reload shared config: {}", error);
+                    self.app_state.system_error = Some(format!(
+                        "Failed to reload shared config: {}",
+                        error
+                    ));
+                    self.app_state.ui.needs_redraw = true;
+                }
+            },
 
             AppCommand::UpdateVersionAvailable(latest_version) => {
                 self.app_state.update_available = Some(latest_version);
@@ -3114,49 +3255,54 @@ impl App {
         }
         let permanent_torrent_path =
             torrent_files_dir.join(format!("{}.torrent", hex::encode(&info_hash)));
-        // Persist from in-memory bytes via temp+rename to avoid self-copy corruption
-        // when `path` already points at `permanent_torrent_path` during startup reload.
-        let temp_torrent_path = torrent_files_dir.join(format!(
-            "{}.{}.tmp",
-            hex::encode(&info_hash),
-            std::process::id()
-        ));
-        if let Err(e) = fs::write(&temp_torrent_path, &buffer) {
+        let shared_torrent_path = crate::config::shared_torrent_file_path(&info_hash);
+
+        let persist_torrent_copy = |destination: &PathBuf, label: &str| -> std::io::Result<()> {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let temp_torrent_path = destination.with_extension(format!(
+                "torrent.{}.tmp",
+                std::process::id()
+            ));
+            fs::write(&temp_torrent_path, &buffer)?;
+            if let Err(e) = fs::rename(&temp_torrent_path, destination) {
+                if e.kind() == ErrorKind::AlreadyExists {
+                    if let Err(remove_err) = fs::remove_file(destination) {
+                        if remove_err.kind() != ErrorKind::NotFound {
+                            let _ = fs::remove_file(&temp_torrent_path);
+                            return Err(remove_err);
+                        }
+                    }
+                    if let Err(retry_err) = fs::rename(&temp_torrent_path, destination) {
+                        let _ = fs::remove_file(&temp_torrent_path);
+                        return Err(retry_err);
+                    }
+                } else {
+                    let _ = fs::remove_file(&temp_torrent_path);
+                    return Err(e);
+                }
+            }
+
+            tracing_event!(Level::DEBUG, "Persisted torrent file copy in {}: {:?}", label, destination);
+            Ok(())
+        };
+
+        if let Err(e) = persist_torrent_copy(&permanent_torrent_path, "data directory") {
             tracing_event!(
                 Level::ERROR,
-                "Failed to write temp torrent in data directory: {}",
+                "Failed to persist torrent copy in data directory: {}",
                 e
             );
             return;
         }
-        if let Err(e) = fs::rename(&temp_torrent_path, &permanent_torrent_path) {
-            if e.kind() == ErrorKind::AlreadyExists {
-                if let Err(remove_err) = fs::remove_file(&permanent_torrent_path) {
-                    if remove_err.kind() != ErrorKind::NotFound {
-                        let _ = fs::remove_file(&temp_torrent_path);
-                        tracing_event!(
-                            Level::ERROR,
-                            "Failed to replace existing torrent file in data directory: {}",
-                            remove_err
-                        );
-                        return;
-                    }
-                }
 
-                if let Err(retry_err) = fs::rename(&temp_torrent_path, &permanent_torrent_path) {
-                    let _ = fs::remove_file(&temp_torrent_path);
-                    tracing_event!(
-                        Level::ERROR,
-                        "Failed to finalize torrent copy in data directory after replace: {}",
-                        retry_err
-                    );
-                    return;
-                }
-            } else {
-                let _ = fs::remove_file(&temp_torrent_path);
+        if let Some(shared_path) = &shared_torrent_path {
+            if let Err(e) = persist_torrent_copy(shared_path, "shared config directory") {
                 tracing_event!(
                     Level::ERROR,
-                    "Failed to finalize torrent copy in data directory: {}",
+                    "Failed to persist torrent copy in shared config directory: {}",
                     e
                 );
                 return;
@@ -3180,7 +3326,11 @@ impl App {
             latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
                 info_hash: info_hash.clone(),
-                torrent_or_magnet: permanent_torrent_path.to_string_lossy().to_string(),
+                torrent_or_magnet: shared_torrent_path
+                    .clone()
+                    .unwrap_or_else(|| permanent_torrent_path.clone())
+                    .to_string_lossy()
+                    .to_string(),
                 torrent_name: torrent.info.name.clone(),
                 download_path: download_path.clone(),
                 container_name: container_name.clone(),
@@ -4078,6 +4228,30 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
 
 fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
     torrent_settings.torrent_control_state != TorrentControlState::Deleting
+}
+
+fn torrent_info_hash_from_settings(torrent_settings: &TorrentSettings) -> Option<Vec<u8>> {
+    if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
+        Magnet::new(&torrent_settings.torrent_or_magnet)
+            .ok()
+            .and_then(|magnet| magnet.hash().map(|hash| hash.to_string()))
+            .and_then(|hash| decode_info_hash(&hash).ok())
+    } else {
+        PathBuf::from(&torrent_settings.torrent_or_magnet)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| hex::decode(stem).ok())
+    }
+}
+
+fn torrents_by_info_hash(settings: &Settings) -> HashMap<Vec<u8>, TorrentSettings> {
+    settings
+        .torrents
+        .iter()
+        .filter_map(|torrent| {
+            torrent_info_hash_from_settings(torrent).map(|info_hash| (info_hash, torrent.clone()))
+        })
+        .collect()
 }
 
 fn build_persist_payload(
@@ -5479,3 +5653,11 @@ mod tests {
         assert!(task_opt.is_none());
     }
 }
+
+
+
+
+
+
+
+
