@@ -259,10 +259,19 @@ fn selector_window<'a>(labels: &'a [&'a str], active_idx: usize, compact: bool) 
         return labels.to_vec();
     }
 
-    let len = labels.len();
-    let prev = (active_idx + len - 1) % len;
-    let next = (active_idx + 1) % len;
-    vec![labels[prev], labels[active_idx], labels[next]]
+    if active_idx == 0 {
+        return labels[..3].to_vec();
+    }
+
+    if active_idx >= labels.len().saturating_sub(1) {
+        return labels[labels.len() - 3..].to_vec();
+    }
+
+    vec![
+        labels[active_idx - 1],
+        labels[active_idx],
+        labels[active_idx + 1],
+    ]
 }
 
 fn build_selector_spans(
@@ -3155,24 +3164,53 @@ pub fn draw_block_stream_and_disk_orb(
         return;
     }
 
+    match block_stream_and_disk_layout_mode(app_state.screen_area, area) {
+        BlockStreamDiskLayoutMode::SideBySide => {
+            let split =
+                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(area);
+            draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+            draw_disk_health_panel(f, app_state, split[1], ctx);
+        }
+        BlockStreamDiskLayoutMode::Stacked => {
+            let split = Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
+                .split(area);
+            draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+            draw_disk_health_panel(f, app_state, split[1], ctx);
+        }
+        BlockStreamDiskLayoutMode::DiskOnly => {
+            draw_disk_health_panel(f, app_state, area, ctx);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockStreamDiskLayoutMode {
+    SideBySide,
+    Stacked,
+    DiskOnly,
+}
+
+fn block_stream_and_disk_layout_mode(screen_area: Rect, area: Rect) -> BlockStreamDiskLayoutMode {
+    const FORCE_STACKED_WIDTH: u16 = 34;
+    const HIDE_BLOCKS_SCREEN_WIDTH: u16 = 64;
+
     // Decide split shape using the local pane geometry first; global screen mode can be too coarse
     // and causes unreadable side-by-side micro-panels at transition widths.
-    let force_stacked = area.width < 34 || area.height > area.width.saturating_mul(2);
-    let is_vertical_mode = app_state.screen_area.width < 100
-        || (app_state.screen_area.height as f32 > app_state.screen_area.width as f32 * 0.6);
+    let force_stacked =
+        area.width < FORCE_STACKED_WIDTH || area.height > area.width.saturating_mul(2);
+    let is_vertical_mode =
+        screen_area.width < 100 || (screen_area.height as f32 > screen_area.width as f32 * 0.6);
 
-    if !force_stacked && is_vertical_mode {
-        let split = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(area);
-        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
-        draw_disk_health_panel(f, app_state, split[1], ctx);
-        return;
+    if is_vertical_mode && force_stacked && screen_area.width < HIDE_BLOCKS_SCREEN_WIDTH {
+        return BlockStreamDiskLayoutMode::DiskOnly;
     }
 
-    let split =
-        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
-    draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
-    draw_disk_health_panel(f, app_state, split[1], ctx);
+    if !force_stacked && is_vertical_mode {
+        BlockStreamDiskLayoutMode::SideBySide
+    } else {
+        BlockStreamDiskLayoutMode::Stacked
+    }
 }
 
 fn draw_vertical_block_stream_panel(
@@ -4670,7 +4708,7 @@ mod tests {
     }
 
     #[test]
-    fn reducer_graph_actions_cycle_mode() {
+    fn reducer_graph_actions_stop_at_boundaries() {
         let mut app_state = AppState::default();
         let initial = app_state.graph_mode;
 
@@ -4679,10 +4717,18 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::GraphPrev);
         assert_eq!(app_state.graph_mode, initial);
+
+        app_state.graph_mode = GraphDisplayMode::OneYear;
+        reduce_ui_action(&mut app_state, UiAction::GraphNext);
+        assert_eq!(app_state.graph_mode, GraphDisplayMode::OneYear);
+
+        app_state.graph_mode = GraphDisplayMode::OneMinute;
+        reduce_ui_action(&mut app_state, UiAction::GraphPrev);
+        assert_eq!(app_state.graph_mode, GraphDisplayMode::OneMinute);
     }
 
     #[test]
-    fn reducer_chart_view_actions_cycle_mode() {
+    fn reducer_chart_view_actions_stop_at_boundaries() {
         let mut app_state = AppState::default();
         let initial = app_state.chart_panel_view;
 
@@ -4691,10 +4737,21 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::ChartViewPrev);
         assert_eq!(app_state.chart_panel_view, initial);
+
+        app_state.chart_panel_view = ChartPanelView::MultiTorrentOverlay;
+        reduce_ui_action(&mut app_state, UiAction::ChartViewNext);
+        assert_eq!(
+            app_state.chart_panel_view,
+            ChartPanelView::MultiTorrentOverlay
+        );
+
+        app_state.chart_panel_view = ChartPanelView::Network;
+        reduce_ui_action(&mut app_state, UiAction::ChartViewPrev);
+        assert_eq!(app_state.chart_panel_view, ChartPanelView::Network);
     }
 
     #[test]
-    fn reducer_chart_view_cycle_includes_disk_mode() {
+    fn reducer_chart_view_navigation_includes_disk_mode() {
         assert_eq!(ChartPanelView::Ram.next(), ChartPanelView::Disk);
         assert_eq!(ChartPanelView::Disk.prev(), ChartPanelView::Ram);
         assert_eq!(ChartPanelView::Disk.next(), ChartPanelView::Tuning);
@@ -4710,6 +4767,11 @@ mod tests {
             ChartPanelView::MultiTorrentOverlay.prev(),
             ChartPanelView::TorrentOverlay
         );
+        assert_eq!(
+            ChartPanelView::MultiTorrentOverlay.next(),
+            ChartPanelView::MultiTorrentOverlay
+        );
+        assert_eq!(ChartPanelView::Network.prev(), ChartPanelView::Network);
     }
 
     #[test]
@@ -4831,15 +4893,12 @@ mod tests {
     }
 
     #[test]
-    fn selector_window_wraps_in_compact_mode() {
+    fn selector_window_clamps_at_edges_in_compact_mode() {
         let labels = ["NET", "CPU", "RAM", "DISK", "TUNE", "TOR", "MULTI"];
-        assert_eq!(
-            selector_window(&labels, 0, true),
-            vec!["MULTI", "NET", "CPU"]
-        );
+        assert_eq!(selector_window(&labels, 0, true), vec!["NET", "CPU", "RAM"]);
         assert_eq!(
             selector_window(&labels, labels.len() - 1, true),
-            vec!["TOR", "MULTI", "NET"]
+            vec!["TUNE", "TOR", "MULTI"]
         );
     }
 
@@ -5214,6 +5273,27 @@ mod tests {
         let data = [0_u64, 10, 0];
         let smoothed = peer_stream_smoothed_activity(&data, 1);
         assert!((smoothed - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn block_stream_and_disk_layout_uses_side_by_side_when_vertical_and_roomy() {
+        let mode =
+            block_stream_and_disk_layout_mode(Rect::new(0, 0, 90, 70), Rect::new(0, 0, 40, 18));
+        assert_eq!(mode, BlockStreamDiskLayoutMode::SideBySide);
+    }
+
+    #[test]
+    fn block_stream_and_disk_layout_hides_blocks_when_vertical_stack_gets_too_narrow() {
+        let mode =
+            block_stream_and_disk_layout_mode(Rect::new(0, 0, 63, 90), Rect::new(0, 0, 33, 18));
+        assert_eq!(mode, BlockStreamDiskLayoutMode::DiskOnly);
+    }
+
+    #[test]
+    fn block_stream_and_disk_layout_keeps_stacked_mode_above_hide_breakpoint() {
+        let mode =
+            block_stream_and_disk_layout_mode(Rect::new(0, 0, 64, 90), Rect::new(0, 0, 33, 18));
+        assert_eq!(mode, BlockStreamDiskLayoutMode::Stacked);
     }
 
     #[test]

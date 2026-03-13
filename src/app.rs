@@ -360,13 +360,13 @@ impl GraphDisplayMode {
             Self::TwentyFourHours => Self::SevenDays,
             Self::SevenDays => Self::ThirtyDays,
             Self::ThirtyDays => Self::OneYear,
-            Self::OneYear => Self::OneMinute,
+            Self::OneYear => Self::OneYear,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            Self::OneMinute => Self::OneYear,
+            Self::OneMinute => Self::OneMinute,
             Self::FiveMinutes => Self::OneMinute,
             Self::TenMinutes => Self::FiveMinutes,
             Self::ThirtyMinutes => Self::TenMinutes,
@@ -414,13 +414,13 @@ impl ChartPanelView {
             Self::Disk => Self::Tuning,
             Self::Tuning => Self::TorrentOverlay,
             Self::TorrentOverlay => Self::MultiTorrentOverlay,
-            Self::MultiTorrentOverlay => Self::Network,
+            Self::MultiTorrentOverlay => Self::MultiTorrentOverlay,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Network => Self::MultiTorrentOverlay,
+            Self::Network => Self::Network,
             Self::Cpu => Self::Network,
             Self::Ram => Self::Cpu,
             Self::Disk => Self::Ram,
