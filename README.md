@@ -121,11 +121,9 @@ docker compose up -d && docker compose attach superseedr
     mkdir superseedr
     cd superseedr
 
-    # Download all compose and example config files
+    # Download the compose file and example config files
     curl -sL \
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/docker-compose.yml \
-      -O https://raw.githubusercontent.com/Jagalite/superseedr/main/docker-compose.common.yml \
-      -O https://raw.githubusercontent.com/Jagalite/superseedr/main/docker-compose.standalone.yml \
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/.env.example \
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/.gluetun.env.example
 
@@ -139,7 +137,7 @@ docker compose up -d && docker compose attach superseedr
         ```bash
         cp .env.example .env
         ```
-        Edit `.env` to set your absolute host paths (e.g., `HOST_SUPERSEEDR_DATA_PATH=/my/path/data`). **This is important:** it maps the container's internal folders (like `/superseedr-data`) to real folders on your computer. This ensures your downloads and config files are saved safely on your host machine, so no data is lost when the container stops or is updated.
+        Edit `.env` to set your absolute host paths (e.g., `HOST_SUPERSEEDR_ROOT_PATH=/my/path/seedbox`). **This is important:** it maps the container's shared seedbox root (`/seedbox`) to a real folder on your computer. Keep `superseedr-config/` inside that root for the simplest shared-config setup.
 
     * **VPN Config:** Edit your `.gluetun.env` file from the example.
         ```bash
@@ -168,17 +166,22 @@ docker compose up -d && docker compose attach superseedr
 
 ---
 
-#### Option 2: Standalone
+#### Option 2: Direct docker run
 
-This runs the client directly, exposing its port to your host. It's simpler but provides no VPN protection.
+This runs the client directly without Gluetun. It is useful for advanced users who want to manage networking themselves.
 
-1.  Run using the `docker-compose.standalone.yml` file:
+    docker run --rm -it \
+      -e SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/seedbox \
+      -e SUPERSEEDR_SHARED_CONFIG_DIR=/seedbox/superseedr-config \
+      -e SUPERSEEDR_HOST_ID=seedbox-docker \
+      -p 6881:6881/tcp \
+      -p 6881:6881/udp \
+      -v /your/seedbox:/seedbox \
+      -v ./docker-data/share:/root/.local/share/jagalite.superseedr \
+      jagatranvo/superseedr:latest
 
-```bash
-docker compose -f docker-compose.standalone.yml up -d && docker compose attach superseedr
-```
-> To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
-> **Optional:** press `[z]` first to enter power-saving mode.
+Replace /your/seedbox with the shared seedbox root on your host.
+Keep superseedr-config/ inside that folder so the container sees it at /seedbox/superseedr-config.
 
 </details>
 
@@ -316,3 +319,9 @@ Superseedr implements the following BitTorrent Enhancement Proposals (BEPs):
 * **BEP 52:** The BitTorrent Protocol v2
 
 </details>
+
+
+
+
+
+

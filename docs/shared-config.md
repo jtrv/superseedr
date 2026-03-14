@@ -177,6 +177,136 @@ watch_folder = "Z:\\watch"
 media = "Z:\\nas"
 ```
 
+## Recommended Setups
+
+### Single machine, no shared mode
+Best for:
+- one machine
+- the simplest setup
+- no shared catalog
+
+Use the normal default mode and do not set `SUPERSEEDR_SHARED_CONFIG_DIR`.
+Superseedr will keep using its standard OS config directory and single `settings.toml`.
+
+Launch:
+
+```powershell
+cargo run
+```
+
+### Windows and macOS sharing one mounted seedbox folder
+Best for:
+- one shared data folder
+- Windows and macOS using different absolute paths
+- one shared torrent catalog
+
+Recommended layout:
+
+```text
+seedbox/
+  superseedr-config/
+    settings.toml
+    catalog.toml
+    torrents/
+    hosts/
+      jagas-air.toml
+      desktop-0mtgcbo.toml
+```
+
+Recommended shared root placement:
+- put `superseedr-config/` inside the mounted data folder
+- this lets first-run host bootstrap infer `media` as the parent folder
+
+Shared settings:
+
+```toml
+# settings.toml
+client_id = "shared-node"
+default_download_folder = { root = "media", relative = "" }
+```
+
+Mac host:
+
+```toml
+# hosts/jagas-air.toml
+client_port = 6681
+watch_folder = "/Volumes/seedbox/watch"
+
+[path_roots]
+media = "/Volumes/seedbox"
+```
+
+Windows host:
+
+```toml
+# hosts/desktop-0mtgcbo.toml
+client_port = 6681
+watch_folder = "C:\\Users\\jagat\\Documents\\seedbox\\watch"
+
+[path_roots]
+media = "C:\\Users\\jagat\\Documents\\seedbox"
+```
+
+Launch on macOS:
+
+```bash
+SUPERSEEDR_SHARED_CONFIG_DIR="/Volumes/seedbox/superseedr-config" cargo run
+```
+
+Launch on Windows:
+
+```powershell
+$env:SUPERSEEDR_SHARED_CONFIG_DIR='C:\Users\jagat\Documents\seedbox\superseedr-config'; cargo run
+```
+
+Notes:
+- If the host file does not exist yet, Superseedr bootstraps it on first load.
+- If a host file already exists, Superseedr trusts it and does not overwrite existing `path_roots`.
+
+### Docker using a shared mount
+Best for:
+- a containerized seedbox
+- shared config under the same mounted data root
+
+Recommended container mount:
+
+```text
+/seedbox/
+  superseedr-config/
+  watch/
+  downloads/
+```
+
+Recommended run command:
+
+```bash
+docker run \
+  -e SUPERSEEDR_SHARED_CONFIG_DIR=/seedbox/superseedr-config \
+  -e SUPERSEEDR_HOST_ID=seedbox-docker \
+  -v /real/seedbox:/seedbox \
+  your-image
+```
+
+Why this layout is recommended:
+- first-run bootstrap infers `media` as `/seedbox`
+- shared `.torrent` artifacts stay under `/seedbox/superseedr-config/torrents/`
+- all hosts can resolve the same shared torrent artifacts
+
+If config and data are mounted separately, do this instead:
+- create `hosts/<host-id>.toml` manually
+- set `[path_roots]` explicitly
+- do not rely on first-run bootstrap to infer the data root
+
+### Shared catalog safety guidance
+Recommended operational model:
+- share config and catalog across hosts
+- keep runtime persistence local
+- prefer one active owner per torrent unless stronger ownership coordination is added later
+
+Why:
+- shared config sync keeps hosts converged
+- runtime persistence is intentionally local
+- tracker behavior is safer when one host is actively responsible for a torrent at a time
 ## Migration Script
 A one-time migration helper is available at `local_scripts/migrate_legacy_settings_to_layered.py`.
 
@@ -207,5 +337,6 @@ Notes:
 - Shared config mode is opt-in.
 - No automatic migration is performed from the normal `settings.toml` layout.
 - Shared config mode is only about config sharing. It does not add multi-instance torrent ownership or execution coordination.
+
 
 
