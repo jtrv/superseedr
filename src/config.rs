@@ -1228,6 +1228,13 @@ pub fn load_settings() -> io::Result<Settings> {
 pub fn save_settings(settings: &Settings) -> io::Result<()> {
     resolve_config_backend()?.save_settings(settings)
 }
+
+pub fn shared_host_id() -> Option<String> {
+    resolve_shared_config_paths()
+        .ok()
+        .flatten()
+        .map(|paths| paths.host_id)
+}
 fn cleanup_old_backups(backup_dir: &PathBuf, limit: usize) -> io::Result<()> {
     let mut entries: Vec<_> = fs::read_dir(backup_dir)?
         .filter_map(|res| res.ok())

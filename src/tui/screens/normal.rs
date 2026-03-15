@@ -347,6 +347,7 @@ pub enum UiAction {
     OpenDeleteConfirm { with_files: bool },
     OpenConfig,
     OpenRss,
+    OpenJournal,
     DataRateSlower,
     DataRateFaster,
     ThemePrev,
@@ -364,6 +365,7 @@ pub enum UiEffect {
     OpenAddTorrentFileBrowser,
     OpenConfigScreen,
     OpenRssScreen,
+    OpenJournalScreen,
     BroadcastManagerDataRate(u64),
     ApplyThemePrev,
     ApplyThemeNext,
@@ -474,6 +476,10 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
         UiAction::OpenConfig => ReduceResult {
             redraw: true,
             effects: vec![UiEffect::OpenConfigScreen],
+        },
+        UiAction::OpenJournal => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::OpenJournalScreen],
         },
         UiAction::DataRateSlower => {
             app_state.data_rate = app_state.data_rate.next_slower();
@@ -628,6 +634,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
         KeyCode::Char('r') => Some(UiAction::OpenRss),
+        KeyCode::Char('l') => Some(UiAction::OpenJournal),
         KeyCode::Char('m') => Some(UiAction::OpenHelp),
         KeyCode::Char('[') | KeyCode::Char('{') => Some(UiAction::DataRateSlower),
         KeyCode::Char(']') | KeyCode::Char('}') => Some(UiAction::DataRateFaster),
@@ -641,8 +648,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         | KeyCode::Char('j')
         | KeyCode::Left
         | KeyCode::Char('h')
-        | KeyCode::Right
-        | KeyCode::Char('l') => Some(UiAction::Navigate(key.code)),
+        | KeyCode::Right => Some(UiAction::Navigate(key.code)),
         _ => None,
     }
 }
@@ -4569,6 +4575,10 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
             app.app_state.ui.rss.active_screen = RssScreen::Unified;
             app.app_state.mode = AppMode::Rss;
         }
+        UiEffect::OpenJournalScreen => {
+            app.app_state.ui.journal.selected_index = 0;
+            app.app_state.mode = AppMode::Journal;
+        }
         UiEffect::HandlePastedText(text) => {
             handle_pasted_text(app, &text).await;
         }
@@ -5064,6 +5074,16 @@ mod tests {
     }
 
     #[test]
+    fn reducer_open_journal_emits_open_journal_effect() {
+        let mut app_state = AppState::default();
+
+        let result = reduce_ui_action(&mut app_state, UiAction::OpenJournal);
+
+        assert!(result.redraw);
+        assert_eq!(result.effects, vec![UiEffect::OpenJournalScreen]);
+    }
+
+    #[test]
     fn reducer_data_rate_actions_update_rate_and_emit_effect() {
         let mut app_state = AppState {
             data_rate: DataRate::Rate1s,
@@ -5493,6 +5513,20 @@ mod tests {
             app.app_state.ui.rss.active_screen,
             RssScreen::Unified
         ));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_open_journal_screen_sets_journal_mode() {
+        let mut app = App::new(crate::config::Settings::default())
+            .await
+            .expect("build app");
+        app.app_state.ui.journal.selected_index = 9;
+
+        execute_ui_effect(&mut app, UiEffect::OpenJournalScreen).await;
+
+        assert!(matches!(app.app_state.mode, AppMode::Journal));
+        assert_eq!(app.app_state.ui.journal.selected_index, 0);
         let _ = app.shutdown_tx.send(());
     }
 }

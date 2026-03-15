@@ -279,6 +279,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
+                        "l",
+                        ctx.apply(Style::default().fg(ctx.state_info())),
+                    )),
+                    Cell::from("Open event journal"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
                         "z",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
@@ -648,6 +655,32 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
                     Cell::from("Move selection in the focused pane"),
+                ]),
+            ],
+        ),
+        AppMode::Journal => (
+            " Help / Journal ",
+            vec![
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Esc / q",
+                        ctx.apply(Style::default().fg(ctx.state_error())),
+                    )),
+                    Cell::from("Close the event journal"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Tab / Shift+Tab",
+                        ctx.apply(Style::default().fg(ctx.state_selected())),
+                    )),
+                    Cell::from("Cycle between ALL, ADDED, COMPLETE, and HEALTH"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "â†‘ / â†“ / k / j",
+                        ctx.apply(Style::default().fg(ctx.state_info())),
+                    )),
+                    Cell::from("Move selection through journal entries"),
                 ]),
             ],
         ),

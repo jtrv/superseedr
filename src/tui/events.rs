@@ -3,7 +3,9 @@
 
 use crate::app::{App, AppMode};
 use crate::tui::paste_burst::FlushResult as PasteBurstFlushResult;
-use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, rss, welcome};
+use crate::tui::screens::{
+    browser, config, delete_confirm, help, journal, normal, power, rss, welcome,
+};
 
 use ratatui::crossterm::event::{
     Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -180,6 +182,9 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
     match app.app_state.mode {
         AppMode::Help => {
             help::handle_event(event, &mut app.app_state);
+        }
+        AppMode::Journal => {
+            journal::handle_event(event, &mut app.app_state);
         }
         AppMode::Welcome => {
             if matches!(event, CrosstermEvent::Paste(_)) {
