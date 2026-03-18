@@ -634,7 +634,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
         KeyCode::Char('r') => Some(UiAction::OpenRss),
-        KeyCode::Char('l') => Some(UiAction::OpenJournal),
+        KeyCode::Char('n') => Some(UiAction::OpenJournal),
         KeyCode::Char('m') => Some(UiAction::OpenHelp),
         KeyCode::Char('[') | KeyCode::Char('{') => Some(UiAction::DataRateSlower),
         KeyCode::Char(']') | KeyCode::Char('}') => Some(UiAction::DataRateFaster),
