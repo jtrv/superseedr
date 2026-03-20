@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use figment::providers::{Env, Format, Serialized};
-use figment::{providers::Toml, Figment};
+use figment::providers::{Env, Serialized};
+use figment::Figment;
 use sha1::{Digest, Sha1};
 use tracing::{event as tracing_event, Level};
 
@@ -351,6 +351,13 @@ struct CatalogConfig {
     pub torrents: Vec<CatalogTorrentSettings>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LayeredConfig {
+    settings: SharedSettingsConfig,
+    catalog: CatalogConfig,
+    host: HostConfig,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 struct HostConfig {
@@ -406,9 +413,7 @@ enum ConfigBackend {
 #[derive(Clone, Debug)]
 struct SharedConfigState {
     paths: SharedConfigPaths,
-    settings_config: SharedSettingsConfig,
-    catalog: CatalogConfig,
-    host: HostConfig,
+    layered: LayeredConfig,
     resolved_settings: Settings,
     settings_fingerprint: Option<String>,
     catalog_fingerprint: Option<String>,
@@ -421,11 +426,62 @@ fn shared_config_state() -> &'static Mutex<Option<SharedConfigState>> {
     SHARED_CONFIG_STATE.get_or_init(|| Mutex::new(None))
 }
 
+impl LayeredConfig {
+    fn from_flat_settings(settings: &Settings) -> Self {
+        let path_roots = HashMap::new();
+        Self {
+            settings: SharedSettingsConfig::from_settings(settings, &path_roots),
+            catalog: CatalogConfig::from_settings(settings, &path_roots, None),
+            host: HostConfig::from_flat_settings(settings),
+        }
+    }
+
+    fn from_shared_settings(
+        settings: &Settings,
+        existing_roots: &HashMap<String, PathBuf>,
+        shared_root: &Path,
+        preserved_shared_client_id: Option<&str>,
+    ) -> Self {
+        let mut settings_config = SharedSettingsConfig::from_settings(settings, existing_roots);
+        let shared_client_id = preserved_shared_client_id.unwrap_or(&settings_config.client_id);
+        let host = HostConfig::from_settings(settings, existing_roots, shared_client_id);
+        if let Some(shared_client_id) =
+            preserved_shared_client_id.filter(|_| host.client_id.is_some())
+        {
+            settings_config.client_id = shared_client_id.to_string();
+        }
+
+        Self {
+            settings: settings_config,
+            catalog: CatalogConfig::from_settings(settings, existing_roots, Some(shared_root)),
+            host,
+        }
+    }
+
+    fn resolve_flat_settings(&self) -> io::Result<Settings> {
+        self.resolve_settings(None)
+    }
+
+    fn resolve_shared_settings(&self, shared_root: &Path) -> io::Result<Settings> {
+        self.resolve_settings(Some(shared_root))
+    }
+
+    fn resolve_settings(&self, shared_root: Option<&Path>) -> io::Result<Settings> {
+        let mut settings = Settings::default();
+        self.settings
+            .apply_to_settings(&mut settings, &self.host.path_roots)?;
+        self.catalog
+            .apply_to_settings(&mut settings, &self.host.path_roots, shared_root)?;
+        self.host.apply_to_settings(&mut settings);
+        Ok(settings)
+    }
+}
+
 impl CatalogTorrentSettings {
     fn from_settings(
         settings: &TorrentSettings,
         path_roots: &HashMap<String, PathBuf>,
-        shared_root: &Path,
+        shared_root: Option<&Path>,
     ) -> Self {
         Self {
             torrent_or_magnet: encode_catalog_torrent_source(
@@ -447,7 +503,7 @@ impl CatalogTorrentSettings {
     fn to_settings(
         &self,
         path_roots: &HashMap<String, PathBuf>,
-        shared_root: &Path,
+        shared_root: Option<&Path>,
     ) -> io::Result<TorrentSettings> {
         Ok(TorrentSettings {
             torrent_or_magnet: decode_catalog_torrent_source(&self.torrent_or_magnet, shared_root),
@@ -540,7 +596,7 @@ impl CatalogConfig {
     fn from_settings(
         settings: &Settings,
         path_roots: &HashMap<String, PathBuf>,
-        shared_root: &Path,
+        shared_root: Option<&Path>,
     ) -> Self {
         Self {
             torrents: settings
@@ -557,7 +613,7 @@ impl CatalogConfig {
         &self,
         settings: &mut Settings,
         path_roots: &HashMap<String, PathBuf>,
-        shared_root: &Path,
+        shared_root: Option<&Path>,
     ) -> io::Result<()> {
         settings.torrents = self
             .torrents
@@ -569,6 +625,15 @@ impl CatalogConfig {
 }
 
 impl HostConfig {
+    fn from_flat_settings(settings: &Settings) -> Self {
+        Self {
+            client_id: None,
+            client_port: settings.client_port,
+            watch_folder: settings.watch_folder.clone(),
+            path_roots: HashMap::new(),
+        }
+    }
+
     fn from_settings(
         settings: &Settings,
         existing_roots: &HashMap<String, PathBuf>,
@@ -810,10 +875,14 @@ fn shared_relative_path_to_pathbuf(relative: &str) -> PathBuf {
     path
 }
 
-fn encode_catalog_torrent_source(source: &str, shared_root: &Path) -> String {
+fn encode_catalog_torrent_source(source: &str, shared_root: Option<&Path>) -> String {
     if source.starts_with("magnet:") {
         return source.to_string();
     }
+
+    let Some(shared_root) = shared_root else {
+        return source.to_string();
+    };
 
     let path = Path::new(source);
     if let Ok(relative) = path.strip_prefix(shared_root) {
@@ -827,8 +896,12 @@ fn encode_catalog_torrent_source(source: &str, shared_root: &Path) -> String {
     source.to_string()
 }
 
-fn decode_catalog_torrent_source(source: &str, shared_root: &Path) -> String {
+fn decode_catalog_torrent_source(source: &str, shared_root: Option<&Path>) -> String {
     let Some(relative) = source.strip_prefix(SHARED_TORRENT_SOURCE_PREFIX) else {
+        return source.to_string();
+    };
+
+    let Some(shared_root) = shared_root else {
         return source.to_string();
     };
 
@@ -927,11 +1000,10 @@ impl NormalConfigBackend {
             self.paths.settings_path
         );
 
-        Figment::new()
-            .merge(Toml::file(&self.paths.settings_path))
-            .merge(Env::prefixed("SUPERSEEDR_"))
-            .extract::<Settings>()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let flat_settings: Settings = read_toml_or_default(&self.paths.settings_path)?;
+        let layered = LayeredConfig::from_flat_settings(&flat_settings);
+        let resolved_settings = layered.resolve_flat_settings()?;
+        apply_env_overrides(&resolved_settings)
     }
 
     fn save_settings(&self, settings: &Settings) -> io::Result<()> {
@@ -944,7 +1016,9 @@ impl NormalConfigBackend {
             .backup_dir
             .join(format!("settings_{}.toml", timestamp));
 
-        let content = toml::to_string_pretty(settings).map_err(io::Error::other)?;
+        let layered = LayeredConfig::from_flat_settings(settings);
+        let flat_settings = layered.resolve_flat_settings()?;
+        let content = toml::to_string_pretty(&flat_settings).map_err(io::Error::other)?;
         let temp_file_path = self.paths.config_dir.join("settings.toml.tmp");
         fs::write(&temp_file_path, &content)?;
         fs::rename(&temp_file_path, &self.paths.settings_path)?;
@@ -966,11 +1040,13 @@ impl SharedConfigBackend {
             bootstrap_shared_host_config(&self.paths, &settings_config, &catalog)?
         };
 
-        let mut settings = Settings::default();
-        settings_config.apply_to_settings(&mut settings, &host.path_roots)?;
-        catalog.apply_to_settings(&mut settings, &host.path_roots, &self.paths.root_dir)?;
-        host.apply_to_settings(&mut settings);
-        let resolved_settings = apply_env_overrides(&settings)?;
+        let layered = LayeredConfig {
+            settings: settings_config,
+            catalog,
+            host,
+        };
+        let resolved_settings =
+            apply_env_overrides(&layered.resolve_shared_settings(&self.paths.root_dir)?)?;
         let settings_fingerprint = fingerprint_for_path(&self.paths.settings_path)?;
         let catalog_fingerprint = fingerprint_for_path(&self.paths.catalog_path)?;
         let host_fingerprint = fingerprint_for_path(&self.paths.host_path)?;
@@ -980,9 +1056,7 @@ impl SharedConfigBackend {
             .map_err(|_| io::Error::other("Shared config state lock poisoned"))?;
         *guard = Some(SharedConfigState {
             paths: self.paths.clone(),
-            settings_config,
-            catalog,
-            host,
+            layered,
             resolved_settings: resolved_settings.clone(),
             settings_fingerprint,
             catalog_fingerprint,
@@ -1016,36 +1090,34 @@ impl SharedConfigBackend {
             "Shared host config",
         )?;
 
-        let mut next_settings_config =
-            SharedSettingsConfig::from_settings(settings, &state.host.path_roots);
-        if state.host.client_id.is_some() {
-            next_settings_config.client_id = state.settings_config.client_id.clone();
-        }
-        let next_catalog =
-            CatalogConfig::from_settings(settings, &state.host.path_roots, &state.paths.root_dir);
-        let next_host = HostConfig::from_settings(
+        let next_layered = LayeredConfig::from_shared_settings(
             settings,
-            &state.host.path_roots,
-            &next_settings_config.client_id,
+            &state.layered.host.path_roots,
+            &state.paths.root_dir,
+            state
+                .layered
+                .host
+                .client_id
+                .as_ref()
+                .map(|_| state.layered.settings.client_id.as_str()),
         );
 
-        if next_settings_config != state.settings_config || state.settings_fingerprint.is_none() {
+        if next_layered.settings != state.layered.settings || state.settings_fingerprint.is_none() {
             state.settings_fingerprint =
-                write_toml_atomically(&self.paths.settings_path, &next_settings_config)?;
-            state.settings_config = next_settings_config;
+                write_toml_atomically(&self.paths.settings_path, &next_layered.settings)?;
         }
 
-        if next_catalog != state.catalog || state.catalog_fingerprint.is_none() {
+        if next_layered.catalog != state.layered.catalog || state.catalog_fingerprint.is_none() {
             state.catalog_fingerprint =
-                write_toml_atomically(&self.paths.catalog_path, &next_catalog)?;
-            state.catalog = next_catalog;
+                write_toml_atomically(&self.paths.catalog_path, &next_layered.catalog)?;
         }
 
-        if next_host != state.host || state.host_fingerprint.is_none() {
-            state.host_fingerprint = write_toml_atomically(&self.paths.host_path, &next_host)?;
-            state.host = next_host;
+        if next_layered.host != state.layered.host || state.host_fingerprint.is_none() {
+            state.host_fingerprint =
+                write_toml_atomically(&self.paths.host_path, &next_layered.host)?;
         }
 
+        state.layered = next_layered;
         state.resolved_settings = settings.clone();
         Ok(())
     }
@@ -1572,13 +1644,96 @@ mod tests {
     fn test_shared_torrent_source_round_trip() {
         let shared_root = Path::new("/shared-root");
         let absolute = "/shared-root/torrents/0123456789abcdef0123456789abcdef01234567.torrent";
-        let encoded = encode_catalog_torrent_source(absolute, shared_root);
+        let encoded = encode_catalog_torrent_source(absolute, Some(shared_root));
         assert_eq!(
             encoded,
             "shared:torrents/0123456789abcdef0123456789abcdef01234567.torrent"
         );
-        let decoded = decode_catalog_torrent_source(&encoded, shared_root);
+        let decoded = decode_catalog_torrent_source(&encoded, Some(shared_root));
         assert_eq!(PathBuf::from(decoded), PathBuf::from(absolute));
+    }
+
+    #[test]
+    fn test_layered_config_round_trips_flat_settings() {
+        let settings = Settings {
+            client_id: "flat-node".to_string(),
+            client_port: 7700,
+            watch_folder: Some(PathBuf::from("/watch")),
+            default_download_folder: Some(PathBuf::from("/downloads")),
+            torrents: vec![TorrentSettings {
+                torrent_or_magnet: "/library/example.torrent".to_string(),
+                name: "Alpha Archive".to_string(),
+                download_path: Some(PathBuf::from("/downloads/alpha")),
+                ..TorrentSettings::default()
+            }],
+            ..Settings::default()
+        };
+
+        let layered = LayeredConfig::from_flat_settings(&settings);
+        let resolved = layered
+            .resolve_flat_settings()
+            .expect("resolve flat settings");
+
+        assert_eq!(resolved, settings);
+        assert_eq!(
+            layered.catalog.torrents[0].torrent_or_magnet,
+            "/library/example.torrent"
+        );
+        assert_eq!(layered.host.watch_folder, Some(PathBuf::from("/watch")));
+    }
+
+    #[test]
+    fn test_layered_config_round_trips_shared_settings() {
+        let shared_root = Path::new("/shared-root");
+        let mut roots = HashMap::new();
+        roots.insert("media".to_string(), PathBuf::from("/mnt/media"));
+
+        let settings = Settings {
+            client_id: "host-node".to_string(),
+            client_port: 7711,
+            watch_folder: Some(PathBuf::from("/watch")),
+            default_download_folder: Some(PathBuf::from("/mnt/media/downloads")),
+            torrents: vec![TorrentSettings {
+                torrent_or_magnet: "/shared-root/torrents/abc123.torrent".to_string(),
+                name: "Shared Archive".to_string(),
+                download_path: Some(PathBuf::from("/mnt/media/downloads/shared")),
+                ..TorrentSettings::default()
+            }],
+            ..Settings::default()
+        };
+
+        let layered = LayeredConfig::from_shared_settings(
+            &settings,
+            &roots,
+            shared_root,
+            Some("shared-node"),
+        );
+        let resolved = layered
+            .resolve_shared_settings(shared_root)
+            .expect("resolve shared settings");
+
+        assert_eq!(resolved.client_id, settings.client_id);
+        assert_eq!(resolved.client_port, settings.client_port);
+        assert_eq!(resolved.watch_folder, settings.watch_folder);
+        assert_eq!(
+            resolved.default_download_folder,
+            settings.default_download_folder
+        );
+        assert_eq!(resolved.torrents[0].name, settings.torrents[0].name);
+        assert_eq!(
+            PathBuf::from(&resolved.torrents[0].torrent_or_magnet),
+            PathBuf::from(&settings.torrents[0].torrent_or_magnet)
+        );
+        assert_eq!(
+            resolved.torrents[0].download_path,
+            settings.torrents[0].download_path
+        );
+        assert_eq!(layered.settings.client_id, "shared-node");
+        assert_eq!(layered.host.client_id.as_deref(), Some("host-node"));
+        assert_eq!(
+            layered.catalog.torrents[0].torrent_or_magnet,
+            "shared:torrents/abc123.torrent"
+        );
     }
 
     #[test]
@@ -1617,7 +1772,11 @@ mod tests {
             .apply_to_settings(&mut settings, &host.path_roots)
             .expect("apply shared settings");
         catalog
-            .apply_to_settings(&mut settings, &host.path_roots, Path::new("/shared-root"))
+            .apply_to_settings(
+                &mut settings,
+                &host.path_roots,
+                Some(Path::new("/shared-root")),
+            )
             .expect("apply catalog");
         host.apply_to_settings(&mut settings);
 
