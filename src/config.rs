@@ -229,6 +229,31 @@ pub struct TorrentSettings {
     pub file_priorities: HashMap<usize, FilePriority>,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct TorrentMetadataFileEntry {
+    pub relative_path: String,
+    pub length: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct TorrentMetadataEntry {
+    pub info_hash_hex: String,
+    pub torrent_name: String,
+    pub total_size: u64,
+    pub is_multi_file: bool,
+    pub files: Vec<TorrentMetadataFileEntry>,
+    #[serde(with = "string_usize_map")]
+    pub file_priorities: HashMap<usize, FilePriority>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct TorrentMetadataConfig {
+    pub torrents: Vec<TorrentMetadataEntry>,
+}
+
 mod string_usize_map {
     use crate::app::FilePriority;
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -382,6 +407,7 @@ impl Default for HostConfig {
 struct NormalConfigPaths {
     config_dir: PathBuf,
     settings_path: PathBuf,
+    metadata_path: PathBuf,
     backup_dir: PathBuf,
 }
 
@@ -390,6 +416,7 @@ struct SharedConfigPaths {
     root_dir: PathBuf,
     settings_path: PathBuf,
     catalog_path: PathBuf,
+    metadata_path: PathBuf,
     host_path: PathBuf,
     host_id: String,
 }
@@ -417,6 +444,7 @@ struct SharedConfigState {
     resolved_settings: Settings,
     settings_fingerprint: Option<String>,
     catalog_fingerprint: Option<String>,
+    metadata_fingerprint: Option<String>,
     host_fingerprint: Option<String>,
 }
 
@@ -520,6 +548,89 @@ impl CatalogTorrentSettings {
             torrent_control_state: self.torrent_control_state.clone(),
             file_priorities: self.file_priorities.clone(),
         })
+    }
+}
+
+impl TorrentMetadataEntry {
+    fn placeholder_from_settings(settings: &TorrentSettings) -> Option<Self> {
+        let info_hash =
+            crate::torrent_identity::info_hash_from_torrent_source(&settings.torrent_or_magnet)?;
+        Some(Self {
+            info_hash_hex: hex::encode(info_hash),
+            torrent_name: settings.name.clone(),
+            total_size: 0,
+            is_multi_file: false,
+            files: Vec::new(),
+            file_priorities: settings.file_priorities.clone(),
+        })
+    }
+
+    fn apply_settings_overrides(&mut self, settings: &TorrentSettings) {
+        if !settings.name.is_empty() {
+            self.torrent_name = settings.name.clone();
+        }
+        self.file_priorities = settings.file_priorities.clone();
+    }
+}
+
+fn sync_torrent_metadata_with_settings(
+    existing: TorrentMetadataConfig,
+    settings: &Settings,
+) -> TorrentMetadataConfig {
+    let mut existing_by_hash: HashMap<String, TorrentMetadataEntry> = existing
+        .torrents
+        .into_iter()
+        .map(|entry| (entry.info_hash_hex.clone(), entry))
+        .collect();
+
+    let torrents = settings
+        .torrents
+        .iter()
+        .filter_map(|torrent| {
+            let mut entry =
+                TorrentMetadataEntry::placeholder_from_settings(torrent).or_else(|| {
+                    crate::torrent_identity::info_hash_from_torrent_source(
+                        &torrent.torrent_or_magnet,
+                    )
+                    .map(|info_hash| TorrentMetadataEntry {
+                        info_hash_hex: hex::encode(info_hash),
+                        ..Default::default()
+                    })
+                })?;
+
+            if let Some(existing_entry) = existing_by_hash.remove(&entry.info_hash_hex) {
+                entry = existing_entry;
+            }
+
+            entry.apply_settings_overrides(torrent);
+            Some(entry)
+        })
+        .collect();
+
+    TorrentMetadataConfig { torrents }
+}
+
+fn apply_metadata_to_settings(settings: &mut Settings, metadata: &TorrentMetadataConfig) {
+    let metadata_by_hash: HashMap<&str, &TorrentMetadataEntry> = metadata
+        .torrents
+        .iter()
+        .map(|entry| (entry.info_hash_hex.as_str(), entry))
+        .collect();
+
+    for torrent in &mut settings.torrents {
+        let Some(info_hash) =
+            crate::torrent_identity::info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+        else {
+            continue;
+        };
+        let info_hash_hex = hex::encode(info_hash);
+        let Some(entry) = metadata_by_hash.get(info_hash_hex.as_str()) else {
+            continue;
+        };
+        torrent.file_priorities = entry.file_priorities.clone();
+        if torrent.name.is_empty() && !entry.torrent_name.is_empty() {
+            torrent.name = entry.torrent_name.clone();
+        }
     }
 }
 
@@ -729,6 +840,7 @@ fn resolve_shared_config_paths() -> io::Result<Option<SharedConfigPaths>> {
     Ok(Some(SharedConfigPaths {
         settings_path: root_dir.join("settings.toml"),
         catalog_path: root_dir.join("catalog.toml"),
+        metadata_path: root_dir.join("torrent_metadata.toml"),
         host_path: root_dir.join("hosts").join(format!("{}.toml", host_id)),
         root_dir,
         host_id,
@@ -749,6 +861,7 @@ fn resolve_config_backend() -> io::Result<ConfigBackend> {
     Ok(ConfigBackend::Normal(NormalConfigBackend {
         paths: NormalConfigPaths {
             settings_path: config_dir.join("settings.toml"),
+            metadata_path: config_dir.join("torrent_metadata.toml"),
             backup_dir: config_dir.join("backups_settings_files"),
             config_dir,
         },
@@ -1001,8 +1114,10 @@ impl NormalConfigBackend {
         );
 
         let flat_settings: Settings = read_toml_or_default(&self.paths.settings_path)?;
+        let metadata: TorrentMetadataConfig = read_toml_or_default(&self.paths.metadata_path)?;
         let layered = LayeredConfig::from_flat_settings(&flat_settings);
-        let resolved_settings = layered.resolve_flat_settings()?;
+        let mut resolved_settings = layered.resolve_flat_settings()?;
+        apply_metadata_to_settings(&mut resolved_settings, &metadata);
         apply_env_overrides(&resolved_settings)
     }
 
@@ -1025,6 +1140,11 @@ impl NormalConfigBackend {
         fs::write(backup_path, content)?;
         cleanup_old_backups(&self.paths.backup_dir, 64)?;
 
+        let existing_metadata: TorrentMetadataConfig =
+            read_toml_or_default(&self.paths.metadata_path)?;
+        let next_metadata = sync_torrent_metadata_with_settings(existing_metadata, &flat_settings);
+        let _ = write_toml_atomically(&self.paths.metadata_path, &next_metadata)?;
+
         Ok(())
     }
 }
@@ -1034,6 +1154,7 @@ impl SharedConfigBackend {
         let settings_config: SharedSettingsConfig =
             read_toml_or_default(&self.paths.settings_path)?;
         let catalog: CatalogConfig = read_toml_or_default(&self.paths.catalog_path)?;
+        let metadata: TorrentMetadataConfig = read_toml_or_default(&self.paths.metadata_path)?;
         let host = if self.paths.host_path.exists() {
             read_toml_or_default(&self.paths.host_path)?
         } else {
@@ -1045,10 +1166,12 @@ impl SharedConfigBackend {
             catalog,
             host,
         };
-        let resolved_settings =
-            apply_env_overrides(&layered.resolve_shared_settings(&self.paths.root_dir)?)?;
+        let mut resolved_settings = layered.resolve_shared_settings(&self.paths.root_dir)?;
+        apply_metadata_to_settings(&mut resolved_settings, &metadata);
+        let resolved_settings = apply_env_overrides(&resolved_settings)?;
         let settings_fingerprint = fingerprint_for_path(&self.paths.settings_path)?;
         let catalog_fingerprint = fingerprint_for_path(&self.paths.catalog_path)?;
+        let metadata_fingerprint = fingerprint_for_path(&self.paths.metadata_path)?;
         let host_fingerprint = fingerprint_for_path(&self.paths.host_path)?;
 
         let mut guard = shared_config_state()
@@ -1060,6 +1183,7 @@ impl SharedConfigBackend {
             resolved_settings: resolved_settings.clone(),
             settings_fingerprint,
             catalog_fingerprint,
+            metadata_fingerprint,
             host_fingerprint,
         });
 
@@ -1083,6 +1207,11 @@ impl SharedConfigBackend {
             &state.paths.catalog_path,
             &state.catalog_fingerprint,
             "Shared catalog",
+        )?;
+        ensure_fingerprint_matches(
+            &state.paths.metadata_path,
+            &state.metadata_fingerprint,
+            "Shared torrent metadata",
         )?;
         ensure_fingerprint_matches(
             &state.paths.host_path,
@@ -1111,6 +1240,12 @@ impl SharedConfigBackend {
             state.catalog_fingerprint =
                 write_toml_atomically(&self.paths.catalog_path, &next_layered.catalog)?;
         }
+
+        let existing_metadata: TorrentMetadataConfig =
+            read_toml_or_default(&self.paths.metadata_path)?;
+        let next_metadata = sync_torrent_metadata_with_settings(existing_metadata, settings);
+        state.metadata_fingerprint =
+            write_toml_atomically(&self.paths.metadata_path, &next_metadata)?;
 
         if next_layered.host != state.layered.host || state.host_fingerprint.is_none() {
             state.host_fingerprint =
@@ -1147,6 +1282,61 @@ impl ConfigBackend {
             ConfigBackend::Normal(backend) => backend.save_settings(settings),
             ConfigBackend::Shared(backend) => backend.save_settings(settings),
         }
+    }
+
+    fn load_torrent_metadata(&self) -> io::Result<TorrentMetadataConfig> {
+        match self {
+            ConfigBackend::Normal(backend) => read_toml_or_default(&backend.paths.metadata_path),
+            ConfigBackend::Shared(backend) => read_toml_or_default(&backend.paths.metadata_path),
+        }
+    }
+
+    fn upsert_torrent_metadata(&self, entry: TorrentMetadataEntry) -> io::Result<()> {
+        match self {
+            ConfigBackend::Normal(backend) => {
+                let mut metadata: TorrentMetadataConfig =
+                    read_toml_or_default(&backend.paths.metadata_path)?;
+                upsert_torrent_metadata_entry(&mut metadata, entry);
+                let _ = write_toml_atomically(&backend.paths.metadata_path, &metadata)?;
+                Ok(())
+            }
+            ConfigBackend::Shared(backend) => {
+                let mut guard = shared_config_state()
+                    .lock()
+                    .map_err(|_| io::Error::other("Shared config state lock poisoned"))?;
+                let state = guard.as_mut().ok_or_else(|| {
+                    io::Error::other("Shared config mode was not loaded before metadata update")
+                })?;
+
+                ensure_fingerprint_matches(
+                    &state.paths.metadata_path,
+                    &state.metadata_fingerprint,
+                    "Shared torrent metadata",
+                )?;
+
+                let mut metadata: TorrentMetadataConfig =
+                    read_toml_or_default(&backend.paths.metadata_path)?;
+                upsert_torrent_metadata_entry(&mut metadata, entry);
+                state.metadata_fingerprint =
+                    write_toml_atomically(&backend.paths.metadata_path, &metadata)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+fn upsert_torrent_metadata_entry(
+    metadata: &mut TorrentMetadataConfig,
+    entry: TorrentMetadataEntry,
+) {
+    if let Some(existing) = metadata
+        .torrents
+        .iter_mut()
+        .find(|existing| existing.info_hash_hex == entry.info_hash_hex)
+    {
+        *existing = entry;
+    } else {
+        metadata.torrents.push(entry);
     }
 }
 
@@ -1307,6 +1497,14 @@ pub fn load_settings() -> io::Result<Settings> {
 
 pub fn save_settings(settings: &Settings) -> io::Result<()> {
     resolve_config_backend()?.save_settings(settings)
+}
+
+pub fn load_torrent_metadata() -> io::Result<TorrentMetadataConfig> {
+    resolve_config_backend()?.load_torrent_metadata()
+}
+
+pub fn upsert_torrent_metadata(entry: TorrentMetadataEntry) -> io::Result<()> {
+    resolve_config_backend()?.upsert_torrent_metadata(entry)
 }
 
 pub fn shared_host_id() -> Option<String> {
@@ -1848,6 +2046,7 @@ mod tests {
             paths: NormalConfigPaths {
                 config_dir: dir.path().to_path_buf(),
                 settings_path: dir.path().join("settings.toml"),
+                metadata_path: dir.path().join("torrent_metadata.toml"),
                 backup_dir: dir.path().join("backups_settings_files"),
             },
         };
@@ -1865,6 +2064,7 @@ mod tests {
         assert_eq!(loaded.client_port, 7777);
         assert_eq!(loaded.global_download_limit_bps, 1234);
         assert!(backend.paths.settings_path.exists());
+        assert!(backend.paths.metadata_path.exists());
     }
 
     #[test]
@@ -1876,6 +2076,7 @@ mod tests {
                 root_dir: dir.path().to_path_buf(),
                 settings_path: dir.path().join("settings.toml"),
                 catalog_path: dir.path().join("catalog.toml"),
+                metadata_path: dir.path().join("torrent_metadata.toml"),
                 host_path: dir.path().join("hosts").join("node-a.toml"),
                 host_id: "node-a".to_string(),
             },
@@ -1909,6 +2110,8 @@ mod tests {
         let host_contents = fs::read_to_string(&backend.paths.host_path).expect("read host file");
         let catalog_contents =
             fs::read_to_string(&backend.paths.catalog_path).expect("read catalog file");
+        let metadata_contents =
+            fs::read_to_string(&backend.paths.metadata_path).expect("read metadata file");
 
         assert!(host_contents.contains("client_port = 9090"));
         assert!(!host_contents.contains("client_id"));
@@ -1919,6 +2122,8 @@ mod tests {
         assert!(catalog_contents.contains("[[torrents]]"));
         assert!(catalog_contents.contains("name = \"Library Item\""));
         assert!(catalog_contents.contains("torrent_or_magnet = \"shared:torrents/0123456789abcdef0123456789abcdef01234567.torrent\""));
+        assert!(metadata_contents.contains("[[torrents]]"));
+        assert!(metadata_contents.contains("torrent_name = \"Library Item\""));
         assert!(!catalog_contents.contains("global_upload_limit_bps"));
         assert_eq!(
             reloaded.torrents[0].torrent_or_magnet,
@@ -1936,6 +2141,7 @@ mod tests {
                 root_dir: shared_root.clone(),
                 settings_path: shared_root.join("settings.toml"),
                 catalog_path: shared_root.join("catalog.toml"),
+                metadata_path: shared_root.join("torrent_metadata.toml"),
                 host_path: shared_root.join("hosts").join("windows-node.toml"),
                 host_id: "windows-node".to_string(),
             },
@@ -1974,6 +2180,7 @@ mod tests {
                 root_dir: dir.path().to_path_buf(),
                 settings_path: dir.path().join("settings.toml"),
                 catalog_path: dir.path().join("catalog.toml"),
+                metadata_path: dir.path().join("torrent_metadata.toml"),
                 host_path: dir.path().join("hosts").join("node-a.toml"),
                 host_id: "node-a".to_string(),
             },
@@ -2011,6 +2218,43 @@ mod tests {
         assert!(settings_contents.contains("client_id = \"shared-default\""));
         assert!(settings_contents.contains("global_download_limit_bps = 9876"));
         assert!(host_contents.contains("client_id = \"host-override\""));
+    }
+
+    #[test]
+    fn test_metadata_syncs_file_priorities_from_settings() {
+        let dir = tempdir().expect("create tempdir");
+        let backend = NormalConfigBackend {
+            paths: NormalConfigPaths {
+                config_dir: dir.path().to_path_buf(),
+                settings_path: dir.path().join("settings.toml"),
+                metadata_path: dir.path().join("torrent_metadata.toml"),
+                backup_dir: dir.path().join("backups_settings_files"),
+            },
+        };
+        let settings = Settings {
+            torrents: vec![TorrentSettings {
+                torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+                    .to_string(),
+                name: "Sample Alpha".to_string(),
+                file_priorities: HashMap::from([(1, FilePriority::Skip)]),
+                ..TorrentSettings::default()
+            }],
+            ..Settings::default()
+        };
+
+        backend.save_settings(&settings).expect("save settings");
+        let metadata: TorrentMetadataConfig =
+            read_toml_or_default(&backend.paths.metadata_path).expect("load metadata");
+
+        assert_eq!(metadata.torrents.len(), 1);
+        assert_eq!(
+            metadata.torrents[0].info_hash_hex,
+            "1111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            metadata.torrents[0].file_priorities.get(&1),
+            Some(&FilePriority::Skip)
+        );
     }
 
     fn watch_env_guard() -> &'static std::sync::Mutex<()> {

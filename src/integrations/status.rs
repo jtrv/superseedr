@@ -18,9 +18,19 @@ pub struct AppOutputState {
     pub ram_usage_percent: f32,
     pub total_download_bps: u64,
     pub total_upload_bps: u64,
+    pub status_config: StatusConfig,
     #[serde(serialize_with = "serialize_torrents_hex")]
     pub torrents: HashMap<Vec<u8>, TorrentMetrics>,
-    pub settings: Settings,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct StatusConfig {
+    pub client_port: u16,
+    pub output_status_interval: u64,
+    pub shared_mode: bool,
+    pub host_id: Option<String>,
+    pub default_download_folder: Option<PathBuf>,
+    pub watch_folder: Option<PathBuf>,
 }
 
 pub fn serialize_torrents_hex<S>(
@@ -162,8 +172,8 @@ pub fn offline_output_state(settings: &Settings) -> AppOutputState {
         ram_usage_percent: 0.0,
         total_download_bps: 0,
         total_upload_bps: 0,
+        status_config: status_config_from_settings(settings),
         torrents,
-        settings: settings.clone(),
     }
 }
 
@@ -190,6 +200,17 @@ fn torrent_metrics_from_settings(
     })
 }
 
+pub fn status_config_from_settings(settings: &Settings) -> StatusConfig {
+    StatusConfig {
+        client_port: settings.client_port,
+        output_status_interval: settings.output_status_interval,
+        shared_mode: crate::config::is_shared_config_mode(),
+        host_id: crate::config::shared_host_id(),
+        default_download_folder: settings.default_download_folder.clone(),
+        watch_folder: settings.watch_folder.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,19 +235,21 @@ mod tests {
 
         torrents.insert(info_hash_key, metrics);
 
-        let settings = Settings {
-            client_port: 8080,
-            ..Default::default()
-        };
-
         let output = AppOutputState {
             run_time: 100,
             cpu_usage: 5.5,
             ram_usage_percent: 10.0,
             total_download_bps: 1024,
             total_upload_bps: 512,
+            status_config: StatusConfig {
+                client_port: 8080,
+                output_status_interval: 15,
+                shared_mode: false,
+                host_id: None,
+                default_download_folder: None,
+                watch_folder: None,
+            },
             torrents,
-            settings,
         };
 
         let json = serde_json::to_string(&output).expect("Serialization failed");
@@ -248,6 +271,10 @@ mod tests {
     #[test]
     fn offline_output_json_builds_snapshot_from_settings() {
         let settings = Settings {
+            client_port: 6681,
+            output_status_interval: 10,
+            watch_folder: Some("/watch".into()),
+            default_download_folder: Some("/downloads".into()),
             torrents: vec![TorrentSettings {
                 torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
                     .to_string(),
@@ -260,7 +287,11 @@ mod tests {
 
         let json = offline_output_json(&settings).expect("serialize offline output");
 
-        assert!(json.contains("\"settings\""));
+        assert!(json.contains("\"status_config\""));
+        assert!(json.contains("\"client_port\": 6681"));
+        assert!(json.contains("\"output_status_interval\": 10"));
+        assert!(json.contains("\"watch_folder\": \"/watch\""));
+        assert!(json.contains("\"default_download_folder\": \"/downloads\""));
         assert!(json.contains("\"1111111111111111111111111111111111111111\""));
         assert!(json.contains("Offline settings snapshot"));
     }

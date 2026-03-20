@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::FilePriority;
-use crate::config::{Settings, TorrentSettings};
+use crate::config::{load_torrent_metadata, Settings, TorrentMetadataEntry, TorrentSettings};
 use crate::integrations::control::{ControlPriorityTarget, ControlRequest};
 use crate::persistence::event_journal::{ControlOrigin, EventDetails};
 use crate::torrent_file::parser::from_bytes;
@@ -77,6 +77,10 @@ pub fn control_event_details(request: &ControlRequest, origin: ControlOrigin) ->
 pub fn load_torrent_file_list_for_settings(
     torrent_settings: &TorrentSettings,
 ) -> Result<Vec<(Vec<String>, u64)>, String> {
+    if let Some(metadata_files) = load_torrent_file_list_from_metadata(torrent_settings)? {
+        return Ok(metadata_files);
+    }
+
     if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
         return Err(
             "This torrent does not have a persisted .torrent source for file path lookup"
@@ -97,6 +101,47 @@ pub fn load_torrent_file_list_for_settings(
         )
     })?;
     Ok(torrent.file_list())
+}
+
+fn load_torrent_file_list_from_metadata(
+    torrent_settings: &TorrentSettings,
+) -> Result<Option<Vec<(Vec<String>, u64)>>, String> {
+    let Some(info_hash) = info_hash_from_torrent_source(&torrent_settings.torrent_or_magnet) else {
+        return Ok(None);
+    };
+    let info_hash_hex = hex::encode(info_hash);
+    let metadata = match load_torrent_metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    let Some(entry) = metadata
+        .torrents
+        .iter()
+        .find(|entry| entry.info_hash_hex == info_hash_hex)
+    else {
+        return Ok(None);
+    };
+    if entry.files.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(file_list_from_metadata_entry(entry)))
+}
+
+fn file_list_from_metadata_entry(entry: &TorrentMetadataEntry) -> Vec<(Vec<String>, u64)> {
+    entry
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.relative_path
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .map(|segment| segment.to_string())
+                    .collect(),
+                file.length,
+            )
+        })
+        .collect()
 }
 
 pub fn resolve_priority_file_index(

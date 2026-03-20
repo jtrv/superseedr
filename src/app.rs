@@ -14,10 +14,10 @@ use strum_macros::EnumIter;
 
 use crate::torrent_manager::DiskIoOperation;
 
-use crate::config::{get_app_paths, load_settings, save_settings};
+use crate::config::{get_app_paths, load_settings, save_settings, upsert_torrent_metadata};
 use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
-    TorrentSettings, TorrentSortColumn,
+    TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings, TorrentSortColumn,
 };
 use crate::config_reconcile::{
     configured_watch_path_changes, diff_torrent_configs, TorrentConfigChange,
@@ -2804,10 +2804,15 @@ impl App {
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
                 self.integrity_scheduler.on_metadata_loaded(&info_hash);
 
+                let mut file_priorities = HashMap::new();
                 if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
                     display.latest_state.is_multi_file = !torrent.info.files.is_empty();
                     display.latest_state.file_count = Some(torrent_file_count(&torrent));
+                    display.latest_state.total_size = torrent.info.total_length().max(0) as u64;
+                    file_priorities = display.latest_state.file_priorities.clone();
                 }
+
+                self.persist_torrent_metadata_snapshot(&info_hash, &torrent, &file_priorities);
 
                 self.dispatch_integrity_probe_batches();
 
@@ -3563,6 +3568,8 @@ impl App {
             }
         }
 
+        self.persist_torrent_metadata_snapshot(&info_hash, &torrent, &file_priorities);
+
         let number_of_pieces_total = if !torrent.info.pieces.is_empty() {
             (torrent.info.pieces.len() / 20) as u32
         } else {
@@ -3823,6 +3830,37 @@ impl App {
 
     fn append_event_journal_entry(&mut self, entry: EventJournalEntry) {
         append_event_journal_entry(&mut self.app_state.event_journal_state, entry);
+    }
+
+    fn persist_torrent_metadata_snapshot(
+        &self,
+        info_hash: &[u8],
+        torrent: &crate::torrent_file::Torrent,
+        file_priorities: &HashMap<usize, FilePriority>,
+    ) {
+        let entry = TorrentMetadataEntry {
+            info_hash_hex: hex::encode(info_hash),
+            torrent_name: torrent.info.name.clone(),
+            total_size: torrent.info.total_length().max(0) as u64,
+            is_multi_file: !torrent.info.files.is_empty(),
+            files: torrent
+                .file_list()
+                .into_iter()
+                .map(|(parts, length)| TorrentMetadataFileEntry {
+                    relative_path: parts.join("/"),
+                    length,
+                })
+                .collect(),
+            file_priorities: file_priorities.clone(),
+        };
+
+        if let Err(error) = upsert_torrent_metadata(entry) {
+            tracing_event!(
+                Level::WARN,
+                "Failed to persist torrent metadata snapshot: {}",
+                error
+            );
+        }
     }
 
     fn record_ingest_queued(
@@ -4594,8 +4632,8 @@ impl App {
             ram_usage_percent: s.ram_usage_percent,
             total_download_bps: s.avg_download_history.last().copied().unwrap_or(0),
             total_upload_bps: s.avg_upload_history.last().copied().unwrap_or(0),
+            status_config: status::status_config_from_settings(&self.client_configs),
             torrents: torrent_metrics,
-            settings: self.client_configs.clone(),
         }
     }
 
