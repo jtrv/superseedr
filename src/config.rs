@@ -17,6 +17,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::app::FilePriority;
 use crate::app::TorrentControlState;
+use crate::fs_atomic::{write_string_atomically, write_toml_atomically};
 use crate::theme::ThemeName;
 
 use strum_macros::EnumCount;
@@ -393,7 +394,6 @@ impl Default for HostConfig {
 }
 #[derive(Clone, Debug)]
 struct NormalConfigPaths {
-    config_dir: PathBuf,
     settings_path: PathBuf,
     metadata_path: PathBuf,
     backup_dir: PathBuf,
@@ -826,7 +826,6 @@ fn resolve_config_backend() -> io::Result<ConfigBackend> {
             settings_path: config_dir.join("settings.toml"),
             metadata_path: config_dir.join("torrent_metadata.toml"),
             backup_dir: config_dir.join("backups_settings_files"),
-            config_dir,
         },
     }))
 }
@@ -1010,16 +1009,25 @@ fn ensure_fingerprint_matches(
     Ok(())
 }
 
-fn write_toml_atomically<T: Serialize>(path: &Path, value: &T) -> io::Result<Option<String>> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
+fn write_toml_atomically_with_fingerprint<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> io::Result<Option<String>> {
     let content = toml::to_string_pretty(value).map_err(io::Error::other)?;
-    let tmp_path = path.with_extension("toml.tmp");
-    fs::write(&tmp_path, &content)?;
-    fs::rename(&tmp_path, path)?;
+    write_string_atomically(path, &content)?;
     Ok(Some(hex::encode(Sha1::digest(content.as_bytes()))))
+}
+
+fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<()> {
+    let revision_path = root_dir.join("cluster.revision");
+    let revision = format!(
+        "{}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    write_string_atomically(&revision_path, &revision)
 }
 
 fn clear_shared_config_state() {
@@ -1082,16 +1090,14 @@ impl NormalConfigBackend {
         let layered = LayeredConfig::from_flat_settings(settings);
         let flat_settings = layered.resolve_flat_settings()?;
         let content = toml::to_string_pretty(&flat_settings).map_err(io::Error::other)?;
-        let temp_file_path = self.paths.config_dir.join("settings.toml.tmp");
-        fs::write(&temp_file_path, &content)?;
-        fs::rename(&temp_file_path, &self.paths.settings_path)?;
+        write_string_atomically(&self.paths.settings_path, &content)?;
         fs::write(backup_path, content)?;
         cleanup_old_backups(&self.paths.backup_dir, 64)?;
 
         let existing_metadata: TorrentMetadataConfig =
             read_toml_or_default(&self.paths.metadata_path)?;
         let next_metadata = sync_torrent_metadata_with_settings(existing_metadata, &flat_settings);
-        let _ = write_toml_atomically(&self.paths.metadata_path, &next_metadata)?;
+        let _ = write_toml_atomically_with_fingerprint(&self.paths.metadata_path, &next_metadata)?;
 
         Ok(())
     }
@@ -1189,24 +1195,32 @@ impl SharedConfigBackend {
 
         if next_layered.settings != state.layered.settings || state.settings_fingerprint.is_none() {
             state.settings_fingerprint =
-                write_toml_atomically(&self.paths.settings_path, &next_layered.settings)?;
+                write_toml_atomically_with_fingerprint(
+                    &self.paths.settings_path,
+                    &next_layered.settings,
+                )?;
         }
 
         if next_layered.catalog != state.layered.catalog || state.catalog_fingerprint.is_none() {
             state.catalog_fingerprint =
-                write_toml_atomically(&self.paths.catalog_path, &next_layered.catalog)?;
+                write_toml_atomically_with_fingerprint(
+                    &self.paths.catalog_path,
+                    &next_layered.catalog,
+                )?;
         }
 
         let existing_metadata: TorrentMetadataConfig =
             read_toml_or_default(&self.paths.metadata_path)?;
         let next_metadata = sync_torrent_metadata_with_settings(existing_metadata, settings);
         state.metadata_fingerprint =
-            write_toml_atomically(&self.paths.metadata_path, &next_metadata)?;
+            write_toml_atomically_with_fingerprint(&self.paths.metadata_path, &next_metadata)?;
 
         if next_layered.host != state.layered.host || state.host_fingerprint.is_none() {
             state.host_fingerprint =
-                write_toml_atomically(&self.paths.host_path, &next_layered.host)?;
+                write_toml_atomically_with_fingerprint(&self.paths.host_path, &next_layered.host)?;
         }
+
+        write_shared_cluster_revision_marker(&self.paths.root_dir)?;
 
         state.layered = next_layered;
         state.resolved_settings = settings.clone();
@@ -1253,7 +1267,7 @@ impl ConfigBackend {
                 let mut metadata: TorrentMetadataConfig =
                     read_toml_or_default(&backend.paths.metadata_path)?;
                 upsert_torrent_metadata_entry(&mut metadata, entry);
-                let _ = write_toml_atomically(&backend.paths.metadata_path, &metadata)?;
+                let _ = write_toml_atomically_with_fingerprint(&backend.paths.metadata_path, &metadata)?;
                 Ok(())
             }
             ConfigBackend::Shared(backend) => {
@@ -1274,7 +1288,7 @@ impl ConfigBackend {
                     read_toml_or_default(&backend.paths.metadata_path)?;
                 upsert_torrent_metadata_entry(&mut metadata, entry);
                 state.metadata_fingerprint =
-                    write_toml_atomically(&backend.paths.metadata_path, &metadata)?;
+                    write_toml_atomically_with_fingerprint(&backend.paths.metadata_path, &metadata)?;
                 Ok(())
             }
         }
@@ -1325,6 +1339,10 @@ pub fn shared_torrents_path() -> Option<PathBuf> {
     shared_config_root().map(|root| root.join("torrents"))
 }
 
+pub fn shared_root_path() -> Option<PathBuf> {
+    shared_config_root()
+}
+
 pub fn shared_data_path() -> Option<PathBuf> {
     shared_config_root().map(|root| root.join("data"))
 }
@@ -1342,7 +1360,12 @@ pub fn shared_processed_path() -> Option<PathBuf> {
 }
 
 pub fn shared_status_path() -> Option<PathBuf> {
-    shared_config_root().map(|root| root.join("status").join("app_state.json"))
+    let host_id = shared_host_id()?;
+    shared_config_root().map(|root| root.join("status").join(format!("{host_id}.json")))
+}
+
+pub fn shared_cluster_revision_path() -> Option<PathBuf> {
+    shared_config_root().map(|root| root.join("cluster.revision"))
 }
 
 pub fn shared_lock_path() -> Option<PathBuf> {
@@ -1420,6 +1443,9 @@ pub fn ensure_watch_directories(settings: &Settings) -> io::Result<()> {
         fs::create_dir_all(path)?;
     }
     if let Some(path) = shared_status_path().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        fs::create_dir_all(path)?;
+    }
+    if let Some(path) = shared_cluster_revision_path().and_then(|p| p.parent().map(Path::to_path_buf)) {
         fs::create_dir_all(path)?;
     }
     for watch_path in configured_watch_paths(settings) {
@@ -1965,9 +1991,28 @@ mod tests {
             ..HostConfig::default()
         };
 
-        let fingerprint = write_toml_atomically(&path, &host).expect("write toml");
+        let fingerprint =
+            write_toml_atomically_with_fingerprint(&path, &host).expect("write toml");
         assert!(path.exists());
         assert!(fingerprint.is_some());
+    }
+
+    #[test]
+    fn test_write_shared_cluster_revision_marker_writes_file_atomically() {
+        let dir = tempdir().expect("create tempdir");
+        let revision_path = dir.path().join("cluster.revision");
+
+        write_shared_cluster_revision_marker(dir.path()).expect("write first revision");
+        let first = fs::read_to_string(&revision_path).expect("read first revision");
+        assert!(!first.trim().is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        write_shared_cluster_revision_marker(dir.path()).expect("write second revision");
+        let second = fs::read_to_string(&revision_path).expect("read second revision");
+        assert!(!second.trim().is_empty());
+        assert_ne!(first, second);
+        assert!(!revision_path.with_extension("revision.tmp").exists());
     }
 
     #[test]
@@ -1975,7 +2020,6 @@ mod tests {
         let dir = tempdir().expect("create tempdir");
         let backend = NormalConfigBackend {
             paths: NormalConfigPaths {
-                config_dir: dir.path().to_path_buf(),
                 settings_path: dir.path().join("settings.toml"),
                 metadata_path: dir.path().join("torrent_metadata.toml"),
                 backup_dir: dir.path().join("backups_settings_files"),
@@ -2047,6 +2091,7 @@ mod tests {
             read_toml_or_default(&backend.paths.catalog_path).expect("read catalog file");
         let metadata_contents =
             fs::read_to_string(&backend.paths.metadata_path).expect("read metadata file");
+        let revision_path = backend.paths.root_dir.join("cluster.revision");
 
         assert_eq!(host_config.client_port, 9090);
         assert_eq!(host_config.client_id, None);
@@ -2069,6 +2114,7 @@ mod tests {
         );
         assert!(metadata_contents.contains("[[torrents]]"));
         assert!(metadata_contents.contains("torrent_name = \"Library Item\""));
+        assert!(revision_path.exists());
         assert_eq!(
             reloaded.torrents[0].torrent_or_magnet,
             shared_torrent_path.to_string_lossy().to_string()
@@ -2157,7 +2203,6 @@ mod tests {
         let dir = tempdir().expect("create tempdir");
         let backend = NormalConfigBackend {
             paths: NormalConfigPaths {
-                config_dir: dir.path().to_path_buf(),
                 settings_path: dir.path().join("settings.toml"),
                 metadata_path: dir.path().join("torrent_metadata.toml"),
                 backup_dir: dir.path().join("backups_settings_files"),

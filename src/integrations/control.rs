@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::FilePriority;
+use crate::fs_atomic::write_string_atomically;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::fs;
@@ -88,9 +89,7 @@ pub fn write_control_request(request: &ControlRequest, watch_path: &Path) -> io:
     let content_hash = hex::encode(Sha1::digest(content.as_bytes()));
     let file_stem = format!("control-{}-{}", now_ms, content_hash);
     let final_path = watch_path.join(format!("{}.control", file_stem));
-    let tmp_path = watch_path.join(format!("{}.control.tmp", file_stem));
-    fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, &final_path)?;
+    write_string_atomically(&final_path, &content)?;
     Ok(final_path)
 }
 

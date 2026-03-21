@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::config::get_app_paths;
+use crate::fs_atomic::write_bytes_atomically;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Cursor, Read};
@@ -14,7 +15,6 @@ pub const MINUTE_1M_CAP: usize = 48 * 60; // 48 hours
 pub const MINUTE_15M_CAP: usize = 30 * 24 * 4; // 30 days
 pub const HOUR_1H_CAP: usize = 365 * 24; // 365 days
 const NETWORK_HISTORY_FILE_NAME: &str = "network_history.bin";
-const NETWORK_HISTORY_TEMP_EXTENSION: &str = "bin.tmp";
 const NETWORK_HISTORY_MAGIC: &[u8; 8] = b"SSNHBIN1";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -469,18 +469,9 @@ fn save_network_history_state_to_path(
     state: &NetworkHistoryPersistedState,
     path: &Path,
 ) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     let sparse_state = sparse_state_for_persistence(state);
     let content = encode_network_history_state(&sparse_state);
-    let tmp_path = path.with_extension(NETWORK_HISTORY_TEMP_EXTENSION);
-
-    fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, path)?;
-
-    Ok(())
+    write_bytes_atomically(path, &content)
 }
 
 #[cfg(test)]

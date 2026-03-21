@@ -103,6 +103,13 @@ pub fn path_to_command(path: &Path) -> Option<AppCommand> {
         return Some(AppCommand::PortFileChanged(path.to_path_buf()));
     }
 
+    if path
+        .file_name()
+        .is_some_and(|name| name == "cluster.revision")
+    {
+        return Some(AppCommand::ReloadClusterState(path.to_path_buf()));
+    }
+
     let ext = path.extension().and_then(|s| s.to_str())?;
     match ext {
         "torrent" => Some(AppCommand::AddTorrentFromFile(path.to_path_buf())),
@@ -250,6 +257,11 @@ mod tests {
         with_dummy_file("forwarded_port", |path| {
             let cmd = path_to_command(path);
             assert!(matches!(cmd, Some(AppCommand::PortFileChanged(_))));
+        });
+
+        with_dummy_file("cluster.revision", |path| {
+            let cmd = path_to_command(path);
+            assert!(matches!(cmd, Some(AppCommand::ReloadClusterState(_))));
         });
 
         // Test shutdown command

@@ -17,9 +17,9 @@ use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
     get_app_paths, resolve_host_watch_path, save_settings, shared_host_id, shared_inbox_path,
-    upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry,
-    Settings, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings,
-    TorrentSortColumn,
+    shared_root_path, upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode,
+    RssHistoryEntry, Settings, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry,
+    TorrentSettings, TorrentSortColumn,
 };
 use crate::control_service::{
     control_event_details, find_torrent_settings_index_by_info_hash, resolve_priority_file_index,
@@ -459,6 +459,7 @@ pub enum AppCommand {
     AddTorrentFromFile(PathBuf),
     AddTorrentFromPathFile(PathBuf),
     AddMagnetFromFile(PathBuf),
+    ReloadClusterState(PathBuf),
     ControlRequest {
         path: PathBuf,
         request: ControlRequest,
@@ -1084,14 +1085,10 @@ impl App {
         client_configs: Settings,
         runtime_mode: AppRuntimeMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = if runtime_mode.is_shared_follower() {
-            None
-        } else {
-            Some(
-                tokio::net::TcpListener::bind(format!("0.0.0.0:{}", client_configs.client_port))
-                    .await?,
-            )
-        };
+        let listener = Some(
+            tokio::net::TcpListener::bind(format!("0.0.0.0:{}", client_configs.client_port))
+                .await?,
+        );
 
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
@@ -1325,6 +1322,13 @@ impl App {
         if let Some(host_watch_path) = resolve_host_watch_path(&client_configs) {
             watched_paths.push(host_watch_path);
         }
+        if runtime_mode.is_shared() {
+            if let Some(shared_root) = shared_root_path() {
+                if !watched_paths.iter().any(|path| path == &shared_root) {
+                    watched_paths.push(shared_root);
+                }
+            }
+        }
         if runtime_mode.is_shared_leader() {
             if let Some(shared_inbox) = shared_inbox_path() {
                 if !watched_paths.iter().any(|path| path == &shared_inbox) {
@@ -1340,8 +1344,7 @@ impl App {
         }
 
         let (notify_tx, notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
-        let watcher =
-            watcher::create_watcher(&watched_paths, !runtime_mode.is_shared_follower(), notify_tx)?;
+        let watcher = watcher::create_watcher(&watched_paths, true, notify_tx)?;
         let initial_tuning_deadline =
             time::Instant::now() + Duration::from_secs(tuning_controller.cadence_secs());
 
@@ -1395,41 +1398,12 @@ impl App {
                 rss_settings_rx,
                 app.shutdown_tx.clone(),
             );
+        }
 
-            let mut torrents_to_load = app.client_configs.torrents.clone();
-            torrents_to_load.sort_by_key(|t| !t.validation_status);
-            for torrent_config in torrents_to_load {
-                if !should_load_persisted_torrent(&torrent_config) {
-                    tracing_event!(
-                        Level::WARN,
-                        torrent = %torrent_config.torrent_or_magnet,
-                        "Skipping persisted torrent left in transient Deleting state during startup"
-                    );
-                    continue;
-                }
-                if torrent_config.torrent_or_magnet.starts_with("magnet:") {
-                    app.add_magnet_torrent(
-                        torrent_config.name.clone(),
-                        torrent_config.torrent_or_magnet.clone(),
-                        torrent_config.download_path.clone(),
-                        torrent_config.validation_status,
-                        torrent_config.torrent_control_state,
-                        torrent_config.file_priorities,
-                        torrent_config.container_name,
-                    )
-                    .await;
-                } else {
-                    app.add_torrent_from_file(
-                        PathBuf::from(&torrent_config.torrent_or_magnet),
-                        torrent_config.download_path.clone(),
-                        torrent_config.validation_status,
-                        torrent_config.torrent_control_state,
-                        torrent_config.file_priorities.clone(),
-                        torrent_config.container_name,
-                    )
-                    .await;
-                }
-            }
+        let mut torrents_to_load = app.client_configs.torrents.clone();
+        torrents_to_load.sort_by_key(|t| !t.validation_status);
+        for torrent_config in torrents_to_load {
+            app.load_runtime_torrent_from_settings(torrent_config).await;
         }
 
         if app.app_state.torrents.is_empty() && app.app_state.lifetime_downloaded_from_config == 0 {
@@ -1910,7 +1884,41 @@ impl App {
         self.dispatch_integrity_probe_batches();
     }
 
-    fn sync_runtime_torrents_from_settings(
+    async fn load_runtime_torrent_from_settings(&mut self, torrent_config: TorrentSettings) {
+        if !should_load_persisted_torrent(&torrent_config) {
+            tracing_event!(
+                Level::WARN,
+                torrent = %torrent_config.torrent_or_magnet,
+                "Skipping persisted torrent left in transient Deleting state during startup or convergence"
+            );
+            return;
+        }
+
+        if torrent_config.torrent_or_magnet.starts_with("magnet:") {
+            self.add_magnet_torrent(
+                torrent_config.name.clone(),
+                torrent_config.torrent_or_magnet.clone(),
+                torrent_config.download_path.clone(),
+                torrent_config.validation_status,
+                torrent_config.torrent_control_state,
+                torrent_config.file_priorities,
+                torrent_config.container_name,
+            )
+            .await;
+        } else {
+            self.add_torrent_from_file(
+                PathBuf::from(&torrent_config.torrent_or_magnet),
+                torrent_config.download_path.clone(),
+                torrent_config.validation_status,
+                torrent_config.torrent_control_state,
+                torrent_config.file_priorities.clone(),
+                torrent_config.container_name,
+            )
+            .await;
+        }
+    }
+
+    async fn sync_runtime_torrents_from_settings(
         &mut self,
         old_settings: &Settings,
         new_settings: &Settings,
@@ -1928,6 +1936,11 @@ impl App {
             .filter_map(|torrent| {
                 info_hash_from_torrent_source(&torrent.torrent_or_magnet).map(|hash| (hash, torrent))
             })
+            .collect();
+        let added_torrents: Vec<TorrentSettings> = new_by_hash
+            .iter()
+            .filter(|(info_hash, _)| !old_by_hash.contains_key(*info_hash))
+            .map(|(_, torrent)| (*torrent).clone())
             .collect();
         let default_download_changed =
             old_settings.default_download_folder != new_settings.default_download_folder;
@@ -1980,6 +1993,7 @@ impl App {
                     }
                 }
             }
+
         }
 
         for info_hash in old_by_hash.keys() {
@@ -1996,6 +2010,10 @@ impl App {
                 self.remove_torrent_runtime(info_hash);
             }
         }
+
+        for torrent in added_torrents {
+            self.load_runtime_torrent_from_settings(torrent).await;
+        }
     }
 
     async fn apply_settings_update(&mut self, new_settings: Settings, persist: bool) {
@@ -2003,7 +2021,8 @@ impl App {
         self.client_configs = new_settings.clone();
         let _ = self.rss_settings_tx.send(self.client_configs.clone());
         let rss_changed = rss_settings_changed(&old_settings, &new_settings);
-        self.sync_runtime_torrents_from_settings(&old_settings, &new_settings);
+        self.sync_runtime_torrents_from_settings(&old_settings, &new_settings)
+            .await;
 
         if let Err(error) = crate::config::ensure_watch_directories(&self.client_configs) {
             tracing::warn!(
@@ -2595,6 +2614,23 @@ impl App {
             AppCommand::UpdateConfig(new_settings) => {
                 self.apply_settings_update(new_settings, true).await;
             }
+            AppCommand::ReloadClusterState(_path) => match crate::config::load_settings() {
+                Ok(new_settings) => {
+                    if new_settings != self.client_configs {
+                        self.apply_settings_update(new_settings, false).await;
+                    }
+                }
+                Err(error) => {
+                    tracing_event!(
+                        Level::ERROR,
+                        "Failed to reload shared cluster state: {}",
+                        error
+                    );
+                    self.app_state.system_error =
+                        Some(format!("Failed to reload shared cluster state: {}", error));
+                    self.app_state.ui.needs_redraw = true;
+                }
+            },
             AppCommand::UpdateVersionAvailable(latest_version) => {
                 self.app_state.update_available = Some(latest_version);
             }
@@ -2939,10 +2975,6 @@ impl App {
     }
 
     async fn handle_port_change(&mut self, path: PathBuf) {
-        if self.runtime_mode.is_shared_follower() {
-            return;
-        }
-
         tracing_event!(Level::DEBUG, "Processing port file change...");
         let port_str = match fs::read_to_string(&path) {
             Ok(s) => s,
@@ -3590,18 +3622,20 @@ impl App {
             };
         }
 
-        if let Some(shared_path) = &shared_torrent_path {
-            if let Err(e) = persist_torrent_copy(shared_path, "shared config directory") {
-                let message = format!(
-                    "Failed to persist torrent copy in shared config directory: {}",
-                    e
-                );
-                tracing_event!(Level::ERROR, "{}", message);
-                return CommandIngestResult::Failed {
-                    info_hash: Some(info_hash),
-                    torrent_name: Some(torrent.info.name.clone()),
-                    message,
-                };
+        if !self.runtime_mode.is_shared_follower() {
+            if let Some(shared_path) = &shared_torrent_path {
+                if let Err(e) = persist_torrent_copy(shared_path, "shared config directory") {
+                    let message = format!(
+                        "Failed to persist torrent copy in shared config directory: {}",
+                        e
+                    );
+                    tracing_event!(Level::ERROR, "{}", message);
+                    return CommandIngestResult::Failed {
+                        info_hash: Some(info_hash),
+                        torrent_name: Some(torrent.info.name.clone()),
+                        message,
+                    };
+                }
             }
         }
 
@@ -3911,6 +3945,10 @@ impl App {
         torrent: &crate::torrent_file::Torrent,
         file_priorities: &HashMap<usize, FilePriority>,
     ) {
+        if self.runtime_mode.is_shared_follower() {
+            return;
+        }
+
         let entry = TorrentMetadataEntry {
             info_hash_hex: hex::encode(info_hash),
             torrent_name: torrent.info.name.clone(),
@@ -4344,6 +4382,7 @@ impl App {
             AppCommand::AddTorrentFromFile(path)
             | AppCommand::AddTorrentFromPathFile(path)
             | AppCommand::AddMagnetFromFile(path)
+            | AppCommand::ReloadClusterState(path)
             | AppCommand::ControlRequest { path, .. }
             | AppCommand::ClientShutdown(path)
             | AppCommand::PortFileChanged(path) => Some(path),
@@ -4426,10 +4465,6 @@ impl App {
     }
 
     async fn rebind_listener(&mut self, new_port: u16) {
-        if self.runtime_mode.is_shared_follower() {
-            return;
-        }
-
         match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
             Ok(new_listener) => {
                 self.listener = Some(new_listener);
@@ -4714,10 +4749,6 @@ impl App {
     }
 
     pub fn dump_status_to_file(&self) {
-        if self.runtime_mode.is_shared_follower() {
-            return;
-        }
-
         status::dump(self.generate_output_state(), self.shutdown_tx.clone());
     }
 
@@ -6391,6 +6422,48 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             app.client_configs.torrents[0].torrent_control_state,
+            TorrentControlState::Paused
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn shared_follower_starts_active_and_converges_new_catalog_torrent() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::SharedFollower)
+            .await
+            .expect("build shared follower app");
+
+        assert!(app.listener.is_some());
+
+        let next_settings = crate::config::Settings {
+            client_port: app.client_configs.client_port,
+            torrents: vec![crate::config::TorrentSettings {
+                torrent_or_magnet:
+                    "magnet:?xt=urn:btih:1111111111111111111111111111111111111111".to_string(),
+                name: "Sample Delta".to_string(),
+                torrent_control_state: TorrentControlState::Paused,
+                ..Default::default()
+            }],
+            ..app.client_configs.clone()
+        };
+
+        app.apply_settings_update(next_settings, false).await;
+
+        assert_eq!(app.app_state.torrents.len(), 1);
+        let metrics = app
+            .app_state
+            .torrents
+            .values()
+            .next()
+            .expect("cluster follower should load converged torrent");
+        assert_eq!(metrics.latest_state.torrent_name, "Sample Delta");
+        assert_eq!(
+            metrics.latest_state.torrent_control_state,
             TorrentControlState::Paused
         );
 

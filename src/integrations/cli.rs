@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::FilePriority;
+use crate::fs_atomic::write_bytes_atomically;
 use crate::integrations::control::{write_control_request, ControlPriorityTarget, ControlRequest};
 use crate::integrations::status::status_file_path;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -86,27 +87,17 @@ pub fn write_input_command(input_str: &str, watch_path: &Path) -> io::Result<Pat
 
         let final_filename = format!("{}.magnet", file_hash_hex);
         let final_path = watch_path.join(final_filename);
-        let temp_filename = format!("{}.magnet.tmp", file_hash_hex);
-        let temp_path = watch_path.join(temp_filename);
 
         tracing::info!(
-            "Attempting to write magnet link to temporary path: {:?}",
-            temp_path
+            "Attempting to write magnet link atomically to final path: {:?}",
+            final_path
         );
-        match fs::write(&temp_path, input_str.as_bytes()) {
+        match write_bytes_atomically(&final_path, input_str.as_bytes()) {
             Ok(_) => {
-                tracing::info!(
-                    "Atomically renaming magnet file to final path: {:?}",
-                    final_path
-                );
-                if let Err(e) = fs::rename(&temp_path, &final_path) {
-                    tracing::error!("Failed to atomically rename magnet file: {}", e);
-                    return Err(e);
-                }
                 return Ok(final_path);
             }
             Err(e) => {
-                tracing::error!("Failed to write magnet file to temporary path: {}", e);
+                tracing::error!("Failed to write magnet file atomically: {}", e);
                 return Err(e);
             }
         }
@@ -118,30 +109,20 @@ pub fn write_input_command(input_str: &str, watch_path: &Path) -> io::Result<Pat
                 let file_hash_hex = hex::encode(hash_bytes);
                 let final_filename = format!("{}.path", file_hash_hex);
                 let final_dest_path = watch_path.join(final_filename);
-                let temp_filename = format!("{}.path.tmp", file_hash_hex);
-                let temp_dest_path = watch_path.join(temp_filename);
 
                 let absolute_path_cow = absolute_path.to_string_lossy();
                 let content = absolute_path_cow.as_bytes();
 
                 tracing::info!(
-                    "Attempting to write torrent path to temporary path: {:?}",
-                    temp_dest_path
+                    "Attempting to write torrent path atomically to final path: {:?}",
+                    final_dest_path
                 );
-                match fs::write(&temp_dest_path, content) {
+                match write_bytes_atomically(&final_dest_path, content) {
                     Ok(_) => {
-                        tracing::info!(
-                            "Atomically renaming path file to final path: {:?}",
-                            final_dest_path
-                        );
-                        if let Err(e) = fs::rename(&temp_dest_path, &final_dest_path) {
-                            tracing::error!("Failed to atomically rename path file: {}", e);
-                            return Err(e);
-                        }
                         return Ok(final_dest_path);
                     }
                     Err(e) => {
-                        tracing::error!("Failed to write path file to temporary path: {}", e);
+                        tracing::error!("Failed to write path file atomically: {}", e);
                         return Err(e);
                     }
                 }

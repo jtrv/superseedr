@@ -6,6 +6,7 @@ mod command;
 mod config;
 mod control_service;
 mod errors;
+mod fs_atomic;
 mod integrations;
 mod integrity_scheduler;
 mod networking;
@@ -396,56 +397,43 @@ fn process_shared_status_request(
     settings: &Settings,
     request: &ControlRequest,
     stream: bool,
-    leader_is_running: bool,
+    _leader_is_running: bool,
 ) -> io::Result<()> {
-    let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "Could not resolve the command watch path",
-        )
-    })?;
-
     match request {
         ControlRequest::StatusNow => {
-            if leader_is_running {
-                let previous_modified_at = status_file_modified_at()?;
-                let _ = write_control_command(request, &watch_path)?;
-                let json =
-                    wait_for_status_json_after(previous_modified_at, Duration::from_secs(15))?;
-                println!("{}", json);
-                Ok(())
-            } else {
-                print_shared_status_snapshot(true)
+            match fs::read_to_string(status_file_path()?) {
+                Ok(json) => {
+                    println!("{}", json);
+                    Ok(())
+                }
+                Err(_) => {
+                    println!("{}", offline_output_json(settings)?);
+                    Ok(())
+                }
             }
         }
         ControlRequest::StatusFollowStart { interval_secs } if stream => {
-            if !leader_is_running {
-                return Err(io::Error::other(
-                    "Status follow requires an active shared-mode leader",
-                ));
-            }
-
-            let previous_modified_at = status_file_modified_at()?;
-            let _ = write_control_command(&ControlRequest::StatusNow, &watch_path)?;
-            let json = wait_for_status_json_after(previous_modified_at, Duration::from_secs(15))?;
-            println!("{}", json);
-            io::stdout().flush()?;
-
+            let mut last_modified_at = status_file_modified_at()?;
             loop {
-                std::thread::sleep(Duration::from_secs((*interval_secs).max(1)));
-                let json = fs::read_to_string(status_file_path()?)?;
+                let json = wait_for_status_json_after(
+                    last_modified_at,
+                    Duration::from_secs(interval_secs.saturating_mul(3).max(15)),
+                )?;
                 println!("{}", json);
                 io::stdout().flush()?;
+                last_modified_at = status_file_modified_at()?;
             }
         }
         ControlRequest::StatusFollowStart { .. } => {
+            let status_path = status_file_path()?;
             println!(
-                "Shared mode does not support remote status interval changes. Use `superseedr status --follow` to poll the shared status file."
+                "Cluster mode status is per-node.\nStatus file: {}",
+                status_path.display()
             );
             Ok(())
         }
         ControlRequest::StatusFollowStop => {
-            println!("Shared mode does not use remote status streaming state.");
+            println!("Cluster mode does not use shared status streaming state.");
             Ok(())
         }
         _ => unreachable!("status request handler received non-status control request"),
@@ -600,27 +588,6 @@ fn process_offline_control_request(
     Ok(())
 }
 
-fn print_shared_status_snapshot(stale: bool) -> io::Result<()> {
-    let status_path = status_file_path()?;
-    let json = fs::read_to_string(&status_path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "No shared status snapshot is available at {}: {}",
-                status_path.display(),
-                error
-            ),
-        )
-    })?;
-    if stale {
-        eprintln!(
-            "No leader is currently running. Showing the latest shared status snapshot from {}.",
-            status_path.display()
-        );
-    }
-    println!("{}", json);
-    Ok(())
-}
 
 fn record_offline_control_journal_entry(request: &ControlRequest, result: &Result<String, String>) {
     let mut journal = load_event_journal_state();

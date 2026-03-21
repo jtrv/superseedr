@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::config::get_app_paths;
+use crate::fs_atomic::write_bytes_atomically;
 use crate::persistence::network_history::{
     HOUR_1H_CAP, MINUTE_15M_CAP, MINUTE_1M_CAP, SECOND_1S_CAP,
 };
@@ -14,7 +15,6 @@ use tracing::{event as tracing_event, Level};
 
 pub const ACTIVITY_HISTORY_SCHEMA_VERSION: u32 = 1;
 const ACTIVITY_HISTORY_FILE_NAME: &str = "activity_history.bin";
-const ACTIVITY_HISTORY_TEMP_EXTENSION: &str = "bin.tmp";
 const ACTIVITY_HISTORY_MAGIC: &[u8; 8] = b"SSAHBIN1";
 const MAX_ACTIVITY_HISTORY_TORRENTS: usize = 100_000;
 
@@ -612,18 +612,9 @@ fn save_activity_history_state_to_path(
     state: &ActivityHistoryPersistedState,
     path: &Path,
 ) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     let sparse_state = sparse_state_for_persistence(state);
     let content = encode_activity_history_state(&sparse_state);
-    let tmp_path = path.with_extension(ACTIVITY_HISTORY_TEMP_EXTENSION);
-
-    fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, path)?;
-
-    Ok(())
+    write_bytes_atomically(path, &content)
 }
 
 #[cfg(test)]
