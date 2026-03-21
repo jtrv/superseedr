@@ -889,6 +889,12 @@ pub fn draw_footer(
     ctx: &ThemeContext,
 ) {
     let show_branding = footer_chunk.width >= 80;
+    let cluster_status_width = app_state
+        .cluster_role_label
+        .as_deref()
+        .map(|label| format!(" | Cluster: {}", label).len() as u16)
+        .unwrap_or(0);
+    let status_width = 21u16.saturating_add(cluster_status_width);
 
     let is_update = app_state.update_available.is_some();
     let (left_constraint, right_constraint) = if show_branding {
@@ -906,10 +912,13 @@ pub fn draw_footer(
                 Constraint::Length(symmetric_left),
             )
         } else {
-            (Constraint::Length(left_target), Constraint::Length(21))
+            (
+                Constraint::Length(left_target),
+                Constraint::Length(status_width),
+            )
         }
     } else {
-        (Constraint::Length(0), Constraint::Length(21))
+        (Constraint::Length(0), Constraint::Length(status_width))
     };
 
     let footer_layout = ratatui::layout::Layout::default()
@@ -1246,14 +1255,23 @@ pub fn draw_footer(
         "Closed"
     };
 
-    let footer_status = Line::from(vec![
+    let mut footer_status_spans = vec![
         Span::raw("Port: "),
         Span::styled(settings.client_port.to_string(), port_style),
         Span::raw(" ["),
         Span::styled(port_text, port_style),
         Span::raw("]"),
-    ])
-    .alignment(Alignment::Right);
+    ];
+    if let Some(cluster_role) = app_state.cluster_role_label.as_deref() {
+        let cluster_style = if cluster_role == "Leader" {
+            ctx.apply(Style::default().fg(ctx.state_success()).bold())
+        } else {
+            ctx.apply(Style::default().fg(ctx.state_warning()).bold())
+        };
+        footer_status_spans.push(Span::raw(" | Cluster: "));
+        footer_status_spans.push(Span::styled(cluster_role.to_string(), cluster_style));
+    }
+    let footer_status = Line::from(footer_status_spans).alignment(Alignment::Right);
 
     let status_paragraph = Paragraph::new(footer_status)
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));

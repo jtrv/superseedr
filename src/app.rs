@@ -1081,6 +1081,7 @@ pub struct AppState {
     pub pending_ingest_by_path: HashMap<PathBuf, PendingIngestRecord>,
     pub pending_control_by_path: HashMap<PathBuf, PendingControlRecord>,
     pub pending_watch_commands: VecDeque<AppCommand>,
+    pub cluster_role_label: Option<String>,
 }
 
 pub struct App {
@@ -1474,6 +1475,7 @@ impl App {
             next_status_dump_at: None,
             app_lock_handle,
         };
+        app.sync_cluster_role_label();
         app.refresh_system_warning();
 
         app.ensure_leader_services_running();
@@ -1495,6 +1497,24 @@ impl App {
         app.refresh_rss_derived();
 
         Ok(app)
+    }
+
+    fn cluster_role_label_for_state(&self) -> Option<&'static str> {
+        if !self.is_shared_mode_enabled() {
+            return None;
+        }
+
+        if self.is_current_shared_leader() {
+            Some("Leader")
+        } else if self.is_current_shared_follower() {
+            Some("Follower")
+        } else {
+            Some("Unknown")
+        }
+    }
+
+    fn sync_cluster_role_label(&mut self) {
+        self.app_state.cluster_role_label = self.cluster_role_label_for_state().map(str::to_string);
     }
 
     pub fn is_shared_mode_enabled(&self) -> bool {
@@ -2134,6 +2154,7 @@ impl App {
         self.app_lock_handle = Some(lock_handle);
         self.current_cluster_role = Some(AppClusterRole::Leader);
         self.runtime_mode = AppRuntimeMode::SharedLeader;
+        self.sync_cluster_role_label();
 
         if let Some(shared_inbox) = shared_inbox_path() {
             if let Err(error) = self.watch_path_if_needed(shared_inbox) {
