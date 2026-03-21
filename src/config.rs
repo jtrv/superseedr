@@ -1490,6 +1490,10 @@ pub fn shared_status_path() -> Option<PathBuf> {
     shared_config_root().map(|root| root.join("status").join(format!("{host_id}.json")))
 }
 
+pub fn shared_leader_status_path() -> Option<PathBuf> {
+    shared_config_root().map(|root| root.join("status").join("leader.json"))
+}
+
 pub fn shared_cluster_revision_path() -> Option<PathBuf> {
     shared_config_root().map(|root| root.join("cluster.revision"))
 }

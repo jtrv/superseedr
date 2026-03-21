@@ -457,13 +457,13 @@ fn process_shared_status_request(
         ControlRequest::StatusFollowStart { .. } => {
             let status_path = status_file_path()?;
             println!(
-                "Cluster mode status is per-node.\nStatus file: {}",
+                "Cluster mode status follows the current leader snapshot.\nStatus file: {}",
                 status_path.display()
             );
             Ok(())
         }
         ControlRequest::StatusFollowStop => {
-            println!("Cluster mode does not use shared status streaming state.");
+            println!("Cluster mode status streaming follows the current leader snapshot.");
             Ok(())
         }
         _ => unreachable!("status request handler received non-status control request"),

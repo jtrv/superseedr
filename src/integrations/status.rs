@@ -3,15 +3,18 @@
 
 use crate::app::TorrentMetrics;
 use crate::config::Settings;
+use serde::de::Error;
 use serde::ser::SerializeStruct;
+use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 
 use crate::torrent_identity::info_hash_from_torrent_source;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AppOutputState {
     pub run_time: u64,
     pub cpu_usage: f32,
@@ -19,11 +22,14 @@ pub struct AppOutputState {
     pub total_download_bps: u64,
     pub total_upload_bps: u64,
     pub status_config: StatusConfig,
-    #[serde(serialize_with = "serialize_torrents_hex")]
+    #[serde(
+        serialize_with = "serialize_torrents_hex",
+        deserialize_with = "deserialize_torrents_hex"
+    )]
     pub torrents: HashMap<Vec<u8>, TorrentMetrics>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StatusConfig {
     pub client_port: u16,
     pub output_status_interval: u64,
@@ -48,6 +54,22 @@ where
     map_ser.end()
 }
 
+pub fn deserialize_torrents_hex<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<Vec<u8>, TorrentMetrics>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = HashMap::<String, TorrentMetrics>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(key, value)| {
+            hex::decode(&key)
+                .map(|decoded| (decoded, value))
+                .map_err(D::Error::custom)
+        })
+        .collect()
+}
+
 struct StatusTorrentMetrics<'a> {
     metrics: &'a TorrentMetrics,
 }
@@ -63,9 +85,10 @@ impl Serialize for StatusTorrentMetrics<'_> {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("TorrentMetrics", 22)?;
+        let mut state = serializer.serialize_struct("TorrentMetrics", 29)?;
         state.serialize_field("info_hash_hex", &hex::encode(&self.metrics.info_hash))?;
         state.serialize_field("torrent_control_state", &self.metrics.torrent_control_state)?;
+        state.serialize_field("delete_files", &self.metrics.delete_files)?;
         state.serialize_field("info_hash", &self.metrics.info_hash)?;
         state.serialize_field("torrent_or_magnet", &self.metrics.torrent_or_magnet)?;
         state.serialize_field("torrent_name", &self.metrics.torrent_name)?;
@@ -117,13 +140,22 @@ impl Serialize for StatusTorrentMetrics<'_> {
     }
 }
 
-pub fn dump(output_data: AppOutputState, shutdown_tx: tokio::sync::broadcast::Sender<()>) {
-    let file_path = status_file_path().unwrap_or_else(|_| {
+pub fn dump(
+    output_data: AppOutputState,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    mirror_to_leader_path: bool,
+) {
+    let file_path = host_status_file_path().unwrap_or_else(|_| {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("status_files")
             .join("app_state.json")
     });
+    let leader_path = if mirror_to_leader_path {
+        crate::config::shared_leader_status_path()
+    } else {
+        None
+    };
     let mut shutdown_rx = shutdown_tx.subscribe();
 
     tokio::spawn(async move {
@@ -135,8 +167,15 @@ pub fn dump(output_data: AppOutputState, shutdown_tx: tokio::sync::broadcast::Se
                 if let Some(parent) = file_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                serde_json::to_string_pretty(&output_data)
-                    .map(|json| std::fs::write(file_path, json))
+                let json = serde_json::to_string_pretty(&output_data).map_err(io::Error::other)?;
+                std::fs::write(&file_path, &json)?;
+                if let Some(leader_path) = leader_path {
+                    if let Some(parent) = leader_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::write(leader_path, &json)?;
+                }
+                Ok::<(), io::Error>(())
             }) => {
                 if let Ok(Err(e)) = result {
                     tracing::error!("Failed to write status dump: {:?}", e);
@@ -146,7 +185,7 @@ pub fn dump(output_data: AppOutputState, shutdown_tx: tokio::sync::broadcast::Se
     });
 }
 
-pub fn status_file_path() -> io::Result<PathBuf> {
+pub fn host_status_file_path() -> io::Result<PathBuf> {
     if let Some(shared_path) = crate::config::shared_status_path() {
         return Ok(shared_path);
     }
@@ -160,6 +199,24 @@ pub fn status_file_path() -> io::Result<PathBuf> {
             )
         })?;
     Ok(base_path.join("status_files").join("app_state.json"))
+}
+
+pub fn cluster_status_file_path() -> io::Result<PathBuf> {
+    if let Some(shared_path) = crate::config::shared_leader_status_path() {
+        return Ok(shared_path);
+    }
+
+    host_status_file_path()
+}
+
+pub fn status_file_path() -> io::Result<PathBuf> {
+    cluster_status_file_path()
+}
+
+pub fn read_cluster_output_state() -> io::Result<AppOutputState> {
+    let content = fs::read_to_string(cluster_status_file_path()?)?;
+    serde_json::from_str(&content)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 pub fn offline_output_state(settings: &Settings) -> AppOutputState {

@@ -893,7 +893,14 @@ pub fn draw_footer(
         .cluster_role_label
         .as_deref()
         .map(|label| format!(" | Cluster: {}", label).len() as u16)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add(
+            app_state
+                .cluster_runtime_label
+                .as_deref()
+                .map(|label| format!(" | {}", label).len() as u16)
+                .unwrap_or(0),
+        );
     let status_width = 21u16.saturating_add(cluster_status_width);
 
     let is_update = app_state.update_available.is_some();
@@ -1270,6 +1277,13 @@ pub fn draw_footer(
         };
         footer_status_spans.push(Span::raw(" | Cluster: "));
         footer_status_spans.push(Span::styled(cluster_role.to_string(), cluster_style));
+    }
+    if let Some(runtime_label) = app_state.cluster_runtime_label.as_deref() {
+        footer_status_spans.push(Span::raw(" | "));
+        footer_status_spans.push(Span::styled(
+            runtime_label.to_string(),
+            ctx.apply(Style::default().fg(ctx.accent_sapphire()).bold()),
+        ));
     }
     let footer_status = Line::from(footer_status_spans).alignment(Alignment::Right);
 
