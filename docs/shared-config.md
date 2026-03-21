@@ -57,6 +57,7 @@ SUPERSEEDR_SHARED_HOST_ID=seedbox-a
   torrents/
   inbox/
   processed/
+  staged-adds/
   status/
     seedbox-a.json
     desktop-a.json
@@ -168,6 +169,11 @@ Supported dropped file types:
 - `.path`
 - `.control`
 
+Notes:
+
+- follower `.torrent` adds may stage the torrent file into `/shared-root/staged-adds/` before queuing a leader request
+- follower `.path` adds require a shared-mode `default_download_folder`; the follower resolves the referenced torrent file locally and stages the actual `.torrent` for the leader
+
 ## Data Path Rules
 
 Shared mode requires all torrent payload data to live under the shared root.
@@ -212,6 +218,11 @@ Those requests are dropped into `/shared-root/inbox/`.
 The leader consumes them and writes the resulting desired state into the layered shared config.
 
 Non-leader nodes never call direct shared `save_settings`.
+
+Follower config editing rules:
+
+- shared settings and RSS edits remain leader-only
+- host-local `client_id`, `client_port`, and `watch_folder` edits are allowed on followers and save only to `hosts/<host-id>.toml`
 
 ## Status Files
 

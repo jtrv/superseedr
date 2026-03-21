@@ -1540,6 +1540,77 @@ impl App {
         Ok(())
     }
 
+    fn desired_watch_paths_for_settings(&self, settings: &Settings) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let push_unique = |paths: &mut Vec<PathBuf>, path: PathBuf| {
+            if !paths.iter().any(|existing| existing == &path) {
+                paths.push(path);
+            }
+        };
+
+        if let Some(host_watch_path) = resolve_host_watch_path(settings) {
+            push_unique(&mut paths, host_watch_path);
+        }
+        if self.shared_mode_enabled {
+            if let Some(shared_root) = shared_root_path() {
+                push_unique(&mut paths, shared_root);
+            }
+        }
+        if self.is_current_shared_leader() {
+            if let Some(shared_inbox) = shared_inbox_path() {
+                push_unique(&mut paths, shared_inbox);
+            }
+        } else if !self.shared_mode_enabled {
+            if let Some(command_watch_path) = resolve_command_watch_path(settings) {
+                push_unique(&mut paths, command_watch_path);
+            }
+        }
+
+        paths
+    }
+
+    fn reconcile_watched_paths(&mut self, settings: &Settings) {
+        let desired_paths = self.desired_watch_paths_for_settings(settings);
+        let existing_paths = self.watched_paths.clone();
+
+        for existing in existing_paths {
+            if desired_paths.iter().any(|desired| desired == &existing) {
+                continue;
+            }
+
+            if let Err(error) = self.watcher.unwatch(&existing) {
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to stop watching path {:?}: {}",
+                    existing,
+                    error
+                );
+            }
+            self.watched_paths.retain(|path| path != &existing);
+        }
+
+        for desired in desired_paths {
+            if let Err(error) = self.watch_path_if_needed(desired) {
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to watch updated path after config change: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    fn follower_update_is_host_local_only(
+        current_settings: &Settings,
+        new_settings: &Settings,
+    ) -> bool {
+        let mut new_without_host_changes = new_settings.clone();
+        new_without_host_changes.client_id = current_settings.client_id.clone();
+        new_without_host_changes.client_port = current_settings.client_port;
+        new_without_host_changes.watch_folder = current_settings.watch_folder.clone();
+        new_without_host_changes == *current_settings
+    }
+
     fn control_priority_overrides(
         file_priorities: &HashMap<usize, FilePriority>,
     ) -> Vec<ControlFilePriorityOverride> {
@@ -2347,6 +2418,7 @@ impl App {
                 error
             );
         }
+        self.reconcile_watched_paths(&new_settings);
 
         if new_settings.ui_theme != old_settings.ui_theme {
             self.app_state.theme = Theme::builtin(new_settings.ui_theme);
@@ -2561,17 +2633,49 @@ impl App {
                 }
             }
             AppCommand::AddTorrentFromPathFile(path) => {
-                if self.is_current_shared_follower() && self.is_host_watch_path(&path) {
+                let is_host_watch_path = self.is_host_watch_path(&path);
+                if self.is_current_shared_follower() && is_host_watch_path {
                     self.app_state.pending_ingest_by_path.remove(&path);
-                    self.relay_local_watch_file(&path, "path.forwarded");
-                    self.save_state_to_disk();
-                    return;
                 }
 
                 match fs::read_to_string(&path) {
                     Ok(torrent_file_path_str) => {
                         let torrent_file_path = PathBuf::from(torrent_file_path_str.trim());
-                        if let Some(download_path) =
+                        if self.is_current_shared_follower()
+                            && self.client_configs.default_download_folder.is_some()
+                        {
+                            match self.prepare_add_torrent_file_request(
+                                torrent_file_path,
+                                self.client_configs.default_download_folder.clone(),
+                                None,
+                                HashMap::new(),
+                            ) {
+                                Ok(request) => {
+                                    if let Err(error) =
+                                        self.dispatch_cluster_control_request(request).await
+                                    {
+                                        self.app_state.system_error = Some(error);
+                                        self.app_state.ui.needs_redraw = true;
+                                    }
+                                }
+                                Err(error) => {
+                                    self.app_state.system_error = Some(error);
+                                    self.app_state.ui.needs_redraw = true;
+                                }
+                            }
+                        } else if self.is_current_shared_follower() && is_host_watch_path {
+                            let message = "Follower .path ingest requires a default download folder so the referenced torrent can be staged for leader processing.".to_string();
+                            tracing_event!(Level::WARN, "{}", message);
+                            self.record_ingest_result(
+                                &path,
+                                &CommandIngestResult::Failed {
+                                    info_hash: None,
+                                    torrent_name: None,
+                                    message,
+                                },
+                            );
+                            self.save_state_to_disk();
+                        } else if let Some(download_path) =
                             self.client_configs.default_download_folder.clone()
                         {
                             let ingest_result = self
@@ -2975,11 +3079,27 @@ impl App {
             }
             AppCommand::UpdateConfig(new_settings) => {
                 if self.is_current_shared_follower() {
-                    self.app_state.system_error = Some(
-                        "Shared configuration edits are leader-only while this node is a follower."
-                            .to_string(),
-                    );
-                    self.app_state.ui.needs_redraw = true;
+                    if Self::follower_update_is_host_local_only(
+                        &self.client_configs,
+                        &new_settings,
+                    ) {
+                        match crate::config::save_settings(&new_settings) {
+                            Ok(()) => self.apply_settings_update(new_settings, false).await,
+                            Err(error) => {
+                                self.app_state.system_error = Some(format!(
+                                    "Failed to save follower host-local settings: {}",
+                                    error
+                                ));
+                                self.app_state.ui.needs_redraw = true;
+                            }
+                        }
+                    } else {
+                        self.app_state.system_error = Some(
+                            "Shared configuration and RSS edits are leader-only while this node is a follower. Only host-local client ID, port, and watch-folder changes are allowed."
+                                .to_string(),
+                        );
+                        self.app_state.ui.needs_redraw = true;
+                    }
                 } else {
                     self.apply_settings_update(new_settings, true).await;
                 }
@@ -5704,9 +5824,9 @@ mod tests {
         AppRuntimeMode, FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
         TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentSortColumn, UiState,
     };
-    use crate::config::TorrentSettings;
+    use crate::config::{clear_shared_config_state_for_tests, TorrentSettings};
     use crate::errors::StorageError;
-    use crate::integrations::control::ControlRequest;
+    use crate::integrations::control::{read_control_request, ControlRequest};
     use crate::persistence::event_journal::{
         EventDetails, EventJournalState, EventType, IngestKind, IngestOrigin,
     };
@@ -5715,6 +5835,7 @@ mod tests {
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
     };
     use std::collections::HashMap;
+    use std::env;
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -5731,6 +5852,11 @@ mod tests {
             })
             .collect();
         display
+    }
+
+    fn shared_env_guard() -> &'static std::sync::Mutex<()> {
+        static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        GUARD.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     #[test]
@@ -6917,6 +7043,138 @@ mod tests {
         );
 
         let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn shared_follower_path_file_with_default_download_routes_through_control_request() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let local_dir = tempfile::tempdir().expect("create local dir");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        std::fs::create_dir_all(shared_root.path().join("hosts")).expect("create hosts dir");
+        std::fs::write(
+            shared_root.path().join("hosts").join("node-a.toml"),
+            "client_port = 0\n",
+        )
+        .expect("write host config");
+
+        let mut settings = crate::config::load_settings().expect("load shared settings");
+        settings.client_port = 0;
+        settings.default_download_folder = Some(shared_root.path().join("data").join("downloads"));
+        crate::config::save_settings(&settings).expect("save shared settings");
+
+        let mut app = App::new(settings, AppRuntimeMode::SharedFollower)
+            .await
+            .expect("build shared follower app");
+        let torrent_path = local_dir.path().join("sample-input.torrent");
+        let path_file = local_dir.path().join("sample.path");
+        std::fs::write(&torrent_path, b"placeholder torrent payload").expect("write torrent file");
+        std::fs::write(&path_file, torrent_path.to_string_lossy().to_string())
+            .expect("write path file");
+
+        app.handle_app_command(AppCommand::AddTorrentFromPathFile(path_file))
+            .await;
+
+        assert!(app.app_state.torrents.is_empty());
+        let inbox_entries: Vec<_> = std::fs::read_dir(shared_root.path().join("inbox"))
+            .expect("read shared inbox")
+            .collect();
+        assert_eq!(inbox_entries.len(), 1);
+        let queued_path = inbox_entries[0]
+            .as_ref()
+            .expect("queued inbox entry")
+            .path();
+        let queued_request = read_control_request(&queued_path).expect("read queued request");
+
+        match queued_request {
+            ControlRequest::AddTorrentFile {
+                source_path,
+                download_path,
+                ..
+            } => {
+                assert!(source_path.starts_with(shared_root.path().join("staged-adds")));
+                assert!(source_path.exists());
+                assert_eq!(
+                    download_path,
+                    Some(shared_root.path().join("data").join("downloads"))
+                );
+            }
+            other => panic!("unexpected queued request: {:?}", other),
+        }
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
+    }
+
+    #[tokio::test]
+    async fn shared_follower_allows_host_local_config_updates_and_rewatches_host_folder() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+        let old_watch = shared_root.path().join("old-watch");
+        let new_watch = shared_root.path().join("new-watch");
+
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        std::fs::create_dir_all(shared_root.path().join("hosts")).expect("create hosts dir");
+        std::fs::write(
+            shared_root.path().join("hosts").join("node-a.toml"),
+            format!(
+                "client_port = 0\nwatch_folder = {:?}\n",
+                old_watch.to_string_lossy()
+            ),
+        )
+        .expect("write host config");
+
+        let settings = crate::config::load_settings().expect("load shared settings");
+        let mut app = App::new(settings, AppRuntimeMode::SharedFollower)
+            .await
+            .expect("build shared follower app");
+        let mut next_settings = app.client_configs.clone();
+        next_settings.watch_folder = Some(new_watch.clone());
+        next_settings.client_port = app.client_configs.client_port;
+
+        app.handle_app_command(AppCommand::UpdateConfig(next_settings))
+            .await;
+
+        assert_eq!(app.client_configs.watch_folder, Some(new_watch.clone()));
+        assert!(app.watched_paths.contains(&new_watch));
+        assert!(!app.watched_paths.contains(&old_watch));
+
+        let reloaded = crate::config::load_settings().expect("reload shared settings");
+        assert_eq!(reloaded.watch_folder, Some(new_watch));
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
     }
 
     #[tokio::test]
