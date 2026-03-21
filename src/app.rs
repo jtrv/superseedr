@@ -6948,6 +6948,7 @@ mod tests {
     async fn shared_follower_path_file_with_default_download_routes_through_control_request() {
         let _guard = shared_env_guard().lock().unwrap();
         let shared_root = tempfile::tempdir().expect("create shared root");
+        let effective_root = shared_root.path().join("superseedr-config");
         let local_dir = tempfile::tempdir().expect("create local dir");
         let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
         let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
@@ -6956,16 +6957,16 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(shared_root.path().join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
         std::fs::write(
-            shared_root.path().join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
 
         let mut settings = crate::config::load_settings().expect("load shared settings");
         settings.client_port = 0;
-        settings.default_download_folder = Some(shared_root.path().join("data").join("downloads"));
+        settings.default_download_folder = Some(effective_root.join("data").join("downloads"));
         crate::config::save_settings(&settings).expect("save shared settings");
 
         let mut app = App::new(settings, AppRuntimeMode::SharedFollower)
@@ -6981,7 +6982,7 @@ mod tests {
             .await;
 
         assert!(app.app_state.torrents.is_empty());
-        let inbox_entries: Vec<_> = std::fs::read_dir(shared_root.path().join("inbox"))
+        let inbox_entries: Vec<_> = std::fs::read_dir(effective_root.join("inbox"))
             .expect("read shared inbox")
             .collect();
         assert_eq!(inbox_entries.len(), 1);
@@ -6997,11 +6998,11 @@ mod tests {
                 download_path,
                 ..
             } => {
-                assert!(source_path.starts_with(shared_root.path().join("staged-adds")));
+                assert!(source_path.starts_with(effective_root.join("staged-adds")));
                 assert!(source_path.exists());
                 assert_eq!(
                     download_path,
-                    Some(shared_root.path().join("data").join("downloads"))
+                    Some(effective_root.join("data").join("downloads"))
                 );
             }
             other => panic!("unexpected queued request: {:?}", other),
@@ -7025,6 +7026,7 @@ mod tests {
     async fn shared_follower_allows_host_local_config_updates_and_rewatches_host_folder() {
         let _guard = shared_env_guard().lock().unwrap();
         let shared_root = tempfile::tempdir().expect("create shared root");
+        let effective_root = shared_root.path().join("superseedr-config");
         let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
         let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
         let old_watch = shared_root.path().join("old-watch");
@@ -7034,9 +7036,9 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(shared_root.path().join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
         std::fs::write(
-            shared_root.path().join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a.toml"),
             format!(
                 "client_port = 0\nwatch_folder = {:?}\n",
                 old_watch.to_string_lossy()

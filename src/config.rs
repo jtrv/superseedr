@@ -290,6 +290,7 @@ const SHARED_CONFIG_DIR_ENV: &str = "SUPERSEEDR_SHARED_CONFIG_DIR";
 const SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_SHARED_HOST_ID";
 const LEGACY_SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_HOST_ID";
 const SHARED_TORRENT_SOURCE_PREFIX: &str = "shared:";
+const SHARED_CONFIG_SUBDIR: &str = "superseedr-config";
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
 #[serde(default)]
@@ -761,10 +762,24 @@ fn sanitize_host_id(raw: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
+fn normalize_shared_config_root(path: PathBuf) -> PathBuf {
+    let already_points_to_subdir = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(SHARED_CONFIG_SUBDIR));
+
+    if already_points_to_subdir {
+        path
+    } else {
+        path.join(SHARED_CONFIG_SUBDIR)
+    }
+}
+
 fn shared_config_root() -> Option<PathBuf> {
     env::var_os(SHARED_CONFIG_DIR_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+        .map(normalize_shared_config_root)
 }
 
 fn sanitized_host_id_candidate(raw: &str) -> Option<String> {
@@ -2456,12 +2471,13 @@ mod tests {
             ..Settings::default()
         };
         let configured = configured_watch_paths(&settings);
+        let effective_root = dir.path().join(SHARED_CONFIG_SUBDIR);
 
-        assert!(configured.contains(&dir.path().join("inbox")));
+        assert!(configured.contains(&effective_root.join("inbox")));
         assert!(configured.contains(&explicit_watch));
         assert_eq!(
             resolve_command_watch_path(&settings),
-            Some(dir.path().join("inbox"))
+            Some(effective_root.join("inbox"))
         );
 
         if let Some(value) = original_shared_dir {
@@ -2496,6 +2512,76 @@ mod tests {
         clear_shared_config_state();
 
         assert_eq!(shared_host_id().as_deref(), Some("canonical-node"));
+
+        if let Some(value) = original_shared_dir {
+            env::set_var(SHARED_CONFIG_DIR_ENV, value);
+        } else {
+            env::remove_var(SHARED_CONFIG_DIR_ENV);
+        }
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_shared_config_dir_env_normalizes_to_superseedr_config_subdir() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let dir = tempdir().expect("create tempdir");
+
+        env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+
+        let expected_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        assert_eq!(shared_root_path(), Some(expected_root.clone()));
+        assert_eq!(shared_inbox_path(), Some(expected_root.join("inbox")));
+
+        if let Some(value) = original_shared_dir {
+            env::set_var(SHARED_CONFIG_DIR_ENV, value);
+        } else {
+            env::remove_var(SHARED_CONFIG_DIR_ENV);
+        }
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_shared_config_dir_env_accepts_explicit_superseedr_config_subdir() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let dir = tempdir().expect("create tempdir");
+        let explicit_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+
+        env::set_var(SHARED_CONFIG_DIR_ENV, &explicit_root);
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+
+        assert_eq!(shared_root_path(), Some(explicit_root.clone()));
+        assert_eq!(shared_inbox_path(), Some(explicit_root.join("inbox")));
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);
@@ -2563,14 +2649,15 @@ mod tests {
             watch_folder: Some(PathBuf::from("/host-watch")),
             ..Settings::default()
         };
+        let effective_root = dir.path().join(SHARED_CONFIG_SUBDIR);
 
         let follower_paths = runtime_watch_paths(&settings, true, false);
         assert!(follower_paths.contains(&PathBuf::from("/host-watch")));
-        assert!(follower_paths.contains(&dir.path().to_path_buf()));
-        assert!(!follower_paths.contains(&dir.path().join("inbox")));
+        assert!(follower_paths.contains(&effective_root));
+        assert!(!follower_paths.contains(&effective_root.join("inbox")));
 
         let leader_paths = runtime_watch_paths(&settings, true, true);
-        assert!(leader_paths.contains(&dir.path().join("inbox")));
+        assert!(leader_paths.contains(&effective_root.join("inbox")));
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);

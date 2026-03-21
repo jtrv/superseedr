@@ -164,6 +164,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let source = dir.path().join("sample.control");
         let shared_root = dir.path().join("shared-root");
+        let effective_root = shared_root.join("superseedr-config");
         let original_shared_dir = std::env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
         fs::write(&source, "content").expect("write source");
         std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", &shared_root);
@@ -171,6 +172,7 @@ mod tests {
 
         let relayed = relay_watch_file_to_shared_inbox(&source).expect("relay watch file");
         assert!(!source.exists());
+        assert!(relayed.starts_with(&effective_root.join("inbox")));
         assert_eq!(
             fs::read_to_string(&relayed).expect("read relayed file"),
             "content"

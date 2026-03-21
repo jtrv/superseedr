@@ -14,7 +14,10 @@ Shared mode is enabled only when `SUPERSEEDR_SHARED_CONFIG_DIR` is set.
 ## Environment Variables
 
 ### `SUPERSEEDR_SHARED_CONFIG_DIR`
-Absolute path to the shared cluster root.
+Absolute path to the shared network-drive root.
+
+Superseedr automatically places all shared config and runtime artifacts under a
+`superseedr-config/` subdirectory inside that root.
 
 Shared mode uses:
 
@@ -26,7 +29,7 @@ Shared mode uses:
 Example:
 
 ```bash
-SUPERSEEDR_SHARED_CONFIG_DIR=/mnt/superseedr-root
+SUPERSEEDR_SHARED_CONFIG_DIR=/mnt/shared-drive
 ```
 
 ### `SUPERSEEDR_SHARED_HOST_ID`
@@ -46,24 +49,33 @@ SUPERSEEDR_SHARED_HOST_ID=seedbox-a
 ## Shared Root Layout
 
 ```text
-/mnt/superseedr-root/
-  settings.toml
-  catalog.toml
-  torrent_metadata.toml
-  cluster.revision
-  hosts/
-    seedbox-a.toml
-    desktop-a.toml
-  torrents/
-  inbox/
-  processed/
-  staged-adds/
-  status/
-    seedbox-a.json
-    desktop-a.json
-  data/
-  superseedr.lock
+/mnt/shared-drive/
+  superseedr-config/
+    settings.toml
+    catalog.toml
+    torrent_metadata.toml
+    cluster.revision
+    hosts/
+      seedbox-a.toml
+      desktop-a.toml
+    torrents/
+    inbox/
+    processed/
+    staged-adds/
+    status/
+      seedbox-a.json
+      desktop-a.json
+    data/
+    superseedr.lock
 ```
+
+Each host can mount that same shared drive at a different local path, for example:
+
+- Windows: `C:\Users\jagat\Documents\seedbox`
+- macOS: `/Volumes/seedbox`
+
+Both hosts should set `SUPERSEEDR_SHARED_CONFIG_DIR` to their local mount root.
+Superseedr will then use `<mount-root>/superseedr-config/` automatically.
 
 ## Layered Files
 
@@ -241,22 +253,23 @@ This avoids active nodes overwriting a single shared status snapshot.
 Shared root:
 
 ```text
-/srv/superseedr-root/
-  settings.toml
-  catalog.toml
-  torrent_metadata.toml
-  cluster.revision
-  hosts/
-    seedbox-a.toml
-    desktop-a.toml
-  torrents/
-  inbox/
-  processed/
-  status/
-    seedbox-a.json
-    desktop-a.json
-  data/
-  superseedr.lock
+/srv/shared-drive/
+  superseedr-config/
+    settings.toml
+    catalog.toml
+    torrent_metadata.toml
+    cluster.revision
+    hosts/
+      seedbox-a.toml
+      desktop-a.toml
+    torrents/
+    inbox/
+    processed/
+    status/
+      seedbox-a.json
+      desktop-a.json
+    data/
+    superseedr.lock
 ```
 
 Shared settings:
