@@ -487,7 +487,8 @@ impl LayeredConfig {
 
     fn resolve_settings(&self, shared_root: Option<&Path>) -> io::Result<Settings> {
         let mut settings = Settings::default();
-        self.settings.apply_to_settings(&mut settings, shared_root)?;
+        self.settings
+            .apply_to_settings(&mut settings, shared_root)?;
         self.catalog.apply_to_settings(&mut settings, shared_root)?;
         self.host.apply_to_settings(&mut settings);
         Ok(settings)
@@ -495,10 +496,7 @@ impl LayeredConfig {
 }
 
 impl CatalogTorrentSettings {
-    fn from_settings(
-        settings: &TorrentSettings,
-        shared_root: Option<&Path>,
-    ) -> io::Result<Self> {
+    fn from_settings(settings: &TorrentSettings, shared_root: Option<&Path>) -> io::Result<Self> {
         Ok(Self {
             torrent_or_magnet: encode_catalog_torrent_source(
                 &settings.torrent_or_magnet,
@@ -509,7 +507,13 @@ impl CatalogTorrentSettings {
             download_path: settings
                 .download_path
                 .as_deref()
-                .map(|path| encode_shared_data_path(path, shared_root, &format!("torrent '{}'", settings.name)))
+                .map(|path| {
+                    encode_shared_data_path(
+                        path,
+                        shared_root,
+                        &format!("torrent '{}'", settings.name),
+                    )
+                })
                 .transpose()?,
             container_name: settings.container_name.clone(),
             torrent_control_state: settings.torrent_control_state.clone(),
@@ -518,10 +522,7 @@ impl CatalogTorrentSettings {
         })
     }
 
-    fn to_settings(
-        &self,
-        shared_root: Option<&Path>,
-    ) -> io::Result<TorrentSettings> {
+    fn to_settings(&self, shared_root: Option<&Path>) -> io::Result<TorrentSettings> {
         Ok(TorrentSettings {
             torrent_or_magnet: decode_catalog_torrent_source(&self.torrent_or_magnet, shared_root),
             name: self.name.clone(),
@@ -529,7 +530,9 @@ impl CatalogTorrentSettings {
             download_path: self
                 .download_path
                 .as_ref()
-                .map(|path| resolve_shared_data_path(path, shared_root, &format!("torrent '{}'", self.name)))
+                .map(|path| {
+                    resolve_shared_data_path(path, shared_root, &format!("torrent '{}'", self.name))
+                })
                 .transpose()?,
             container_name: self.container_name.clone(),
             torrent_control_state: self.torrent_control_state.clone(),
@@ -655,7 +658,11 @@ impl SharedSettingsConfig {
         })
     }
 
-    fn apply_to_settings(&self, settings: &mut Settings, shared_root: Option<&Path>) -> io::Result<()> {
+    fn apply_to_settings(
+        &self,
+        settings: &mut Settings,
+        shared_root: Option<&Path>,
+    ) -> io::Result<()> {
         settings.client_id = self.client_id.clone();
         settings.lifetime_downloaded = self.lifetime_downloaded;
         settings.lifetime_uploaded = self.lifetime_uploaded;
@@ -699,7 +706,11 @@ impl CatalogConfig {
         })
     }
 
-    fn apply_to_settings(&self, settings: &mut Settings, shared_root: Option<&Path>) -> io::Result<()> {
+    fn apply_to_settings(
+        &self,
+        settings: &mut Settings,
+        shared_root: Option<&Path>,
+    ) -> io::Result<()> {
         settings.torrents = self
             .torrents
             .iter()
@@ -1203,21 +1214,19 @@ impl SharedConfigBackend {
         let shared_settings_changed =
             next_layered.settings != state.layered.settings || state.settings_fingerprint.is_none();
         if shared_settings_changed {
-            state.settings_fingerprint =
-                write_toml_atomically_with_fingerprint(
-                    &self.paths.settings_path,
-                    &next_layered.settings,
-                )?;
+            state.settings_fingerprint = write_toml_atomically_with_fingerprint(
+                &self.paths.settings_path,
+                &next_layered.settings,
+            )?;
         }
 
         let shared_catalog_changed =
             next_layered.catalog != state.layered.catalog || state.catalog_fingerprint.is_none();
         if shared_catalog_changed {
-            state.catalog_fingerprint =
-                write_toml_atomically_with_fingerprint(
-                    &self.paths.catalog_path,
-                    &next_layered.catalog,
-                )?;
+            state.catalog_fingerprint = write_toml_atomically_with_fingerprint(
+                &self.paths.catalog_path,
+                &next_layered.catalog,
+            )?;
         }
 
         let existing_metadata: TorrentMetadataConfig =
@@ -1285,7 +1294,10 @@ impl ConfigBackend {
                 let mut metadata: TorrentMetadataConfig =
                     read_toml_or_default(&backend.paths.metadata_path)?;
                 upsert_torrent_metadata_entry(&mut metadata, entry);
-                let _ = write_toml_atomically_with_fingerprint(&backend.paths.metadata_path, &metadata)?;
+                let _ = write_toml_atomically_with_fingerprint(
+                    &backend.paths.metadata_path,
+                    &metadata,
+                )?;
                 Ok(())
             }
             ConfigBackend::Shared(backend) => {
@@ -1305,8 +1317,10 @@ impl ConfigBackend {
                 let mut metadata: TorrentMetadataConfig =
                     read_toml_or_default(&backend.paths.metadata_path)?;
                 upsert_torrent_metadata_entry(&mut metadata, entry);
-                state.metadata_fingerprint =
-                    write_toml_atomically_with_fingerprint(&backend.paths.metadata_path, &metadata)?;
+                state.metadata_fingerprint = write_toml_atomically_with_fingerprint(
+                    &backend.paths.metadata_path,
+                    &metadata,
+                )?;
                 Ok(())
             }
         }
@@ -1394,6 +1408,36 @@ pub fn resolve_host_watch_path(settings: &Settings) -> Option<PathBuf> {
     settings.watch_folder.clone()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsChangeScope {
+    NoChange,
+    HostOnly,
+    SharedOrMixed,
+}
+
+pub fn classify_shared_mode_settings_change(
+    current_settings: &Settings,
+    new_settings: &Settings,
+) -> SettingsChangeScope {
+    if new_settings == current_settings {
+        return SettingsChangeScope::NoChange;
+    }
+
+    let current_host = HostConfig::from_flat_settings(current_settings);
+    let new_host = HostConfig::from_flat_settings(new_settings);
+
+    let mut current_without_host = current_settings.clone();
+    let mut new_without_host = new_settings.clone();
+    HostConfig::default().apply_to_settings(&mut current_without_host);
+    HostConfig::default().apply_to_settings(&mut new_without_host);
+
+    if current_without_host == new_without_host && current_host != new_host {
+        SettingsChangeScope::HostOnly
+    } else {
+        SettingsChangeScope::SharedOrMixed
+    }
+}
+
 pub fn resolve_command_watch_path(settings: &Settings) -> Option<PathBuf> {
     if is_shared_config_mode() {
         return shared_inbox_path();
@@ -1412,15 +1456,31 @@ pub fn additional_watch_paths() -> Vec<PathBuf> {
     Vec::new()
 }
 
-pub fn configured_watch_paths(settings: &Settings) -> Vec<PathBuf> {
+pub fn runtime_watch_paths(
+    settings: &Settings,
+    shared_mode_enabled: bool,
+    watch_shared_inbox: bool,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-
-    if let Some(path) = resolve_command_watch_path(settings) {
-        push_unique_path(&mut paths, path);
-    }
 
     if let Some(path) = resolve_host_watch_path(settings) {
         push_unique_path(&mut paths, path);
+    }
+
+    if shared_mode_enabled {
+        if let Some(path) = shared_root_path() {
+            push_unique_path(&mut paths, path);
+        }
+    }
+
+    if watch_shared_inbox {
+        if let Some(path) = shared_inbox_path() {
+            push_unique_path(&mut paths, path);
+        }
+    } else if !shared_mode_enabled {
+        if let Some(path) = resolve_command_watch_path(settings) {
+            push_unique_path(&mut paths, path);
+        }
     }
 
     for path in additional_watch_paths() {
@@ -1428,6 +1488,10 @@ pub fn configured_watch_paths(settings: &Settings) -> Vec<PathBuf> {
     }
 
     paths
+}
+
+pub fn configured_watch_paths(settings: &Settings) -> Vec<PathBuf> {
+    runtime_watch_paths(settings, is_shared_config_mode(), is_shared_config_mode())
 }
 
 pub fn get_watch_path() -> Option<(PathBuf, PathBuf)> {
@@ -1463,7 +1527,9 @@ pub fn ensure_watch_directories(settings: &Settings) -> io::Result<()> {
     if let Some(path) = shared_status_path().and_then(|p| p.parent().map(Path::to_path_buf)) {
         fs::create_dir_all(path)?;
     }
-    if let Some(path) = shared_cluster_revision_path().and_then(|p| p.parent().map(Path::to_path_buf)) {
+    if let Some(path) =
+        shared_cluster_revision_path().and_then(|p| p.parent().map(Path::to_path_buf))
+    {
         fs::create_dir_all(path)?;
     }
     for watch_path in configured_watch_paths(settings) {
@@ -1788,7 +1854,11 @@ mod tests {
     fn test_shared_data_path_rejects_path_outside_root() {
         let dir = tempdir().expect("create tempdir");
         let shared_root = dir.path();
-        let outside_root = dir.path().parent().unwrap_or_else(|| dir.path()).join("outside-root");
+        let outside_root = dir
+            .path()
+            .parent()
+            .unwrap_or_else(|| dir.path())
+            .join("outside-root");
         let err = encode_shared_data_path(
             &outside_root.join("data").join("alpha"),
             Some(shared_root),
@@ -1883,8 +1953,9 @@ mod tests {
             ..Settings::default()
         };
 
-        let layered = LayeredConfig::from_shared_settings(&settings, shared_root, Some("shared-node"))
-            .expect("build layered shared settings");
+        let layered =
+            LayeredConfig::from_shared_settings(&settings, shared_root, Some("shared-node"))
+                .expect("build layered shared settings");
         let resolved = layered
             .resolve_shared_settings(shared_root)
             .expect("resolve shared settings");
@@ -2009,8 +2080,7 @@ mod tests {
             ..HostConfig::default()
         };
 
-        let fingerprint =
-            write_toml_atomically_with_fingerprint(&path, &host).expect("write toml");
+        let fingerprint = write_toml_atomically_with_fingerprint(&path, &host).expect("write toml");
         assert!(path.exists());
         assert!(fingerprint.is_some());
     }
@@ -2093,7 +2163,12 @@ mod tests {
         loaded.torrents.push(TorrentSettings {
             torrent_or_magnet: shared_torrent_path.to_string_lossy().to_string(),
             name: "Library Item".to_string(),
-            download_path: Some(dir.path().join("data").join("downloads").join("library-item")),
+            download_path: Some(
+                dir.path()
+                    .join("data")
+                    .join("downloads")
+                    .join("library-item"),
+            ),
             ..TorrentSettings::default()
         });
 
@@ -2281,12 +2356,14 @@ mod tests {
         let mut loaded = backend.load_settings().expect("load shared settings");
         loaded.global_download_limit_bps = 4096;
         loaded.torrents.push(TorrentSettings {
-            torrent_or_magnet:
-                "magnet:?xt=urn:btih:1111111111111111111111111111111111111111".to_string(),
+            torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+                .to_string(),
             name: "Sample Node".to_string(),
             ..TorrentSettings::default()
         });
-        backend.save_settings(&loaded).expect("save shared settings");
+        backend
+            .save_settings(&loaded)
+            .expect("save shared settings");
 
         let revision_path = backend.paths.root_dir.join("cluster.revision");
         let first_revision = fs::read_to_string(&revision_path).expect("read first revision");
@@ -2373,7 +2450,10 @@ mod tests {
 
         assert!(configured.contains(&dir.path().join("inbox")));
         assert!(configured.contains(&explicit_watch));
-        assert_eq!(resolve_command_watch_path(&settings), Some(dir.path().join("inbox")));
+        assert_eq!(
+            resolve_command_watch_path(&settings),
+            Some(dir.path().join("inbox"))
+        );
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);
@@ -2407,6 +2487,81 @@ mod tests {
         clear_shared_config_state();
 
         assert_eq!(shared_host_id().as_deref(), Some("canonical-node"));
+
+        if let Some(value) = original_shared_dir {
+            env::set_var(SHARED_CONFIG_DIR_ENV, value);
+        } else {
+            env::remove_var(SHARED_CONFIG_DIR_ENV);
+        }
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_classify_shared_mode_settings_change_scopes_host_only_changes() {
+        let current = Settings {
+            client_id: "node-a".to_string(),
+            client_port: 4100,
+            watch_folder: Some(PathBuf::from("/watch-a")),
+            default_download_folder: Some(PathBuf::from("/shared-downloads")),
+            ..Settings::default()
+        };
+
+        let mut host_only = current.clone();
+        host_only.client_port = 4200;
+        host_only.watch_folder = Some(PathBuf::from("/watch-b"));
+        assert_eq!(
+            classify_shared_mode_settings_change(&current, &host_only),
+            SettingsChangeScope::HostOnly
+        );
+
+        let mut shared_change = current.clone();
+        shared_change.default_download_folder = Some(PathBuf::from("/shared-next"));
+        assert_eq!(
+            classify_shared_mode_settings_change(&current, &shared_change),
+            SettingsChangeScope::SharedOrMixed
+        );
+
+        assert_eq!(
+            classify_shared_mode_settings_change(&current, &current),
+            SettingsChangeScope::NoChange
+        );
+    }
+
+    #[test]
+    fn test_runtime_watch_paths_differ_by_shared_role() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let dir = tempdir().expect("create tempdir");
+
+        env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+
+        let settings = Settings {
+            watch_folder: Some(PathBuf::from("/host-watch")),
+            ..Settings::default()
+        };
+
+        let follower_paths = runtime_watch_paths(&settings, true, false);
+        assert!(follower_paths.contains(&PathBuf::from("/host-watch")));
+        assert!(follower_paths.contains(&dir.path().to_path_buf()));
+        assert!(!follower_paths.contains(&dir.path().join("inbox")));
+
+        let leader_paths = runtime_watch_paths(&settings, true, true);
+        assert!(leader_paths.contains(&dir.path().join("inbox")));
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);

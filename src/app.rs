@@ -17,14 +17,15 @@ use strum_macros::EnumIter;
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
-    get_app_paths, resolve_host_watch_path, save_settings, shared_host_id, shared_inbox_path,
-    shared_root_path, upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode,
-    RssHistoryEntry, Settings, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry,
+    classify_shared_mode_settings_change, get_app_paths, resolve_host_watch_path,
+    runtime_watch_paths, save_settings, shared_host_id, shared_inbox_path, shared_root_path,
+    upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry,
+    Settings, SettingsChangeScope, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry,
     TorrentSettings, TorrentSortColumn,
 };
 use crate::control_service::{
-    control_event_details, file_priorities_to_map, find_torrent_settings_index_by_info_hash,
-    online_control_success_message, resolve_priority_file_index,
+    control_event_details, online_control_success_message, plan_control_request,
+    ControlExecutionPlan,
 };
 use crate::persistence::activity_history::{
     load_activity_history_state, save_activity_history_state, ActivityHistoryPersistedState,
@@ -64,9 +65,7 @@ use crate::tuning::{make_random_adjustment, normalize_limits_for_mode, TuningCon
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
 use crate::integrations::{
-    control::{
-        write_control_request, ControlFilePriorityOverride, ControlPriorityTarget, ControlRequest,
-    },
+    control::{write_control_request, ControlFilePriorityOverride, ControlRequest},
     rss_ingest, rss_service, status, watcher,
 };
 use crate::integrity_scheduler::{
@@ -531,6 +530,62 @@ impl AppRuntimeMode {
 pub enum AppClusterRole {
     Leader,
     Follower,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClusterCapabilities {
+    can_write_shared_state: bool,
+    can_queue_shared_commands: bool,
+    can_edit_host_local_config: bool,
+    can_persist_local_runtime_state: bool,
+    can_consume_shared_inbox: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IngestSource {
+    TorrentFile,
+    TorrentPathFile,
+    MagnetFile,
+}
+
+impl IngestSource {
+    fn relay_archive_extension(self) -> &'static str {
+        match self {
+            Self::TorrentFile => "torrent.forwarded",
+            Self::TorrentPathFile => "path.forwarded",
+            Self::MagnetFile => "magnet.forwarded",
+        }
+    }
+
+    fn processed_archive_extension(self) -> &'static str {
+        match self {
+            Self::TorrentFile => "torrent.added",
+            Self::TorrentPathFile => "path.added",
+            Self::MagnetFile => "magnet.added",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResolvedAddPayload {
+    TorrentFile { source_path: PathBuf },
+    MagnetLink { magnet_link: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AddIngressAction {
+    RelayRawWatchFile,
+    QueueControlRequest(ControlRequest),
+    ApplyDirectly {
+        payload: ResolvedAddPayload,
+        download_path: PathBuf,
+    },
+    OpenManualBrowser {
+        payload: ResolvedAddPayload,
+    },
+    Fail {
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, EnumIter)]
@@ -1137,8 +1192,9 @@ fn spawn_persistence_writer(
                         .map_err(|e| format!("Failed to auto-save network history state: {}", e))?;
                 }
                 if let Some(activity_history) = payload.activity_history {
-                    save_activity_history_state(&activity_history.state)
-                        .map_err(|e| format!("Failed to auto-save activity history state: {}", e))?;
+                    save_activity_history_state(&activity_history.state).map_err(|e| {
+                        format!("Failed to auto-save activity history state: {}", e)
+                    })?;
                 }
                 save_event_journal_state(&payload.event_journal_state)
                     .map_err(|e| format!("Failed to auto-save event journal state: {}", e))?;
@@ -1244,7 +1300,8 @@ impl App {
         {
             (None, None)
         } else {
-            let (persistence_tx, persistence_task) = spawn_persistence_writer(app_command_tx.clone());
+            let (persistence_tx, persistence_task) =
+                spawn_persistence_writer(app_command_tx.clone());
             (Some(persistence_tx), Some(persistence_task))
         };
 
@@ -1361,30 +1418,11 @@ impl App {
             ..Default::default()
         };
 
-        let mut watched_paths = Vec::new();
-        if let Some(host_watch_path) = resolve_host_watch_path(&client_configs) {
-            watched_paths.push(host_watch_path);
-        }
-        if shared_mode_enabled {
-            if let Some(shared_root) = shared_root_path() {
-                if !watched_paths.iter().any(|path| path == &shared_root) {
-                    watched_paths.push(shared_root);
-                }
-            }
-        }
-        if matches!(current_cluster_role, Some(AppClusterRole::Leader)) {
-            if let Some(shared_inbox) = shared_inbox_path() {
-                if !watched_paths.iter().any(|path| path == &shared_inbox) {
-                    watched_paths.push(shared_inbox);
-                }
-            }
-        } else if !shared_mode_enabled {
-            if let Some(command_watch_path) = resolve_command_watch_path(&client_configs) {
-                if !watched_paths.iter().any(|path| path == &command_watch_path) {
-                    watched_paths.push(command_watch_path);
-                }
-            }
-        }
+        let watched_paths = runtime_watch_paths(
+            &client_configs,
+            shared_mode_enabled,
+            matches!(current_cluster_role, Some(AppClusterRole::Leader)) || !shared_mode_enabled,
+        );
 
         let (notify_tx, notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
         let watcher = watcher::create_watcher(&watched_paths, true, notify_tx)?;
@@ -1468,15 +1506,28 @@ impl App {
     }
 
     pub fn is_current_shared_follower(&self) -> bool {
-        self.is_shared_mode_enabled() && matches!(self.current_cluster_role, Some(AppClusterRole::Follower))
+        self.is_shared_mode_enabled()
+            && matches!(self.current_cluster_role, Some(AppClusterRole::Follower))
+    }
+
+    fn cluster_capabilities(&self) -> ClusterCapabilities {
+        let is_shared_follower = self.is_current_shared_follower();
+        ClusterCapabilities {
+            can_write_shared_state: !is_shared_follower,
+            can_queue_shared_commands: self.is_shared_mode_enabled(),
+            can_edit_host_local_config: !self.is_shared_mode_enabled() || is_shared_follower,
+            can_persist_local_runtime_state: !is_shared_follower,
+            can_consume_shared_inbox: !self.is_shared_mode_enabled()
+                || self.is_current_shared_leader(),
+        }
     }
 
     fn can_run_leader_services(&self) -> bool {
-        !self.is_shared_mode_enabled() || self.is_current_shared_leader()
+        self.cluster_capabilities().can_consume_shared_inbox
     }
 
     fn can_write_shared_state(&self) -> bool {
-        !self.is_shared_mode_enabled() || self.is_current_shared_leader()
+        self.cluster_capabilities().can_write_shared_state
     }
 
     fn ensure_leader_services_running(&mut self) {
@@ -1541,32 +1592,11 @@ impl App {
     }
 
     fn desired_watch_paths_for_settings(&self, settings: &Settings) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        let push_unique = |paths: &mut Vec<PathBuf>, path: PathBuf| {
-            if !paths.iter().any(|existing| existing == &path) {
-                paths.push(path);
-            }
-        };
-
-        if let Some(host_watch_path) = resolve_host_watch_path(settings) {
-            push_unique(&mut paths, host_watch_path);
-        }
-        if self.shared_mode_enabled {
-            if let Some(shared_root) = shared_root_path() {
-                push_unique(&mut paths, shared_root);
-            }
-        }
-        if self.is_current_shared_leader() {
-            if let Some(shared_inbox) = shared_inbox_path() {
-                push_unique(&mut paths, shared_inbox);
-            }
-        } else if !self.shared_mode_enabled {
-            if let Some(command_watch_path) = resolve_command_watch_path(settings) {
-                push_unique(&mut paths, command_watch_path);
-            }
-        }
-
-        paths
+        runtime_watch_paths(
+            settings,
+            self.shared_mode_enabled,
+            self.cluster_capabilities().can_consume_shared_inbox,
+        )
     }
 
     fn reconcile_watched_paths(&mut self, settings: &Settings) {
@@ -1598,17 +1628,6 @@ impl App {
                 );
             }
         }
-    }
-
-    fn follower_update_is_host_local_only(
-        current_settings: &Settings,
-        new_settings: &Settings,
-    ) -> bool {
-        let mut new_without_host_changes = new_settings.clone();
-        new_without_host_changes.client_id = current_settings.client_id.clone();
-        new_without_host_changes.client_port = current_settings.client_port;
-        new_without_host_changes.watch_folder = current_settings.watch_folder.clone();
-        new_without_host_changes == *current_settings
     }
 
     fn control_priority_overrides(
@@ -1678,7 +1697,8 @@ impl App {
                 )
                 .as_bytes(),
             ));
-            let staged_path = staging_dir.join(format!("staged-{}-{}.torrent", now_ms, &hash[..12]));
+            let staged_path =
+                staging_dir.join(format!("staged-{}-{}.torrent", now_ms, &hash[..12]));
             fs::copy(&source_path, &staged_path).map_err(|error| {
                 format!(
                     "Failed to stage torrent file {:?} for leader processing: {}",
@@ -1713,10 +1733,353 @@ impl App {
         }
     }
 
+    fn resolve_add_payload(
+        &self,
+        source: IngestSource,
+        path: &Path,
+    ) -> Result<ResolvedAddPayload, String> {
+        match source {
+            IngestSource::TorrentFile => Ok(ResolvedAddPayload::TorrentFile {
+                source_path: path.to_path_buf(),
+            }),
+            IngestSource::TorrentPathFile => {
+                let payload = fs::read_to_string(path).map_err(|error| {
+                    format!(
+                        "Failed to read torrent path from file {:?}: {}",
+                        path, error
+                    )
+                })?;
+                Ok(ResolvedAddPayload::TorrentFile {
+                    source_path: PathBuf::from(payload.trim()),
+                })
+            }
+            IngestSource::MagnetFile => {
+                let payload = fs::read_to_string(path)
+                    .map_err(|error| format!("Failed to read magnet file {:?}: {}", path, error))?;
+                Ok(ResolvedAddPayload::MagnetLink {
+                    magnet_link: payload.trim().to_string(),
+                })
+            }
+        }
+    }
+
+    fn control_request_for_add_payload(
+        &self,
+        payload: &ResolvedAddPayload,
+        download_path: Option<PathBuf>,
+    ) -> Result<ControlRequest, String> {
+        match payload {
+            ResolvedAddPayload::TorrentFile { source_path } => self
+                .prepare_add_torrent_file_request(
+                    source_path.clone(),
+                    download_path,
+                    None,
+                    HashMap::new(),
+                ),
+            ResolvedAddPayload::MagnetLink { magnet_link } => Ok(self.prepare_add_magnet_request(
+                magnet_link.clone(),
+                download_path,
+                None,
+                HashMap::new(),
+            )),
+        }
+    }
+
+    fn resolve_add_ingress_action(&self, source: IngestSource, path: &Path) -> AddIngressAction {
+        let is_host_watch_path = self.is_host_watch_path(path);
+        let is_shared_inbox_path = self.is_shared_inbox_path(path);
+
+        if self.is_current_shared_follower()
+            && is_host_watch_path
+            && !matches!(source, IngestSource::TorrentPathFile)
+        {
+            return AddIngressAction::RelayRawWatchFile;
+        }
+
+        let payload = match self.resolve_add_payload(source, path) {
+            Ok(payload) => payload,
+            Err(message) => return AddIngressAction::Fail { message },
+        };
+
+        if self.is_current_shared_follower()
+            && !is_shared_inbox_path
+            && self.client_configs.default_download_folder.is_some()
+        {
+            return match self.control_request_for_add_payload(
+                &payload,
+                self.client_configs.default_download_folder.clone(),
+            ) {
+                Ok(request) => AddIngressAction::QueueControlRequest(request),
+                Err(message) => AddIngressAction::Fail { message },
+            };
+        }
+
+        if self.is_current_shared_follower()
+            && is_host_watch_path
+            && matches!(source, IngestSource::TorrentPathFile)
+        {
+            return AddIngressAction::Fail {
+                message: "Follower .path ingest requires a default download folder so the referenced torrent can be staged for leader processing.".to_string(),
+            };
+        }
+
+        if let Some(download_path) = self.client_configs.default_download_folder.clone() {
+            AddIngressAction::ApplyDirectly {
+                payload,
+                download_path,
+            }
+        } else {
+            AddIngressAction::OpenManualBrowser { payload }
+        }
+    }
+
+    fn should_archive_processed_ingest(&self, source: IngestSource, path: &Path) -> bool {
+        match source {
+            IngestSource::TorrentFile => {
+                self.is_host_watch_path(path) || self.is_shared_inbox_path(path)
+            }
+            IngestSource::TorrentPathFile | IngestSource::MagnetFile => true,
+        }
+    }
+
+    fn archive_processed_ingest(&self, source: IngestSource, path: &Path) {
+        if !self.should_archive_processed_ingest(source, path) {
+            return;
+        }
+
+        if let Err(error) = archive_watch_file(path, source.processed_archive_extension()) {
+            tracing_event!(
+                Level::WARN,
+                "Failed to archive processed ingest file {:?}: {}",
+                path,
+                error
+            );
+        }
+    }
+
+    fn open_manual_browser_for_torrent_file(&mut self, path: PathBuf) -> Result<(), String> {
+        let buffer = fs::read(&path).map_err(|_| "Failed to read torrent file.".to_string())?;
+        let torrent = from_bytes(&buffer)
+            .map_err(|_| "Failed to parse torrent file for preview.".to_string())?;
+
+        let final_path = if self.is_host_watch_path(&path) || self.is_shared_inbox_path(&path) {
+            let mut new_path = path.clone();
+            new_path.set_extension("torrent.added");
+            if let Err(error) = fs::rename(&path, &new_path) {
+                tracing::error!("Failed to rename watched file: {}", error);
+                path.clone()
+            } else {
+                new_path
+            }
+        } else {
+            path.clone()
+        };
+
+        let info_hash = if torrent.info.meta_version == Some(2) {
+            let mut hasher = Sha256::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize()[0..20].to_vec()
+        } else {
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        };
+
+        let info_hash_hex = hex::encode(&info_hash);
+        let default_container_name = format!("{} [{}]", torrent.info.name, info_hash_hex);
+        let file_list = torrent.file_list();
+        let should_enclose = file_list.len() > 1;
+        let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_list
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (parts, size))| {
+                (
+                    parts,
+                    TorrentPreviewPayload {
+                        file_index: Some(idx),
+                        size,
+                        priority: FilePriority::Normal,
+                    },
+                )
+            })
+            .collect();
+
+        let preview_tree = RawNode::from_path_list(None, preview_payloads);
+        let mut preview_state = TreeViewState::new();
+        for node in &preview_tree {
+            node.expand_all(&mut preview_state);
+        }
+
+        self.app_state.pending_torrent_path = Some(final_path);
+        let initial_path = self.get_initial_destination_path();
+
+        let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+            path: initial_path,
+            browser_mode: FileBrowserMode::DownloadLocSelection {
+                torrent_files: vec![],
+                container_name: default_container_name.clone(),
+                use_container: should_enclose,
+                is_editing_name: false,
+                preview_tree,
+                preview_state,
+                focused_pane: BrowserPane::FileSystem,
+                cursor_pos: 0,
+                original_name_backup: default_container_name,
+            },
+            highlight_path: None,
+        });
+        Ok(())
+    }
+
+    fn open_manual_browser_for_payload(
+        &mut self,
+        source: IngestSource,
+        payload: ResolvedAddPayload,
+    ) -> Result<(), String> {
+        match payload {
+            ResolvedAddPayload::TorrentFile { source_path } => {
+                if matches!(source, IngestSource::TorrentFile) {
+                    self.open_manual_browser_for_torrent_file(source_path)
+                } else {
+                    self.app_state.pending_torrent_path = Some(source_path);
+                    let initial_path = self.get_initial_destination_path();
+                    let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+                        path: initial_path,
+                        browser_mode: FileBrowserMode::DownloadLocSelection {
+                            torrent_files: vec![],
+                            container_name: "New Torrent".to_string(),
+                            use_container: true,
+                            is_editing_name: false,
+                            preview_tree: Vec::new(),
+                            preview_state: TreeViewState::default(),
+                            focused_pane: BrowserPane::FileSystem,
+                            cursor_pos: 0,
+                            original_name_backup: "New Torrent".to_string(),
+                        },
+                        highlight_path: None,
+                    });
+                    Ok(())
+                }
+            }
+            ResolvedAddPayload::MagnetLink { magnet_link } => {
+                self.app_state.pending_torrent_link = magnet_link;
+                let initial_path = self.get_initial_destination_path();
+                let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+                    path: initial_path,
+                    browser_mode: FileBrowserMode::DownloadLocSelection {
+                        torrent_files: vec![],
+                        container_name: "Magnet Download".to_string(),
+                        use_container: true,
+                        is_editing_name: false,
+                        preview_tree: Vec::new(),
+                        preview_state: TreeViewState::default(),
+                        focused_pane: BrowserPane::FileSystem,
+                        cursor_pos: 0,
+                        original_name_backup: "Magnet Download".to_string(),
+                    },
+                    highlight_path: None,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    async fn execute_add_ingress_action(
+        &mut self,
+        source: IngestSource,
+        path: PathBuf,
+        action: AddIngressAction,
+    ) {
+        match action {
+            AddIngressAction::RelayRawWatchFile => {
+                self.app_state.pending_ingest_by_path.remove(&path);
+                self.relay_local_watch_file(&path, source.relay_archive_extension());
+                self.save_state_to_disk();
+            }
+            AddIngressAction::QueueControlRequest(request) => {
+                if self.is_host_watch_path(&path) {
+                    self.app_state.pending_ingest_by_path.remove(&path);
+                }
+                if let Err(error) = self.dispatch_cluster_control_request(request).await {
+                    self.app_state.system_error = Some(error);
+                    self.app_state.ui.needs_redraw = true;
+                }
+                self.archive_processed_ingest(source, &path);
+            }
+            AddIngressAction::ApplyDirectly {
+                payload,
+                download_path,
+            } => {
+                let ingest_result = match payload {
+                    ResolvedAddPayload::TorrentFile { source_path } => {
+                        self.add_torrent_from_file(
+                            source_path,
+                            Some(download_path),
+                            false,
+                            TorrentControlState::Running,
+                            HashMap::new(),
+                            None,
+                        )
+                        .await
+                    }
+                    ResolvedAddPayload::MagnetLink { magnet_link } => {
+                        self.add_magnet_torrent(
+                            "Fetching name...".to_string(),
+                            magnet_link,
+                            Some(download_path),
+                            false,
+                            TorrentControlState::Running,
+                            HashMap::new(),
+                            None,
+                        )
+                        .await
+                    }
+                };
+                self.record_ingest_result(&path, &ingest_result);
+                self.save_state_to_disk();
+                self.archive_processed_ingest(source, &path);
+            }
+            AddIngressAction::OpenManualBrowser { payload } => {
+                if let Err(message) = self.open_manual_browser_for_payload(source, payload) {
+                    self.app_state.system_error = Some(message.clone());
+                    self.record_ingest_result(
+                        &path,
+                        &CommandIngestResult::Failed {
+                            info_hash: None,
+                            torrent_name: None,
+                            message,
+                        },
+                    );
+                    self.save_state_to_disk();
+                }
+                if !matches!(source, IngestSource::TorrentFile) {
+                    self.archive_processed_ingest(source, &path);
+                }
+            }
+            AddIngressAction::Fail { message } => {
+                tracing_event!(Level::ERROR, "{}", message);
+                self.app_state.system_error = Some(message.clone());
+                self.record_ingest_result(
+                    &path,
+                    &CommandIngestResult::Failed {
+                        info_hash: None,
+                        torrent_name: None,
+                        message,
+                    },
+                );
+                self.save_state_to_disk();
+                self.archive_processed_ingest(source, &path);
+            }
+        }
+    }
+
     fn queue_control_request_for_leader(
         &mut self,
         request: ControlRequest,
     ) -> Result<String, String> {
+        if !self.cluster_capabilities().can_queue_shared_commands {
+            return Err("Shared command queue is unavailable in this mode".to_string());
+        }
         let watch_path = resolve_command_watch_path(&self.client_configs)
             .ok_or_else(|| "Could not resolve the shared command inbox".to_string())?;
         let queued_path = write_control_request(&request, &watch_path)
@@ -1764,14 +2127,21 @@ impl App {
             return;
         };
 
-        tracing_event!(Level::INFO, "Acquired shared lock; promoting node to cluster leader.");
+        tracing_event!(
+            Level::INFO,
+            "Acquired shared lock; promoting node to cluster leader."
+        );
         self.app_lock_handle = Some(lock_handle);
         self.current_cluster_role = Some(AppClusterRole::Leader);
         self.runtime_mode = AppRuntimeMode::SharedLeader;
 
         if let Some(shared_inbox) = shared_inbox_path() {
             if let Err(error) = self.watch_path_if_needed(shared_inbox) {
-                tracing_event!(Level::WARN, "Failed to watch shared inbox after promotion: {}", error);
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to watch shared inbox after promotion: {}",
+                    error
+                );
             }
         }
 
@@ -1784,9 +2154,15 @@ impl App {
                 }
             }
             Err(error) => {
-                tracing_event!(Level::ERROR, "Failed to reload shared config after promotion: {}", error);
-                self.app_state.system_error =
-                    Some(format!("Failed to reload shared config after promotion: {}", error));
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to reload shared config after promotion: {}",
+                    error
+                );
+                self.app_state.system_error = Some(format!(
+                    "Failed to reload shared config after promotion: {}",
+                    error
+                ));
             }
         }
 
@@ -2307,14 +2683,16 @@ impl App {
             .torrents
             .iter()
             .filter_map(|torrent| {
-                info_hash_from_torrent_source(&torrent.torrent_or_magnet).map(|hash| (hash, torrent))
+                info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                    .map(|hash| (hash, torrent))
             })
             .collect();
         let new_by_hash: HashMap<Vec<u8>, &TorrentSettings> = new_settings
             .torrents
             .iter()
             .filter_map(|torrent| {
-                info_hash_from_torrent_source(&torrent.torrent_or_magnet).map(|hash| (hash, torrent))
+                info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                    .map(|hash| (hash, torrent))
             })
             .collect();
         let added_torrents: Vec<TorrentSettings> = new_by_hash
@@ -2380,7 +2758,6 @@ impl App {
                     }
                 }
             }
-
         }
 
         for info_hash in old_by_hash.keys() {
@@ -2465,362 +2842,19 @@ impl App {
     async fn handle_app_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::AddTorrentFromFile(path) => {
-                let is_watch_path =
-                    self.is_host_watch_path(&path) || self.is_shared_inbox_path(&path);
-
-                if self.is_current_shared_follower() && self.is_host_watch_path(&path) {
-                    self.app_state.pending_ingest_by_path.remove(&path);
-                    self.relay_local_watch_file(&path, "torrent.forwarded");
-                    self.save_state_to_disk();
-                    return;
-                }
-
-                if self.is_current_shared_follower()
-                    && !is_watch_path
-                    && self.client_configs.default_download_folder.is_some()
-                {
-                    let request = match self.prepare_add_torrent_file_request(
-                        path.clone(),
-                        self.client_configs.default_download_folder.clone(),
-                        None,
-                        HashMap::new(),
-                    ) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            self.app_state.system_error = Some(error);
-                            self.app_state.ui.needs_redraw = true;
-                            return;
-                        }
-                    };
-                    if let Err(error) = self.dispatch_cluster_control_request(request).await {
-                        self.app_state.system_error = Some(error);
-                        self.app_state.ui.needs_redraw = true;
-                    }
-                    return;
-                }
-
-                if let Some(download_path) = &self.client_configs.default_download_folder {
-                    // --- CASE A: Automatic Adding (Default Path Exists) ---
-                    let ingest_result = self
-                        .add_torrent_from_file(
-                            path.to_path_buf(),
-                            Some(download_path.to_path_buf()),
-                            false,
-                            TorrentControlState::Running,
-                            HashMap::new(),
-                            None,
-                        )
-                        .await;
-                    self.record_ingest_result(&path, &ingest_result);
-
-                    self.save_state_to_disk();
-
-                    if is_watch_path {
-                        if let Err(error) = archive_watch_file(&path, "torrent.added") {
-                            tracing_event!(
-                                Level::WARN,
-                                "Failed to archive processed torrent file {:?}: {}",
-                                &path,
-                                error
-                            );
-                        }
-                    }
-                } else {
-                    // --- CASE B: Manual Adding (Prompt for Location) ---
-                    if let Ok(buffer) = fs::read(&path) {
-                        if let Ok(torrent) = from_bytes(&buffer) {
-                            // 1. Rename the file immediately if it's in a watch folder
-                            // This prevents the watcher from re-triggering while the UI is open.
-                            let final_path = if is_watch_path {
-                                let mut new_path = path.clone();
-                                new_path.set_extension("torrent.added");
-                                if let Err(e) = fs::rename(&path, &new_path) {
-                                    tracing::error!("Failed to rename watched file: {}", e);
-                                    path.clone()
-                                } else {
-                                    new_path
-                                }
-                            } else {
-                                path.clone()
-                            };
-
-                            // 2. Parse metadata for the UI Preview
-                            let info_hash = if torrent.info.meta_version == Some(2) {
-                                let mut hasher = Sha256::new();
-                                hasher.update(&torrent.info_dict_bencode);
-                                hasher.finalize()[0..20].to_vec()
-                            } else {
-                                let mut hasher = sha1::Sha1::new();
-                                hasher.update(&torrent.info_dict_bencode);
-                                hasher.finalize().to_vec()
-                            };
-
-                            let info_hash_hex = hex::encode(&info_hash);
-                            let default_container_name =
-                                format!("{} [{}]", torrent.info.name, info_hash_hex);
-                            let file_list = torrent.file_list();
-                            let should_enclose = file_list.len() > 1;
-
-                            // 3. Build Preview Tree
-                            let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> =
-                                file_list
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(idx, (parts, size))| {
-                                        (
-                                            parts,
-                                            TorrentPreviewPayload {
-                                                file_index: Some(idx),
-                                                size,
-                                                priority: FilePriority::Normal,
-                                            },
-                                        )
-                                    })
-                                    .collect();
-
-                            let preview_tree = RawNode::from_path_list(None, preview_payloads);
-                            let mut preview_state = TreeViewState::new();
-                            for node in &preview_tree {
-                                node.expand_all(&mut preview_state);
-                            }
-
-                            // 4. Update state and switch to File Browser
-                            self.app_state.pending_torrent_path = Some(final_path);
-                            let initial_path = self.get_initial_destination_path();
-
-                            let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                path: initial_path,
-                                browser_mode: FileBrowserMode::DownloadLocSelection {
-                                    torrent_files: vec![],
-                                    container_name: default_container_name.clone(),
-                                    use_container: should_enclose,
-                                    is_editing_name: false,
-                                    preview_tree,
-                                    preview_state,
-                                    focused_pane: BrowserPane::FileSystem,
-                                    cursor_pos: 0,
-                                    original_name_backup: default_container_name,
-                                },
-                                highlight_path: None,
-                            });
-                        } else {
-                            self.app_state.system_error =
-                                Some("Failed to parse torrent file for preview.".to_string());
-                            self.record_ingest_result(
-                                &path,
-                                &CommandIngestResult::Invalid {
-                                    info_hash: None,
-                                    torrent_name: None,
-                                    message: "Failed to parse torrent file for preview."
-                                        .to_string(),
-                                },
-                            );
-                            self.save_state_to_disk();
-                        }
-                    } else {
-                        self.app_state.system_error =
-                            Some("Failed to read torrent file.".to_string());
-                        self.record_ingest_result(
-                            &path,
-                            &CommandIngestResult::Failed {
-                                info_hash: None,
-                                torrent_name: None,
-                                message: "Failed to read torrent file.".to_string(),
-                            },
-                        );
-                        self.save_state_to_disk();
-                    }
-                }
+                let action = self.resolve_add_ingress_action(IngestSource::TorrentFile, &path);
+                self.execute_add_ingress_action(IngestSource::TorrentFile, path, action)
+                    .await;
             }
             AppCommand::AddTorrentFromPathFile(path) => {
-                let is_host_watch_path = self.is_host_watch_path(&path);
-                if self.is_current_shared_follower() && is_host_watch_path {
-                    self.app_state.pending_ingest_by_path.remove(&path);
-                }
-
-                match fs::read_to_string(&path) {
-                    Ok(torrent_file_path_str) => {
-                        let torrent_file_path = PathBuf::from(torrent_file_path_str.trim());
-                        if self.is_current_shared_follower()
-                            && self.client_configs.default_download_folder.is_some()
-                        {
-                            match self.prepare_add_torrent_file_request(
-                                torrent_file_path,
-                                self.client_configs.default_download_folder.clone(),
-                                None,
-                                HashMap::new(),
-                            ) {
-                                Ok(request) => {
-                                    if let Err(error) =
-                                        self.dispatch_cluster_control_request(request).await
-                                    {
-                                        self.app_state.system_error = Some(error);
-                                        self.app_state.ui.needs_redraw = true;
-                                    }
-                                }
-                                Err(error) => {
-                                    self.app_state.system_error = Some(error);
-                                    self.app_state.ui.needs_redraw = true;
-                                }
-                            }
-                        } else if self.is_current_shared_follower() && is_host_watch_path {
-                            let message = "Follower .path ingest requires a default download folder so the referenced torrent can be staged for leader processing.".to_string();
-                            tracing_event!(Level::WARN, "{}", message);
-                            self.record_ingest_result(
-                                &path,
-                                &CommandIngestResult::Failed {
-                                    info_hash: None,
-                                    torrent_name: None,
-                                    message,
-                                },
-                            );
-                            self.save_state_to_disk();
-                        } else if let Some(download_path) =
-                            self.client_configs.default_download_folder.clone()
-                        {
-                            let ingest_result = self
-                                .add_torrent_from_file(
-                                    torrent_file_path,
-                                    Some(download_path),
-                                    false,
-                                    TorrentControlState::Running,
-                                    HashMap::new(),
-                                    None,
-                                )
-                                .await;
-                            self.record_ingest_result(&path, &ingest_result);
-                            self.save_state_to_disk();
-                        } else {
-                            self.app_state.pending_torrent_path = Some(torrent_file_path);
-                            let initial_path = self.get_initial_destination_path();
-
-                            let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                path: initial_path,
-                                browser_mode: FileBrowserMode::DownloadLocSelection {
-                                    torrent_files: vec![],
-                                    container_name: "New Torrent".to_string(),
-                                    use_container: true,
-                                    is_editing_name: false,
-                                    preview_tree: Vec::new(),
-                                    preview_state: TreeViewState::default(),
-                                    focused_pane: BrowserPane::FileSystem,
-                                    cursor_pos: 0,
-                                    original_name_backup: "New Torrent".to_string(),
-                                },
-                                highlight_path: None,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        let message =
-                            format!("Failed to read torrent path from file {:?}: {}", &path, e);
-                        tracing_event!(Level::ERROR, "{}", message);
-                        self.record_ingest_result(
-                            &path,
-                            &CommandIngestResult::Failed {
-                                info_hash: None,
-                                torrent_name: None,
-                                message,
-                            },
-                        );
-                        self.save_state_to_disk();
-                    }
-                }
-
-                if let Err(error) = archive_watch_file(&path, "path.added") {
-                    tracing_event!(
-                        Level::WARN,
-                        "Failed to archive processed path file {:?}: {}",
-                        &path,
-                        error
-                    );
-                }
+                let action = self.resolve_add_ingress_action(IngestSource::TorrentPathFile, &path);
+                self.execute_add_ingress_action(IngestSource::TorrentPathFile, path, action)
+                    .await;
             }
             AppCommand::AddMagnetFromFile(path) => {
-                if self.is_current_shared_follower() && self.is_host_watch_path(&path) {
-                    self.app_state.pending_ingest_by_path.remove(&path);
-                    self.relay_local_watch_file(&path, "magnet.forwarded");
-                    self.save_state_to_disk();
-                    return;
-                }
-
-                match fs::read_to_string(&path) {
-                    Ok(magnet_link) => {
-                        if self.is_current_shared_follower()
-                            && !self.is_shared_inbox_path(&path)
-                            && self.client_configs.default_download_folder.is_some()
-                        {
-                            let request = self.prepare_add_magnet_request(
-                                magnet_link.trim().to_string(),
-                                self.client_configs.default_download_folder.clone(),
-                                None,
-                                HashMap::new(),
-                            );
-                            if let Err(error) = self.dispatch_cluster_control_request(request).await
-                            {
-                                self.app_state.system_error = Some(error);
-                                self.app_state.ui.needs_redraw = true;
-                            }
-                        } else if let Some(download_path) =
-                            self.client_configs.default_download_folder.clone()
-                        {
-                            let ingest_result = self
-                                .add_magnet_torrent(
-                                    "Fetching name...".to_string(),
-                                    magnet_link.trim().to_string(),
-                                    Some(download_path),
-                                    false,
-                                    TorrentControlState::Running,
-                                    HashMap::new(),
-                                    None,
-                                )
-                                .await;
-                            self.record_ingest_result(&path, &ingest_result);
-                            self.save_state_to_disk();
-                        } else {
-                            self.app_state.pending_torrent_link = magnet_link;
-                            let initial_path = self.get_initial_destination_path();
-
-                            let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                path: initial_path,
-                                browser_mode: FileBrowserMode::DownloadLocSelection {
-                                    torrent_files: vec![],
-                                    container_name: "Magnet Download".to_string(),
-                                    use_container: true,
-                                    is_editing_name: false,
-                                    preview_tree: Vec::new(),
-                                    preview_state: TreeViewState::default(),
-                                    focused_pane: BrowserPane::FileSystem,
-                                    cursor_pos: 0,
-                                    original_name_backup: "Magnet Download".to_string(),
-                                },
-                                highlight_path: None,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        let message = format!("Failed to read magnet file {:?}: {}", &path, e);
-                        tracing_event!(Level::ERROR, "{}", message);
-                        self.record_ingest_result(
-                            &path,
-                            &CommandIngestResult::Failed {
-                                info_hash: None,
-                                torrent_name: None,
-                                message,
-                            },
-                        );
-                        self.save_state_to_disk();
-                    }
-                }
-
-                if let Err(error) = archive_watch_file(&path, "magnet.added") {
-                    tracing_event!(
-                        Level::ERROR,
-                        "Failed to archive processed magnet file {:?}: {}",
-                        &path,
-                        error
-                    );
-                }
+                let action = self.resolve_add_ingress_action(IngestSource::MagnetFile, &path);
+                self.execute_add_ingress_action(IngestSource::MagnetFile, path, action)
+                    .await;
             }
             AppCommand::SubmitControlRequest(request) => {
                 if let Err(error) = self.dispatch_cluster_control_request(request).await {
@@ -3078,27 +3112,30 @@ impl App {
                 apply_activity_history_persist_result(&mut self.app_state, request_id, success);
             }
             AppCommand::UpdateConfig(new_settings) => {
-                if self.is_current_shared_follower() {
-                    if Self::follower_update_is_host_local_only(
-                        &self.client_configs,
-                        &new_settings,
-                    ) {
-                        match crate::config::save_settings(&new_settings) {
-                            Ok(()) => self.apply_settings_update(new_settings, false).await,
-                            Err(error) => {
-                                self.app_state.system_error = Some(format!(
-                                    "Failed to save follower host-local settings: {}",
-                                    error
-                                ));
-                                self.app_state.ui.needs_redraw = true;
+                let capabilities = self.cluster_capabilities();
+                if capabilities.can_edit_host_local_config && self.is_current_shared_follower() {
+                    match classify_shared_mode_settings_change(&self.client_configs, &new_settings)
+                    {
+                        SettingsChangeScope::NoChange => {}
+                        SettingsChangeScope::HostOnly => {
+                            match crate::config::save_settings(&new_settings) {
+                                Ok(()) => self.apply_settings_update(new_settings, false).await,
+                                Err(error) => {
+                                    self.app_state.system_error = Some(format!(
+                                        "Failed to save follower host-local settings: {}",
+                                        error
+                                    ));
+                                    self.app_state.ui.needs_redraw = true;
+                                }
                             }
                         }
-                    } else {
-                        self.app_state.system_error = Some(
-                            "Shared configuration and RSS edits are leader-only while this node is a follower. Only host-local client ID, port, and watch-folder changes are allowed."
-                                .to_string(),
-                        );
-                        self.app_state.ui.needs_redraw = true;
+                        SettingsChangeScope::SharedOrMixed => {
+                            self.app_state.system_error = Some(
+                                "Shared configuration and RSS edits are leader-only while this node is a follower. Only host-local client ID, port, and watch-folder changes are allowed."
+                                    .to_string(),
+                            );
+                            self.app_state.ui.needs_redraw = true;
+                        }
                     }
                 } else {
                     self.apply_settings_update(new_settings, true).await;
@@ -3805,7 +3842,7 @@ impl App {
     }
 
     fn save_state_to_disk(&mut self) {
-        if self.is_current_shared_follower() {
+        if !self.cluster_capabilities().can_persist_local_runtime_state {
             return;
         }
 
@@ -4448,7 +4485,7 @@ impl App {
         torrent: &crate::torrent_file::Torrent,
         file_priorities: &HashMap<usize, FilePriority>,
     ) {
-        if self.is_current_shared_follower() {
+        if !self.cluster_capabilities().can_write_shared_state {
             return;
         }
 
@@ -4531,12 +4568,7 @@ impl App {
     }
 
     fn record_rss_queued(&mut self, path: PathBuf, origin: IngestOrigin, ingest_kind: IngestKind) {
-        if self.record_ingest_queued(
-            path,
-            origin,
-            ingest_kind,
-            shared_inbox_path(),
-        ) {
+        if self.record_ingest_queued(path, origin, ingest_kind, shared_inbox_path()) {
             self.save_state_to_disk();
         }
     }
@@ -4738,59 +4770,13 @@ impl App {
         });
     }
 
-    fn known_file_count_for_torrent(
-        &self,
-        info_hash: &[u8],
-        torrent_settings: &TorrentSettings,
-    ) -> Option<usize> {
-        self.app_state
-            .torrents
-            .get(info_hash)
-            .and_then(|torrent| torrent.latest_state.file_count)
-            .or_else(|| {
-                crate::control_service::load_torrent_file_list_for_settings(torrent_settings)
-                    .ok()
-                    .map(|files| files.len())
-            })
-    }
-
-    fn resolve_runtime_priority_file_index(
-        &self,
-        info_hash: &[u8],
-        torrent_settings: &TorrentSettings,
-        target: &ControlPriorityTarget,
-    ) -> Result<usize, String> {
-        match target {
-            ControlPriorityTarget::FileIndex(index) => {
-                if let Some(file_count) =
-                    self.known_file_count_for_torrent(info_hash, torrent_settings)
-                {
-                    if *index < file_count {
-                        Ok(*index)
-                    } else {
-                        Err(format!(
-                            "File index {} is out of range for torrent '{}' ({} files)",
-                            index, torrent_settings.name, file_count
-                        ))
-                    }
-                } else {
-                    Err("Unable to resolve file count for this torrent".to_string())
-                }
-            }
-            ControlPriorityTarget::FilePath(_) => {
-                resolve_priority_file_index(torrent_settings, target)
-            }
-        }
-    }
-
     async fn apply_control_request(&mut self, request: &ControlRequest) -> Result<String, String> {
-        match request {
-            ControlRequest::StatusNow => {
+        match plan_control_request(&self.client_configs, request)? {
+            ControlExecutionPlan::StatusNow => {
                 self.trigger_status_dump_now();
                 Ok("Wrote fresh status snapshot".to_string())
             }
-            ControlRequest::StatusFollowStart { interval_secs } => {
-                let interval_secs = (*interval_secs).max(1);
+            ControlExecutionPlan::StatusFollowStart { interval_secs } => {
                 self.set_runtime_status_dump_interval_override(Some(interval_secs));
                 self.trigger_status_dump_now();
                 Ok(format!(
@@ -4798,101 +4784,18 @@ impl App {
                     interval_secs
                 ))
             }
-            ControlRequest::StatusFollowStop => {
+            ControlExecutionPlan::StatusFollowStop => {
                 self.set_runtime_status_dump_interval_override(Some(0));
                 Ok("Stopped runtime status dumps".to_string())
             }
-            ControlRequest::Pause { info_hash_hex } => {
-                let info_hash = decode_info_hash(info_hash_hex)?;
-                let Some(index) =
-                    find_torrent_settings_index_by_info_hash(&self.client_configs, &info_hash)
-                else {
-                    return Err(format!("Torrent '{}' was not found", info_hash_hex));
-                };
-                let mut next_settings = self.client_configs.clone();
-                next_settings.torrents[index].torrent_control_state = TorrentControlState::Paused;
-                self.apply_settings_update(next_settings, true).await;
-                Ok(format!("Paused torrent '{}'", info_hash_hex))
-            }
-            ControlRequest::Resume { info_hash_hex } => {
-                let info_hash = decode_info_hash(info_hash_hex)?;
-                let Some(index) =
-                    find_torrent_settings_index_by_info_hash(&self.client_configs, &info_hash)
-                else {
-                    return Err(format!("Torrent '{}' was not found", info_hash_hex));
-                };
-                let mut next_settings = self.client_configs.clone();
-                next_settings.torrents[index].torrent_control_state = TorrentControlState::Running;
-                self.apply_settings_update(next_settings, true).await;
-                Ok(format!("Resumed torrent '{}'", info_hash_hex))
-            }
-            ControlRequest::Delete {
-                info_hash_hex,
-                delete_files,
+            ControlExecutionPlan::ApplySettings {
+                next_settings,
+                success_message,
             } => {
-                let info_hash = decode_info_hash(info_hash_hex)?;
-                let mut next_settings = self.client_configs.clone();
-                let Some(index) =
-                    find_torrent_settings_index_by_info_hash(&next_settings, &info_hash)
-                else {
-                    return Err(format!("Torrent '{}' was not found", info_hash_hex));
-                };
-
-                if *delete_files {
-                    next_settings.torrents[index].torrent_control_state =
-                        TorrentControlState::Deleting;
-                    next_settings.torrents[index].delete_files = true;
-                } else {
-                    next_settings.torrents.retain(|torrent| {
-                        info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
-                            != Some(info_hash.as_slice())
-                    });
-                }
                 self.apply_settings_update(next_settings, true).await;
-                Ok(if *delete_files {
-                    format!("Queued purge for torrent '{}'", info_hash_hex)
-                } else {
-                    format!("Removed torrent '{}'", info_hash_hex)
-                })
+                Ok(success_message)
             }
-            ControlRequest::SetFilePriority {
-                info_hash_hex,
-                target,
-                priority,
-            } => {
-                let info_hash = decode_info_hash(info_hash_hex)?;
-                let Some(index) =
-                    find_torrent_settings_index_by_info_hash(&self.client_configs, &info_hash)
-                else {
-                    return Err(format!("Torrent '{}' was not found", info_hash_hex));
-                };
-                let mut next_settings = self.client_configs.clone();
-                let torrent_settings = next_settings
-                    .torrents
-                    .get(index)
-                    .cloned()
-                    .ok_or_else(|| format!("Torrent '{}' was not found", info_hash_hex))?;
-                let file_index = self.resolve_runtime_priority_file_index(
-                    &info_hash,
-                    &torrent_settings,
-                    target,
-                )?;
-                if matches!(priority, FilePriority::Normal) {
-                    next_settings.torrents[index]
-                        .file_priorities
-                        .remove(&file_index);
-                } else {
-                    next_settings.torrents[index]
-                        .file_priorities
-                        .insert(file_index, *priority);
-                }
-                self.apply_settings_update(next_settings, true).await;
-                Ok(format!(
-                    "Set file priority for torrent '{}' at index {} to {:?}",
-                    info_hash_hex, file_index, priority
-                ))
-            }
-            ControlRequest::AddTorrentFile {
+            ControlExecutionPlan::AddTorrentFile {
                 source_path,
                 download_path,
                 container_name,
@@ -4901,14 +4804,14 @@ impl App {
                 let ingest_result = self
                     .add_torrent_from_file(
                         source_path.clone(),
-                        download_path.clone(),
+                        download_path,
                         false,
                         TorrentControlState::Running,
-                        file_priorities_to_map(file_priorities),
-                        container_name.clone(),
+                        file_priorities,
+                        container_name,
                     )
                     .await;
-                Self::cleanup_staged_add_file(source_path);
+                Self::cleanup_staged_add_file(&source_path);
                 if matches!(
                     ingest_result,
                     CommandIngestResult::Added { .. } | CommandIngestResult::Duplicate { .. }
@@ -4917,7 +4820,7 @@ impl App {
                 }
                 Self::map_add_result_to_control_response(ingest_result)
             }
-            ControlRequest::AddMagnet {
+            ControlExecutionPlan::AddMagnet {
                 magnet_link,
                 download_path,
                 container_name,
@@ -4926,12 +4829,12 @@ impl App {
                 let ingest_result = self
                     .add_magnet_torrent(
                         "Fetching name...".to_string(),
-                        magnet_link.clone(),
-                        download_path.clone(),
+                        magnet_link,
+                        download_path,
                         false,
                         TorrentControlState::Running,
-                        file_priorities_to_map(file_priorities),
-                        container_name.clone(),
+                        file_priorities,
+                        container_name,
                     )
                     .await;
                 if matches!(
@@ -5465,10 +5368,6 @@ fn compose_system_warning(
     }
 }
 
-pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
-    crate::torrent_identity::decode_info_hash(hash_string)
-}
-
 pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
     crate::torrent_identity::parse_hybrid_hashes(magnet_link)
 }
@@ -5820,8 +5719,8 @@ mod tests {
         queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppCommand, AppMode, AppState, CommandIngestResult,
-        AppRuntimeMode, FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
+        torrent_is_effectively_incomplete, App, AppCommand, AppMode, AppRuntimeMode, AppState,
+        CommandIngestResult, FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
         TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentSortColumn, UiState,
     };
     use crate::config::{clear_shared_config_state_for_tests, TorrentSettings};
@@ -7018,8 +6917,8 @@ mod tests {
         let next_settings = crate::config::Settings {
             client_port: app.client_configs.client_port,
             torrents: vec![crate::config::TorrentSettings {
-                torrent_or_magnet:
-                    "magnet:?xt=urn:btih:1111111111111111111111111111111111111111".to_string(),
+                torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+                    .to_string(),
                 name: "Sample Delta".to_string(),
                 torrent_control_state: TorrentControlState::Paused,
                 ..Default::default()

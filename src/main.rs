@@ -36,7 +36,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::config::Settings;
-use crate::config::{is_shared_config_mode, load_settings, resolve_command_watch_path, shared_lock_path};
+use crate::config::{
+    is_shared_config_mode, load_settings, resolve_command_watch_path, shared_lock_path,
+};
 use crate::control_service::{
     apply_offline_control_request, control_event_details, online_control_success_message,
 };
@@ -127,9 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance_already_running = lock_file_handle.is_none();
 
     if has_cli_request {
-        if let Err(error) =
-            process_cli_request(&cli, &loaded_settings, shared_mode, instance_already_running)
-        {
+        if let Err(error) = process_cli_request(
+            &cli,
+            &loaded_settings,
+            shared_mode,
+            instance_already_running,
+        ) {
             eprintln!("[Error] Application failed: {}", error);
             std::process::exit(1);
         }
@@ -174,7 +179,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("     Install and run it:");
             eprintln!("       cargo install superseedr --no-default-features");
             eprintln!("       superseedr");
-            eprintln!("\n  2. If you want to switch back to the NORMAL build (for public trackers):");
+            eprintln!(
+                "\n  2. If you want to switch back to the NORMAL build (for public trackers):"
+            );
             eprintln!("     Manually edit your configuration file:");
             eprintln!("       {}", config_path_str);
             eprintln!("     Change the line `private_client = true` to `private_client = false`");
@@ -306,14 +313,8 @@ fn process_cli_request(
     leader_is_running: bool,
 ) -> io::Result<()> {
     if let Some(direct_input) = &cli.input {
-        let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "Could not resolve the command watch path",
-            )
-        })?;
         tracing::info!("Processing direct input: {}", direct_input);
-        let command_path = write_input_command(direct_input, &watch_path)?;
+        let command_path = queue_direct_input_command(settings, direct_input)?;
         println!("Queued add command at {}", command_path.display());
         return Ok(());
     }
@@ -324,15 +325,9 @@ fn process_cli_request(
 
     match command {
         Commands::Add { inputs } => {
-            let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "Could not resolve the command watch path",
-                )
-            })?;
             for input in expand_add_inputs(inputs) {
                 tracing::info!("Processing Add subcommand input: {}", input);
-                let command_path = write_input_command(&input, &watch_path)?;
+                let command_path = queue_direct_input_command(settings, &input)?;
                 println!("Queued add command at {}", command_path.display());
             }
             Ok(())
@@ -362,14 +357,8 @@ fn process_cli_request(
                 println!("superseedr is not running.");
                 return Ok(());
             }
-            let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "Could not resolve the command watch path",
-                )
-            })?;
             tracing::info!("Processing StopClient command.");
-            let _ = write_stop_command(&watch_path)?;
+            let _ = queue_runtime_stop_command(settings)?;
             println!("Queued stop request.");
             Ok(())
         }
@@ -394,6 +383,48 @@ fn process_cli_request(
     }
 }
 
+fn resolve_cli_command_sink(settings: &Settings) -> io::Result<PathBuf> {
+    resolve_command_watch_path(settings).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not resolve the command watch path",
+        )
+    })
+}
+
+fn queue_direct_input_command(settings: &Settings, input: &str) -> io::Result<PathBuf> {
+    let watch_path = resolve_cli_command_sink(settings)?;
+    write_input_command(input, &watch_path)
+}
+
+fn queue_runtime_stop_command(settings: &Settings) -> io::Result<PathBuf> {
+    let watch_path = resolve_cli_command_sink(settings)?;
+    write_stop_command(&watch_path)
+}
+
+fn queue_control_request_command(
+    settings: &Settings,
+    request: &ControlRequest,
+) -> io::Result<PathBuf> {
+    let watch_path = resolve_cli_command_sink(settings)?;
+    write_control_command(request, &watch_path)
+}
+
+fn print_queued_control_message(
+    request: &ControlRequest,
+    shared_mode: bool,
+    leader_is_running: bool,
+) {
+    if shared_mode && !leader_is_running {
+        println!(
+            "Queued {} request pending leader availability.",
+            request.action_name()
+        );
+    } else {
+        println!("{}", online_control_success_message(request));
+    }
+}
+
 fn process_shared_status_request(
     settings: &Settings,
     request: &ControlRequest,
@@ -401,18 +432,16 @@ fn process_shared_status_request(
     _leader_is_running: bool,
 ) -> io::Result<()> {
     match request {
-        ControlRequest::StatusNow => {
-            match fs::read_to_string(status_file_path()?) {
-                Ok(json) => {
-                    println!("{}", json);
-                    Ok(())
-                }
-                Err(_) => {
-                    println!("{}", offline_output_json(settings)?);
-                    Ok(())
-                }
+        ControlRequest::StatusNow => match fs::read_to_string(status_file_path()?) {
+            Ok(json) => {
+                println!("{}", json);
+                Ok(())
             }
-        }
+            Err(_) => {
+                println!("{}", offline_output_json(settings)?);
+                Ok(())
+            }
+        },
         ControlRequest::StatusFollowStart { interval_secs } if stream => {
             let mut last_modified_at = status_file_modified_at()?;
             loop {
@@ -446,24 +475,17 @@ fn process_online_status_request(
     request: &ControlRequest,
     stream: bool,
 ) -> io::Result<()> {
-    let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "Could not resolve the command watch path",
-        )
-    })?;
-
     match request {
         ControlRequest::StatusNow => {
             let previous_modified_at = status_file_modified_at()?;
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             let json = wait_for_status_json_after(previous_modified_at, Duration::from_secs(15))?;
             println!("{}", json);
             Ok(())
         }
         ControlRequest::StatusFollowStart { interval_secs } if stream => {
             let mut last_modified_at = status_file_modified_at()?;
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             loop {
                 let json = wait_for_status_json_after(
                     last_modified_at,
@@ -475,7 +497,7 @@ fn process_online_status_request(
             }
         }
         ControlRequest::StatusFollowStart { interval_secs } => {
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             let status_path = status_file_path()?;
             println!(
                 "Set status output interval to {} seconds.\nStatus file: {}",
@@ -485,7 +507,7 @@ fn process_online_status_request(
             Ok(())
         }
         ControlRequest::StatusFollowStop => {
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             println!("Queued status streaming stop request.");
             Ok(())
         }
@@ -494,24 +516,17 @@ fn process_online_status_request(
 }
 
 fn process_online_control_request(settings: &Settings, request: &ControlRequest) -> io::Result<()> {
-    let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "Could not resolve the command watch path",
-        )
-    })?;
-
     match request {
         ControlRequest::StatusNow => {
             let previous_modified_at = status_file_modified_at()?;
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             let json = wait_for_status_json_after(previous_modified_at, Duration::from_secs(15))?;
             println!("{}", json);
             Ok(())
         }
         ControlRequest::StatusFollowStart { interval_secs } => {
             let mut last_modified_at = status_file_modified_at()?;
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             loop {
                 let json = wait_for_status_json_after(
                     last_modified_at,
@@ -523,12 +538,12 @@ fn process_online_control_request(settings: &Settings, request: &ControlRequest)
             }
         }
         ControlRequest::StatusFollowStop => {
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             println!("Queued status streaming stop request.");
             Ok(())
         }
         _ => {
-            let _ = write_control_command(request, &watch_path)?;
+            let _ = queue_control_request_command(settings, request)?;
             println!("{}", online_control_success_message(request));
             Ok(())
         }
@@ -540,22 +555,8 @@ fn process_shared_control_request(
     request: &ControlRequest,
     leader_is_running: bool,
 ) -> io::Result<()> {
-    let watch_path = resolve_command_watch_path(settings).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "Could not resolve the command watch path",
-        )
-    })?;
-
-    let _ = write_control_command(request, &watch_path)?;
-    if leader_is_running {
-        println!("{}", online_control_success_message(request));
-    } else {
-        println!(
-            "Queued {} request pending leader availability.",
-            request.action_name()
-        );
-    }
+    let _ = queue_control_request_command(settings, request)?;
+    print_queued_control_message(request, true, leader_is_running);
     Ok(())
 }
 
@@ -588,7 +589,6 @@ fn process_offline_control_request(
     println!("{}", message);
     Ok(())
 }
-
 
 fn record_offline_control_journal_entry(request: &ControlRequest, result: &Result<String, String>) {
     let mut journal = load_event_journal_state();

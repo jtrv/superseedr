@@ -54,7 +54,10 @@ pub fn processed_watch_destination(path: &Path) -> Option<PathBuf> {
 
 fn unique_relay_destination(source: &Path, destination_dir: &Path) -> io::Result<PathBuf> {
     let file_name = source.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "Relay source file has no file name")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Relay source file has no file name",
+        )
     })?;
     let candidate = destination_dir.join(file_name);
     if !candidate.exists() {
@@ -168,7 +171,10 @@ mod tests {
 
         let relayed = relay_watch_file_to_shared_inbox(&source).expect("relay watch file");
         assert!(!source.exists());
-        assert_eq!(fs::read_to_string(&relayed).expect("read relayed file"), "content");
+        assert_eq!(
+            fs::read_to_string(&relayed).expect("read relayed file"),
+            "content"
+        );
 
         if let Some(value) = original_shared_dir {
             std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);

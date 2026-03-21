@@ -11,6 +11,7 @@ use crate::torrent_file::parser::from_bytes;
 use crate::torrent_identity::{decode_info_hash, info_hash_from_torrent_source};
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
 pub fn find_torrent_settings_index_by_info_hash(
     settings: &Settings,
@@ -172,6 +173,155 @@ pub fn file_priorities_to_map(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlExecutionPlan {
+    StatusNow,
+    StatusFollowStart {
+        interval_secs: u64,
+    },
+    StatusFollowStop,
+    ApplySettings {
+        next_settings: Settings,
+        success_message: String,
+    },
+    AddTorrentFile {
+        source_path: PathBuf,
+        download_path: Option<PathBuf>,
+        container_name: Option<String>,
+        file_priorities: HashMap<usize, FilePriority>,
+    },
+    AddMagnet {
+        magnet_link: String,
+        download_path: Option<PathBuf>,
+        container_name: Option<String>,
+        file_priorities: HashMap<usize, FilePriority>,
+    },
+}
+
+pub fn plan_control_request(
+    settings: &Settings,
+    request: &ControlRequest,
+) -> Result<ControlExecutionPlan, String> {
+    match request {
+        ControlRequest::StatusNow => Ok(ControlExecutionPlan::StatusNow),
+        ControlRequest::StatusFollowStart { interval_secs } => {
+            Ok(ControlExecutionPlan::StatusFollowStart {
+                interval_secs: (*interval_secs).max(1),
+            })
+        }
+        ControlRequest::StatusFollowStop => Ok(ControlExecutionPlan::StatusFollowStop),
+        ControlRequest::Pause { info_hash_hex } => {
+            let info_hash = decode_info_hash(info_hash_hex)?;
+            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
+                return Err(format!("Torrent '{}' was not found", info_hash_hex));
+            };
+            let mut next_settings = settings.clone();
+            next_settings.torrents[index].torrent_control_state =
+                crate::app::TorrentControlState::Paused;
+            Ok(ControlExecutionPlan::ApplySettings {
+                next_settings,
+                success_message: format!("Paused torrent '{}'", info_hash_hex),
+            })
+        }
+        ControlRequest::Resume { info_hash_hex } => {
+            let info_hash = decode_info_hash(info_hash_hex)?;
+            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
+                return Err(format!("Torrent '{}' was not found", info_hash_hex));
+            };
+            let mut next_settings = settings.clone();
+            next_settings.torrents[index].torrent_control_state =
+                crate::app::TorrentControlState::Running;
+            Ok(ControlExecutionPlan::ApplySettings {
+                next_settings,
+                success_message: format!("Resumed torrent '{}'", info_hash_hex),
+            })
+        }
+        ControlRequest::Delete {
+            info_hash_hex,
+            delete_files,
+        } => {
+            let info_hash = decode_info_hash(info_hash_hex)?;
+            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
+                return Err(format!("Torrent '{}' was not found", info_hash_hex));
+            };
+            let mut next_settings = settings.clone();
+            if *delete_files {
+                next_settings.torrents[index].torrent_control_state =
+                    crate::app::TorrentControlState::Deleting;
+                next_settings.torrents[index].delete_files = true;
+            } else {
+                next_settings.torrents.retain(|torrent| {
+                    info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
+                        != Some(info_hash.as_slice())
+                });
+            }
+            Ok(ControlExecutionPlan::ApplySettings {
+                next_settings,
+                success_message: if *delete_files {
+                    format!("Queued purge for torrent '{}'", info_hash_hex)
+                } else {
+                    format!("Removed torrent '{}'", info_hash_hex)
+                },
+            })
+        }
+        ControlRequest::SetFilePriority {
+            info_hash_hex,
+            target,
+            priority,
+        } => {
+            let info_hash = decode_info_hash(info_hash_hex)?;
+            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
+                return Err(format!("Torrent '{}' was not found", info_hash_hex));
+            };
+            let mut next_settings = settings.clone();
+            let torrent_settings = next_settings
+                .torrents
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("Torrent '{}' was not found", info_hash_hex))?;
+            let file_index = resolve_priority_file_index(&torrent_settings, target)?;
+            if matches!(priority, FilePriority::Normal) {
+                next_settings.torrents[index]
+                    .file_priorities
+                    .remove(&file_index);
+            } else {
+                next_settings.torrents[index]
+                    .file_priorities
+                    .insert(file_index, *priority);
+            }
+            Ok(ControlExecutionPlan::ApplySettings {
+                next_settings,
+                success_message: format!(
+                    "Set file priority for torrent '{}' at index {} to {:?}",
+                    info_hash_hex, file_index, priority
+                ),
+            })
+        }
+        ControlRequest::AddTorrentFile {
+            source_path,
+            download_path,
+            container_name,
+            file_priorities,
+        } => Ok(ControlExecutionPlan::AddTorrentFile {
+            source_path: source_path.clone(),
+            download_path: download_path.clone(),
+            container_name: container_name.clone(),
+            file_priorities: file_priorities_to_map(file_priorities),
+        }),
+        ControlRequest::AddMagnet {
+            magnet_link,
+            download_path,
+            container_name,
+            file_priorities,
+        } => Ok(ControlExecutionPlan::AddMagnet {
+            magnet_link: magnet_link.clone(),
+            download_path: download_path.clone(),
+            container_name: container_name.clone(),
+            file_priorities: file_priorities_to_map(file_priorities),
+        }),
+    }
+}
+
 pub fn resolve_priority_file_index(
     torrent_settings: &TorrentSettings,
     target: &ControlPriorityTarget,
@@ -212,70 +362,20 @@ pub fn apply_offline_control_request(
     settings: &mut Settings,
     request: &ControlRequest,
 ) -> Result<String, String> {
-    match request {
-        ControlRequest::Pause { info_hash_hex } => {
-            let info_hash = decode_info_hash(info_hash_hex)?;
-            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            };
-            settings.torrents[index].torrent_control_state =
-                crate::app::TorrentControlState::Paused;
-            Ok(format!("Paused torrent '{}'", info_hash_hex))
+    match plan_control_request(settings, request)? {
+        ControlExecutionPlan::StatusNow
+        | ControlExecutionPlan::StatusFollowStart { .. }
+        | ControlExecutionPlan::StatusFollowStop => {
+            Err("Status commands require a running superseedr instance".to_string())
         }
-        ControlRequest::Resume { info_hash_hex } => {
-            let info_hash = decode_info_hash(info_hash_hex)?;
-            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            };
-            settings.torrents[index].torrent_control_state =
-                crate::app::TorrentControlState::Running;
-            Ok(format!("Resumed torrent '{}'", info_hash_hex))
-        }
-        ControlRequest::Delete {
-            info_hash_hex,
-            delete_files,
+        ControlExecutionPlan::ApplySettings {
+            next_settings,
+            success_message,
         } => {
-            let info_hash = decode_info_hash(info_hash_hex)?;
-            let initial_len = settings.torrents.len();
-            settings.torrents.retain(|torrent| {
-                info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
-                    != Some(info_hash.as_slice())
-            });
-            if settings.torrents.len() == initial_len {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            }
-            Ok(if *delete_files {
-                format!(
-                    "Removed torrent '{}' from desired state (payload purge not performed offline)",
-                    info_hash_hex
-                )
-            } else {
-                format!("Removed torrent '{}' (files kept)", info_hash_hex)
-            })
+            *settings = next_settings;
+            Ok(success_message)
         }
-        ControlRequest::SetFilePriority {
-            info_hash_hex,
-            target,
-            priority,
-        } => {
-            let info_hash = decode_info_hash(info_hash_hex)?;
-            let Some(index) = find_torrent_settings_index_by_info_hash(settings, &info_hash) else {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            };
-            let file_index = resolve_priority_file_index(&settings.torrents[index], target)?;
-            if matches!(priority, FilePriority::Normal) {
-                settings.torrents[index].file_priorities.remove(&file_index);
-            } else {
-                settings.torrents[index]
-                    .file_priorities
-                    .insert(file_index, *priority);
-            }
-            Ok(format!(
-                "Set file priority for torrent '{}' at index {} to {:?}",
-                info_hash_hex, file_index, priority
-            ))
-        }
-        ControlRequest::AddTorrentFile {
+        ControlExecutionPlan::AddTorrentFile {
             source_path,
             download_path,
             container_name,
@@ -289,9 +389,9 @@ pub fn apply_offline_control_request(
             settings.torrents.push(TorrentSettings {
                 torrent_or_magnet: source_path.to_string_lossy().to_string(),
                 name,
-                download_path: download_path.clone(),
-                container_name: container_name.clone(),
-                file_priorities: file_priorities_to_map(file_priorities),
+                download_path,
+                container_name,
+                file_priorities,
                 ..TorrentSettings::default()
             });
             Ok(format!(
@@ -299,33 +399,31 @@ pub fn apply_offline_control_request(
                 source_path.display()
             ))
         }
-        ControlRequest::AddMagnet {
+        ControlExecutionPlan::AddMagnet {
             magnet_link,
             download_path,
             container_name,
             file_priorities,
         } => {
             settings.torrents.push(TorrentSettings {
-                torrent_or_magnet: magnet_link.clone(),
+                torrent_or_magnet: magnet_link,
                 name: "Queued Magnet".to_string(),
-                download_path: download_path.clone(),
-                container_name: container_name.clone(),
-                file_priorities: file_priorities_to_map(file_priorities),
+                download_path,
+                container_name,
+                file_priorities,
                 ..TorrentSettings::default()
             });
             Ok("Queued magnet for the next runtime".to_string())
-        }
-        ControlRequest::StatusNow
-        | ControlRequest::StatusFollowStart { .. }
-        | ControlRequest::StatusFollowStop => {
-            Err("Status commands require a running superseedr instance".to_string())
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_offline_control_request, find_torrent_settings_index_by_info_hash};
+    use super::{
+        apply_offline_control_request, find_torrent_settings_index_by_info_hash,
+        plan_control_request, ControlExecutionPlan,
+    };
     use crate::config::{Settings, TorrentSettings};
     use crate::integrations::control::{ControlPriorityTarget, ControlRequest};
 
@@ -399,5 +497,52 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn control_plan_and_offline_apply_share_pause_and_purge_mutations() {
+        let mut settings = Settings {
+            torrents: vec![TorrentSettings {
+                torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+                    .to_string(),
+                name: "Sample Node".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let pause = ControlRequest::Pause {
+            info_hash_hex: "1111111111111111111111111111111111111111".to_string(),
+        };
+        match plan_control_request(&settings, &pause).expect("plan pause") {
+            ControlExecutionPlan::ApplySettings { next_settings, .. } => {
+                assert_eq!(
+                    next_settings.torrents[0].torrent_control_state,
+                    crate::app::TorrentControlState::Paused
+                );
+            }
+            other => panic!("unexpected plan: {:?}", other),
+        }
+
+        apply_offline_control_request(&mut settings, &pause).expect("apply pause");
+        assert_eq!(
+            settings.torrents[0].torrent_control_state,
+            crate::app::TorrentControlState::Paused
+        );
+
+        let purge = ControlRequest::Delete {
+            info_hash_hex: "1111111111111111111111111111111111111111".to_string(),
+            delete_files: true,
+        };
+        match plan_control_request(&settings, &purge).expect("plan purge") {
+            ControlExecutionPlan::ApplySettings { next_settings, .. } => {
+                assert_eq!(
+                    next_settings.torrents[0].torrent_control_state,
+                    crate::app::TorrentControlState::Deleting
+                );
+                assert!(next_settings.torrents[0].delete_files);
+            }
+            other => panic!("unexpected plan: {:?}", other),
+        }
     }
 }
