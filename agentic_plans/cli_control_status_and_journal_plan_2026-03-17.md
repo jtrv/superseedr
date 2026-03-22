@@ -1,167 +1,179 @@
 # CLI Control Commands, Status Streaming, And Command Journal
 
 ## Summary
-Add CLI support for `status`, `pause`, `resume`, `delete`, and `priority` while keeping the existing watch-folder architecture as the primary online control path. Fold in the current refactors needed for watch-path lifecycle and runtime status cadence, and extend the local event journal so CLI control requests are recorded alongside ingest/completion/health events.
+Add and validate the current CLI surface while keeping the watch-folder architecture as the primary online control path. The CLI now includes:
 
-Chosen defaults:
-- Torrent selector: info hash only
-- File-priority targeting: support both file index and relative path
-- Status behavior: one-shot by default, with optional `--follow`
-- Delete scope: remove from client/settings only; no file deletion in this phase
-- Offline behavior: hybrid
-  - when the app is running, use watch-folder control files
-  - when the app is not running, directly edit settings for `pause`, `resume`, `priority`, and `delete`
-  - `status` requires a running app
+- `status`
+- `pause`
+- `resume`
+- `remove`
+- `purge`
+- `priority`
+- `files`
+- `info`
+- `torrents`
+- `journal`
 
-## Findings To Fix As Part Of The Work
-- `output_status_interval` is captured once at startup, so runtime status enable/disable cannot work without refactoring the timer in `src/app.rs`.
-- Watcher reconfiguration only updates `settings.watch_folder`, not the full `configured_watch_paths()` set, so stale watch paths can remain active after config changes.
-- Only the legacy local watch/processed directories are created automatically; explicit `watch_folder` and `SUPERSEEDR_WATCH_PATH_*` paths are not bootstrapped.
-- These fixes are part of the feature work because the new CLI/status flow depends on them.
+The plan also covers the local event journal for control activity and the optional `--json` output envelope shared by all CLI commands.
 
-## Implementation Changes
-- Extend the CLI in `src/integrations/cli.rs`.
-  - Add subcommands:
-    - `status`
-    - `pause <info-hash>`
-    - `resume <info-hash>`
-    - `delete <info-hash>`
-    - `priority <info-hash> (--file-index <n> | --file-path <relative-path>) <normal|high|skip>`
-  - `status`
-    - default: request a fresh status dump and print raw JSON to stdout
-    - `--follow`: enable temporary 5-second status dumps for the current runtime and stream updates
-    - `--stop`: disable runtime status streaming
-- Add a structured online control-file format.
-  - Use a dedicated extension such as `.control`
-  - Typed JSON or TOML payload with an explicit `action`
-  - Supported actions:
-    - `status_now`
-    - `status_follow_start`
-    - `status_follow_stop`
-    - `pause`
-    - `resume`
-    - `delete`
-    - `set_file_priority`
-- Extend watcher parsing in `src/integrations/watcher.rs`.
-  - Map `.control` files to a new `AppCommand` carrying a parsed control request
-  - Keep processed-file cleanup consistent with other watched command files
-- Handle control requests inside the app using existing runtime semantics.
-  - `pause` / `resume`
-    - mutate persisted `torrent_control_state`
-    - update in-memory display state
-    - send `ManagerCommand::Pause` / `Resume` when active
-    - save state immediately
-  - `delete`
-    - remove the torrent from persisted settings/config only
-    - when running, converge through the existing manager shutdown/removal path without deleting files
-    - no `--with-files` behavior in this phase
-  - `priority`
-    - resolve torrent by info hash
-    - resolve file target by index or manifest-relative path
-    - update persisted `file_priorities`
-    - update in-memory torrent state
-    - send `ManagerCommand::SetUserTorrentConfig` when active
-    - save state immediately
-- Implement offline CLI behavior in `src/main.rs` / `src/integrations/cli.rs`.
-  - Detect whether the app is running using the existing single-instance/lock-file model
-  - If not running:
-    - `pause`, `resume`, `priority`, and `delete` load settings, mutate the target torrent, and save settings directly
-    - `status` returns a clear `requires running app` error
-  - If running:
-    - write a `.control` request to the command inbox and let the running app apply it
-- Refactor status dumping in `src/app.rs`.
-  - Replace the startup-captured `output_status_interval` with runtime-reschedulable state
-  - `status_now` triggers an immediate dump even when periodic status is disabled
-  - `status_follow_start` / `status_follow_stop` change cadence for the current runtime only
-  - Do not persist runtime status cadence changes in v1
-- Refactor watch-path lifecycle.
-  - Introduce one helper that diffs full `configured_watch_paths()` before and after config changes and applies watcher `watch/unwatch` updates
-  - Ensure all configured watch directories exist before watcher startup and before CLI writes
+## Current Defaults
+- Torrent selector:
+  - info hash by default
+  - unique payload-file-path reverse resolution for `purge` and `info`
+- File-priority targeting:
+  - file index
+  - manifest-relative path
+- Status behavior:
+  - one-shot by default
+  - `--follow` for streaming
+  - `--stop` to disable streaming
+- Output behavior:
+  - human-readable by default
+  - optional `--json` envelope on every CLI command
+- Remove behavior:
+  - removes the torrent from Superseedr
+  - keeps payload files
+- Purge behavior:
+  - removes the torrent from Superseedr
+  - deletes payload files only when the local file layout can be resolved safely
 
-## Event Journal Changes
-- Extend the local event journal to record CLI control activity.
-- Add a new low-frequency journal category for control operations.
-  - `EventCategory::Control`
-- Add new event types:
-  - `ControlQueued`
-  - `ControlApplied`
-  - `ControlFailed`
-- Add a small typed detail shape for control actions.
-  - action name: `status_now`, `status_follow_start`, `status_follow_stop`, `pause`, `resume`, `delete`, `set_file_priority`
-  - target info hash
-  - optional priority target info:
-    - file index
-    - relative path
-    - requested priority
-  - source origin:
-    - `CliOnline`
-    - `CliOffline`
-- Journal behavior:
-  - online CLI requests:
-    - append `ControlQueued` when the `.control` file is discovered
-    - append `ControlApplied` or `ControlFailed` when handled
-    - use a stable correlation id derived from the control-file path
-  - offline CLI requests:
-    - append a local journal entry directly when the CLI mutates settings
-    - record `ControlApplied` or `ControlFailed`
-    - no queued phase for offline direct mutations
-  - `status` operations should also journal:
-    - `status_now`
-    - `status_follow_start`
-    - `status_follow_stop`
-- Keep the journal local-only even in shared-config mode.
+## Implementation Notes
+- Online mutating commands still go through `.control` files and the watched command sink.
+- Offline mutating commands edit settings directly when safe.
+- Offline `purge` uses persisted metadata or a local `.torrent` source to build a delete plan.
+- `files`, `info`, and `torrents` are read-only local queries over settings plus persisted metadata.
+- `status` remains JSON-native; `--json` wraps it in the shared CLI envelope instead of changing the underlying status schema.
 
-## Public Interfaces
-- New CLI surface:
-  - `superseedr status`
-  - `superseedr status --follow`
-  - `superseedr status --stop`
-  - `superseedr pause <info-hash>`
-  - `superseedr resume <info-hash>`
-  - `superseedr delete <info-hash>`
-  - `superseedr priority <info-hash> (--file-index <n> | --file-path <relative-path>) <normal|high|skip>`
-- New internal watch-folder file type:
-  - `*.control`
-- New internal app command for parsed control requests
-- Event journal additions:
-  - `EventCategory::Control`
-  - `ControlQueued`
-  - `ControlApplied`
-  - `ControlFailed`
+## Output Contract
+All commands support optional `--json`.
+
+Success shape:
+
+```json
+{
+  "ok": true,
+  "command": "info",
+  "data": {}
+}
+```
+
+Failure shape:
+
+```json
+{
+  "ok": false,
+  "command": "info",
+  "error": "..."
+}
+```
+
+Read commands should keep stable field types. In particular:
+
+- `files` is always an array
+- `info.torrent.files` is always an array
+- `torrents[].files` is always an array
+- missing manifest/path data should be reported through sibling error fields, not by changing the type of `files`
+
+## Public CLI Surface
+- `superseedr status`
+- `superseedr status --follow`
+- `superseedr status --stop`
+- `superseedr torrents`
+- `superseedr info <info-hash-or-path>`
+- `superseedr files <info-hash>`
+- `superseedr pause <info-hash>`
+- `superseedr resume <info-hash>`
+- `superseedr remove <info-hash>`
+- `superseedr purge <info-hash-or-path>`
+- `superseedr priority <info-hash> (--file-index <n> | --file-path <relative-path>) <normal|high|skip>`
+- `superseedr journal`
+- optional `--json` on all of the above
+
+## Internal Control Actions
+The watch-folder `.control` path continues to carry:
+
+- `status_now`
+- `status_follow_start`
+- `status_follow_stop`
+- `pause`
+- `resume`
+- `delete`
+- `set_file_priority`
+
+Notes:
+
+- The user-facing split is `remove` vs `purge`.
+- The internal control action remains `delete` with `delete_files = false|true`.
+
+## Event Journal Expectations
+- `EventCategory::Control`
+- `ControlQueued`
+- `ControlApplied`
+- `ControlFailed`
+
+Control journal entries should record:
+
+- action name
+- target info hash
+- optional file-index or file-path targeting
+- CLI origin:
+  - `CliOnline`
+  - `CliOffline`
 
 ## Test Plan
-- CLI parsing tests
-  - all new subcommands parse correctly
-  - `priority` requires exactly one of `--file-index` or `--file-path`
-- Offline behavior tests
-  - offline `pause` / `resume` mutate and save settings correctly
-  - offline `priority` updates the correct file priority
-  - offline `delete` removes the torrent from settings
-  - offline `status` fails cleanly
-- Watcher/control-file tests
-  - `.control` files parse into the correct app command
-  - malformed control files are rejected safely
-- Online control tests
-  - `pause` / `resume` update persisted state and send manager commands
-  - `delete` removes the torrent without deleting payload files
-  - `priority` updates persisted state and sends `SetUserTorrentConfig`
-- Status tests
-  - `status_now` triggers an immediate JSON dump
-  - `status --follow` enables temporary 5-second runtime dumps
-  - `status --stop` disables them without restart
-- Event journal tests
-  - online control commands record `ControlQueued` then `ControlApplied`
-  - failed online control commands record `ControlFailed`
-  - offline direct settings mutations record control journal entries without a queued phase
-  - status actions are journaled
-- Refactor regression tests
-  - runtime watch-path updates diff the full `configured_watch_paths()` set
-  - configured watch directories are created before watcher use
-  - `resolve_command_watch_path(settings)` remains included in watched paths
+
+### CLI Parsing
+- All current subcommands parse correctly.
+- `priority` requires exactly one of `--file-index` or `--file-path`.
+- `purge` requires at least one target.
+- `info`, `files`, and `torrents` remain read-only and do not map to control requests.
+- Global `--json` parses before or after subcommands.
+
+### Offline Mutations
+- offline `pause` / `resume` mutate and save settings correctly
+- offline `priority` updates the correct file priority
+- offline `remove` removes the torrent from settings
+- offline `purge` deletes payload files and removes the torrent when paths are known
+- offline `purge` fails cleanly when manifest/path data is unavailable
+- offline failures still honor `--json`
+
+### Offline Read Commands
+- offline `status` returns an offline JSON snapshot
+- offline `files` returns manifest-relative paths and resolved full paths when available
+- offline `info` resolves by info hash
+- offline `info` resolves by unique payload file path
+- offline `torrents` lists every configured torrent with nested file manifests
+
+### Online Control Path
+- `.control` files parse into the correct app command
+- malformed control files are rejected safely
+- online `pause` / `resume` update persisted state and send manager commands
+- online `remove` removes the torrent without deleting payload files
+- online `purge` queues delete-with-files
+- online `priority` updates persisted state and sends `SetUserTorrentConfig`
+
+### Status
+- `status_now` triggers an immediate JSON dump
+- `status --follow` enables temporary runtime dumps
+- `status --stop` disables them without restart
+- `status --json` wraps the status payload in the shared CLI envelope
+
+### Structured Output
+- every command supports `--json`
+- `--json` successes use the common `{ ok, command, data }` shape
+- `--json` failures use the common `{ ok: false, command, error }` shape
+- failures before command dispatch, including settings-load failures, still honor `--json`
+- `files` remains an array field in `files`, `info`, and `torrents`
+
+### Event Journal
+- online control commands record `ControlQueued` then `ControlApplied`
+- failed online control commands record `ControlFailed`
+- offline direct settings mutations record control journal entries without a queued phase
+- status actions are journaled
 
 ## Assumptions
-- The existing watch-folder command architecture remains the primary online control mechanism; no socket or HTTP control plane is added.
-- Info hash is the only supported torrent selector in v1.
-- Relative-path priority targeting uses manifest-relative file paths, not absolute filesystem paths.
-- `status` prints raw JSON in v1; no parsed/pretty CLI presentation is added.
-- Delete in this phase means removal from Superseedr only; payload files are never deleted by the CLI.
+- The watch-folder control architecture remains the primary online control mechanism.
+- No socket or HTTP control plane is added in this phase.
+- Info hash remains the primary selector.
+- Payload-file-path reverse resolution is a convenience only for `purge` and `info`.
+- Relative-path priority targeting uses manifest-relative paths, not absolute filesystem paths.

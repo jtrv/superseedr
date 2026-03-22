@@ -17,11 +17,16 @@ This plan covers only the branch areas that added or materially changed:
   - `status`
   - `status --follow`
   - `status --stop`
+  - `torrents`
+  - `info`
+  - `files`
   - `pause`
   - `resume`
-  - `delete`
+  - `remove`
+  - `purge`
   - `priority`
   - `journal`
+  - optional `--json` output layer on all commands
 - Online command delivery through watch folders and `.control` files
 - Offline CLI behavior that edits settings directly
 - Layered shared-config mode
@@ -35,7 +40,7 @@ This plan covers only the branch areas that added or materially changed:
 
 Do not spend time on unrelated TUI-only feature validation unless it is directly required to unblock a CLI/shared-config scenario.
 
-Cross-host propagation between multiple simultaneously running local instances is out of scope for this automated plan. The normal local app data directory owns the lock file, so multi-instance live-sync coverage should be validated manually in a genuinely isolated environment.
+This automated plan is intentionally single-node. It validates one local Superseedr instance against a shared-config root and does not attempt simultaneous multi-instance coverage.
 
 ## Local Runtime Note
 Even in shared-config mode, several runtime artifacts remain in the normal local app data directory rather than under the scratch shared root. The agent must treat these as local runtime outputs and copy them into the scratch evidence directory when needed.
@@ -246,7 +251,7 @@ Failure notes:
 - If `status` works but file updates do not continue, classify as runtime follow bug.
 - If `--stop` is accepted but updates continue, classify as runtime stop bug.
 
-### Phase 3: Online CLI Pause/Resume/Priority/Delete
+### Phase 3: Online CLI Pause/Resume/Priority/Remove/Purge
 Use host A while it is running.
 
 1. From `status`, capture the `info_hash_hex` for `alpha` and `beta`.
@@ -258,10 +263,13 @@ Use host A while it is running.
 7. Validate persisted/configured file priority changed.
 8. Run `priority <alpha-hash> --file-index 0 normal`.
 9. Validate the override is removed or reset.
-10. Run `delete <beta-hash>`.
-11. Validate `beta` is removed from runtime and shared catalog.
-12. Run `superseedr journal`.
-13. Validate control entries include queued/applied records for the online actions.
+10. Run `remove <beta-hash>`.
+11. Validate `beta` is removed from runtime and shared catalog without deleting payload files.
+12. Re-seed or restore `beta` if needed for the next step.
+13. Run `purge <alpha-hash>` or `purge <path-to-alpha-payload-file>` while host A is running.
+14. Validate the queued control request is accepted and runtime begins delete-with-files handling.
+15. Run `superseedr journal`.
+16. Validate control entries include queued/applied records for the online actions.
 
 Pass criteria:
 - runtime state changes match each CLI action
@@ -271,22 +279,32 @@ Pass criteria:
 ### Phase 4: Offline CLI Behavior
 1. Stop host A cleanly.
 2. Run offline commands against the same shared root and host ID:
-   - `status`
-   - `pause <alpha-hash>`
-   - `resume <alpha-hash>`
-   - `priority <alpha-hash> --file-index 0 skip`
-   - `priority <alpha-hash> --file-index 0 normal`
+  - `status`
+  - `torrents`
+  - `info <alpha-hash>`
+  - `files <alpha-hash>`
+  - `pause <alpha-hash>`
+  - `resume <alpha-hash>`
+  - `priority <alpha-hash> --file-index 0 skip`
+  - `priority <alpha-hash> --file-index 0 normal`
+  - `remove <alpha-hash>`
+  - `purge <alpha-hash>` only if the scratch workspace preserves enough local file layout for an immediate offline purge
 3. After each mutation, inspect shared config files directly.
-4. Run `superseedr journal` and save output.
+4. Repeat one read command and one mutating command with `--json`.
+5. Run `superseedr journal` and save output.
 
 Expected behavior:
 - `status` should return offline JSON
-- pause/resume/priority should edit settings directly
+- `torrents`, `info`, and `files` should read local state directly
+- pause/resume/priority/remove should edit settings directly
+- offline `purge` should either delete data immediately or fail clearly if path resolution is unavailable
 - journal should record offline applied or failed entries
 
 Pass criteria:
 - offline mutations persist without a running daemon
 - offline status succeeds
+- offline read commands succeed
+- `--json` uses the common success envelope
 - journal evidence exists for offline actions
 
 ### Phase 5: Shared Config Live Remove Without Resurrection
@@ -355,6 +373,25 @@ Pass criteria:
 - CLI writes go to the primary command watch path
 - running daemon consumes the control file
 - processed artifact cleanup occurs
+
+### Phase 9: Structured Output Contract
+1. Run these commands with `--json`:
+   - `status`
+   - `journal`
+   - `torrents`
+   - `info <alpha-hash>`
+   - `files <alpha-hash>`
+   - one mutating command such as `pause <alpha-hash>`
+2. Save every JSON result as evidence.
+3. Validate:
+   - every response has top-level `ok`
+   - every success response has `command` and `data`
+   - every failure response has `command` and `error`
+   - `files` remains an array field inside `info` and `torrents`
+
+Pass criteria:
+- the JSON envelope is consistent across read and mutating commands
+- nested file manifests use stable field types
 
 ## Failure Classification
 Use these labels in the report:
