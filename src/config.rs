@@ -709,6 +709,11 @@ impl SharedSettingsConfig {
             .as_ref()
             .map(|path| resolve_shared_data_path(path, shared_root, "default_download_folder"))
             .transpose()?;
+        if settings.default_download_folder.is_none() {
+            if let Some(shared_root) = shared_root {
+                settings.default_download_folder = Some(shared_root.to_path_buf());
+            }
+        }
         settings.max_connected_peers = self.max_connected_peers;
         settings.bootstrap_nodes = self.bootstrap_nodes.clone();
         settings.global_download_limit_bps = self.global_download_limit_bps;
@@ -2386,6 +2391,41 @@ mod tests {
         let host: HostConfig =
             read_toml_or_default(&backend.paths.host_path).expect("read bootstrapped host file");
         assert_eq!(host, HostConfig::default());
+    }
+
+    #[test]
+    fn test_shared_backend_defaults_download_folder_to_mount_dir_when_unset() {
+        let _guard = shared_backend_guard().lock().unwrap();
+        clear_shared_config_state();
+        let dir = tempdir().expect("create tempdir");
+        let shared_root = dir.path().join("superseedr-config");
+        let backend = SharedConfigBackend {
+            paths: SharedConfigPaths {
+                mount_dir: dir.path().to_path_buf(),
+                root_dir: shared_root.clone(),
+                settings_path: shared_root.join("settings.toml"),
+                catalog_path: shared_root.join("catalog.toml"),
+                metadata_path: shared_root.join("torrent_metadata.toml"),
+                host_path: shared_root.join("hosts").join("node-a.toml"),
+                host_id: "node-a".to_string(),
+            },
+        };
+
+        fs::create_dir_all(&backend.paths.root_dir).expect("create shared root");
+        write_toml_atomically(
+            &backend.paths.settings_path,
+            &SharedSettingsConfig::default(),
+        )
+        .expect("seed shared settings");
+        write_toml_atomically(&backend.paths.host_path, &HostConfig::default())
+            .expect("seed host config");
+
+        let loaded = backend.load_settings().expect("load shared settings");
+
+        assert_eq!(
+            loaded.default_download_folder,
+            Some(dir.path().to_path_buf())
+        );
     }
 
     #[test]

@@ -387,8 +387,7 @@ fn process_cli_request(
             Ok(())
         }
         Commands::Journal => {
-            let raw = event_journal_json()?;
-            print_json_passthrough(output_mode, "journal", &raw)?;
+            process_journal_command(output_mode)?;
             Ok(())
         }
         Commands::Torrents => {
@@ -807,6 +806,52 @@ fn process_files_command(
     Ok(())
 }
 
+fn process_journal_command(output_mode: OutputMode) -> io::Result<()> {
+    match output_mode {
+        OutputMode::Json => {
+            let raw = event_journal_json()?;
+            print_json_passthrough(output_mode, "journal", &raw)
+        }
+        OutputMode::Text => {
+            let journal = load_event_journal_state();
+            if journal.entries.is_empty() {
+                println!("No journal entries.");
+                return Ok(());
+            }
+
+            for (index, entry) in journal.entries.iter().enumerate() {
+                if index > 0 {
+                    println!();
+                }
+
+                println!("#{} {} {:?}", entry.id, entry.ts_iso, entry.event_type);
+                println!("Category: {:?}", entry.category);
+                if let Some(host_id) = &entry.host_id {
+                    println!("Host: {}", host_id);
+                }
+                if let Some(torrent_name) = &entry.torrent_name {
+                    println!("Torrent: {}", torrent_name);
+                }
+                if let Some(info_hash_hex) = &entry.info_hash_hex {
+                    println!("Hash: {}", info_hash_hex);
+                }
+                if let Some(message) = &entry.message {
+                    println!("Message: {}", message);
+                }
+                if let Some(source_path) = &entry.source_path {
+                    println!("Source: {}", source_path.display());
+                }
+                if let Some(source_watch_folder) = &entry.source_watch_folder {
+                    println!("Watch Folder: {}", source_watch_folder.display());
+                }
+                println!("Details: {}", format_event_details(&entry.details));
+            }
+
+            Ok(())
+        }
+    }
+}
+
 fn process_torrents_command(settings: &Settings, output_mode: OutputMode) -> Result<(), String> {
     if settings.torrents.is_empty() {
         print_success(
@@ -904,6 +949,53 @@ fn print_torrent_details(settings: &Settings, torrent: &crate::config::TorrentSe
             Err(error) => println!("  <unavailable: {}>", error),
         },
         None => println!("  <unavailable: info hash could not be derived>"),
+    }
+}
+
+fn format_event_details(details: &crate::persistence::event_journal::EventDetails) -> String {
+    match details {
+        crate::persistence::event_journal::EventDetails::None => "none".to_string(),
+        crate::persistence::event_journal::EventDetails::Ingest {
+            origin,
+            ingest_kind,
+        } => format!("ingest origin={origin:?} kind={ingest_kind:?}"),
+        crate::persistence::event_journal::EventDetails::DataHealth {
+            issue_count,
+            issue_files,
+        } => {
+            if issue_files.is_empty() {
+                format!("data_health issue_count={issue_count}")
+            } else {
+                format!(
+                    "data_health issue_count={} files={}",
+                    issue_count,
+                    issue_files.join(", ")
+                )
+            }
+        }
+        crate::persistence::event_journal::EventDetails::Control {
+            origin,
+            action,
+            target_info_hash_hex,
+            file_index,
+            file_path,
+            priority,
+        } => {
+            let mut parts = vec![format!("control origin={origin:?} action={action}")];
+            if let Some(target) = target_info_hash_hex {
+                parts.push(format!("target={target}"));
+            }
+            if let Some(file_index) = file_index {
+                parts.push(format!("file_index={file_index}"));
+            }
+            if let Some(file_path) = file_path {
+                parts.push(format!("file_path={file_path}"));
+            }
+            if let Some(priority) = priority {
+                parts.push(format!("priority={priority}"));
+            }
+            parts.join(" ")
+        }
     }
 }
 
