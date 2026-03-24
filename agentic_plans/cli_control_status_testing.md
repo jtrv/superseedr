@@ -224,17 +224,10 @@ After launch, verify:
 
 ## Asset Reuse Rules
 
-- Prefer repo-local reusable fixtures over ad hoc generated assets.
-- Before creating any new torrent fixtures or payload files, inspect the repository for reusable assets such as:
-  - existing `.torrent` fixtures
-  - sample payload files
-  - integration or fixture directories
-  - test assets referenced by docs, scripts, or existing tests
-- If reusable assets exist, use them first and record exactly which files were used.
-- If reusable assets do not exist or are insufficient, create temporary artifacts only under `./tmp/`.
+- Prefer `integration_tests/` over any other source when suitable torrent or payload fixtures exist there.
+- Only fall back to other repo-local fixture directories if `integration_tests/` is absent or insufficient.
+- Only generate temporary fixtures under `./tmp/` if the repository does not already contain suitable reusable assets.
 - Do not place ad hoc test torrents or payload data elsewhere in the repository.
-- If the repo contains an `integration_tests`, `fixtures`, `testdata`, `samples`, or similar folder, prefer those assets over generated ones.
-- If no fixture folder exists, note that in the final report and continue using `./tmp`-generated assets.
 
 ## Branch Surface Summary
 
@@ -327,8 +320,15 @@ If concurrent two-node coverage is not available, the agent should still complet
 
 ## Test Data To Prepare
 
-Prepare or collect:
+Do not create ad hoc torrent or payload fixtures first.
 
+First, inspect the repository for reusable test assets and use them in this order:
+
+1. `integration_tests/`
+2. other repo-local fixture directories such as `fixtures/`, `testdata/`, or `samples/`
+3. temporary assets created under `./tmp/` only if the repo does not already contain suitable fixtures
+
+Required asset types:
 - 2 working magnet links
 - 2 valid `.torrent` files
   - one single-file
@@ -336,14 +336,17 @@ Prepare or collect:
 - one `.path` input referencing a valid `.torrent`
 - one bad `.path`
 - one malformed magnet input
-- one torrent with multiple files for priority
-- one torrent with payload on disk for purge
-- one shared root directory at `./tmp`
+- one torrent with multiple files for `priority`
+- one torrent with payload on disk for `purge`
 
-Fixture sourcing order:
-1. repo-local reusable assets
-2. documented sample assets referenced by the branch
-3. temporary assets created under `./tmp`
+If `integration_tests/` contains suitable `.torrent` files or payload/data fixtures, reuse those assets instead of generating new ones.
+
+If `integration_tests/` does not exist or does not contain enough suitable assets, record that fact in the report and then create temporary fixtures only under `./tmp/`.
+
+For every test that uses a torrent or payload fixture, record:
+- whether it came from `integration_tests/`
+- the exact source path
+- whether it was reused or generated
 
 Default shared root for this plan:
 
