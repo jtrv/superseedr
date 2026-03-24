@@ -46,9 +46,10 @@ use crate::control_service::{
     online_control_success_message, resolve_purge_target_info_hash, resolve_target_info_hash,
 };
 use crate::integrations::cli::{
-    command_to_control_requests, expand_add_inputs, require_cli_targets, status_control_request,
-    status_file_modified_at, status_should_stream, wait_for_status_json_after,
-    write_control_command, write_input_command, write_stop_command, Cli, Commands,
+    command_to_control_requests_with_resolver, expand_add_inputs, require_cli_targets,
+    status_control_request, status_file_modified_at, status_should_stream,
+    wait_for_status_json_after, write_control_command, write_input_command, write_stop_command,
+    Cli, Commands,
 };
 use crate::integrations::control::{ControlPriorityTarget, ControlRequest};
 use crate::integrations::status::{offline_output_json, status_file_path};
@@ -527,8 +528,8 @@ fn process_cli_request(
         Commands::Info { target } => {
             process_info_command(settings, target, output_mode).map_err(io::Error::other)
         }
-        Commands::Files { info_hash } => {
-            process_files_command(settings, info_hash, output_mode).map_err(io::Error::other)
+        Commands::Files { target } => {
+            process_files_command(settings, target, output_mode).map_err(io::Error::other)
         }
         Commands::Status { .. } => {
             let request = status_control_request(command)
@@ -599,7 +600,9 @@ fn process_cli_request(
             Ok(())
         }
         _ => {
-            let requests = command_to_control_requests(command)
+            let requests = command_to_control_requests_with_resolver(command, |target, command_name| {
+                resolve_target_info_hash(settings, target, command_name)
+            })
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "Unsupported command")
@@ -901,10 +904,11 @@ fn process_offline_control_request(
 
 fn process_files_command(
     settings: &Settings,
-    info_hash_hex: &str,
+    target: &str,
     output_mode: OutputMode,
 ) -> Result<(), String> {
-    let files = list_torrent_files(settings, info_hash_hex)?;
+    let info_hash_hex = resolve_target_info_hash(settings, target, "files")?;
+    let files = list_torrent_files(settings, &info_hash_hex)?;
     if files.is_empty() {
         return Err(format!(
             "Torrent '{}' does not have any persisted file entries",
@@ -1471,7 +1475,7 @@ mod tests {
             json: false,
             input: None,
             command: Some(Commands::Pause {
-                info_hashes: vec!["1111111111111111111111111111111111111111".to_string()],
+                targets: vec!["1111111111111111111111111111111111111111".to_string()],
             }),
         };
 

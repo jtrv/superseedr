@@ -53,28 +53,28 @@ pub enum Commands {
         interval: Option<u64>,
     },
     Pause {
-        #[arg(value_name = "INFO_HASH_HEX")]
-        info_hashes: Vec<String>,
+        #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
+        targets: Vec<String>,
     },
     Resume {
-        #[arg(value_name = "INFO_HASH_HEX")]
-        info_hashes: Vec<String>,
+        #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
+        targets: Vec<String>,
     },
     Remove {
-        #[arg(value_name = "INFO_HASH_HEX")]
-        info_hashes: Vec<String>,
+        #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
+        targets: Vec<String>,
     },
     Purge {
         #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
         targets: Vec<String>,
     },
     Files {
-        #[arg(value_name = "INFO_HASH_HEX")]
-        info_hash: String,
+        #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
+        target: String,
     },
     Priority {
-        #[arg(value_name = "INFO_HASH_HEX")]
-        info_hash: String,
+        #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
+        target: String,
         #[arg(long, conflicts_with = "file_path")]
         file_index: Option<usize>,
         #[arg(long, conflicts_with = "file_index")]
@@ -175,22 +175,41 @@ pub fn write_stop_command(watch_path: &Path) -> io::Result<PathBuf> {
 pub fn command_to_control_requests(
     command: &Commands,
 ) -> Result<Option<Vec<ControlRequest>>, String> {
+    command_to_control_requests_with_resolver(command, |target, _| Ok(target.to_string()))
+}
+
+pub fn command_to_control_requests_with_resolver<F>(
+    command: &Commands,
+    mut resolve_target: F,
+) -> Result<Option<Vec<ControlRequest>>, String>
+where
+    F: FnMut(&str, &str) -> Result<String, String>,
+{
     match command {
         Commands::Status { .. } => Ok(Some(vec![status_control_request(command)?])),
-        Commands::Pause { info_hashes } => Ok(Some(
-            require_info_hash_hexes(info_hashes, "pause")?
+        Commands::Pause { targets } => Ok(Some(
+            require_cli_targets(targets, "pause")?
+                .into_iter()
+                .map(|target| resolve_target(&target, "pause"))
+                .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(|info_hash_hex| ControlRequest::Pause { info_hash_hex })
                 .collect(),
         )),
-        Commands::Resume { info_hashes } => Ok(Some(
-            require_info_hash_hexes(info_hashes, "resume")?
+        Commands::Resume { targets } => Ok(Some(
+            require_cli_targets(targets, "resume")?
+                .into_iter()
+                .map(|target| resolve_target(&target, "resume"))
+                .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(|info_hash_hex| ControlRequest::Resume { info_hash_hex })
                 .collect(),
         )),
-        Commands::Remove { info_hashes } => Ok(Some(
-            require_info_hash_hexes(info_hashes, "remove")?
+        Commands::Remove { targets } => Ok(Some(
+            require_cli_targets(targets, "remove")?
+                .into_iter()
+                .map(|target| resolve_target(&target, "remove"))
+                .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(|info_hash_hex| ControlRequest::Delete {
                     info_hash_hex,
@@ -199,11 +218,12 @@ pub fn command_to_control_requests(
                 .collect(),
         )),
         Commands::Priority {
-            info_hash,
+            target,
             file_index,
             file_path,
             priority,
         } => {
+            let info_hash_hex = resolve_target(target, "priority")?;
             let target = if let Some(file_index) = file_index {
                 ControlPriorityTarget::FileIndex(*file_index)
             } else if let Some(file_path) = file_path {
@@ -213,7 +233,7 @@ pub fn command_to_control_requests(
             };
 
             Ok(Some(vec![ControlRequest::SetFilePriority {
-                info_hash_hex: info_hash.clone(),
+                info_hash_hex,
                 target,
                 priority: (*priority).into(),
             }]))
@@ -274,25 +294,6 @@ pub fn command_to_control_request(command: &Commands) -> Result<Option<ControlRe
         }
         None => Ok(None),
     }
-}
-
-fn require_info_hash_hexes(values: &[String], command_name: &str) -> Result<Vec<String>, String> {
-    let hashes = values
-        .iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if hashes.is_empty() {
-        return Err(format!(
-            "Missing INFO_HASH_HEX for `superseedr {}`. Get it from `superseedr status` and use the `info_hash_hex` field. Example: `superseedr {} 7f3a9c2d4e1b8a6f0d5c3b2a1908e7d6c5b4a321`",
-            command_name, command_name
-        ));
-    }
-
-    Ok(hashes)
 }
 
 pub fn require_cli_targets(values: &[String], command_name: &str) -> Result<Vec<String>, String> {
@@ -509,7 +510,7 @@ mod tests {
     #[test]
     fn priority_requires_one_target() {
         let command = Commands::Priority {
-            info_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            target: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             file_index: None,
             file_path: None,
             priority: CliPriority::High,
@@ -544,14 +545,14 @@ mod tests {
     }
 
     #[test]
-    fn remove_without_info_hash_returns_helpful_error() {
+    fn remove_without_target_returns_helpful_error() {
         let error = command_to_control_request(&Commands::Remove {
-            info_hashes: Vec::new(),
+            targets: Vec::new(),
         })
-        .expect_err("missing hash should fail");
-        assert!(error.contains("Missing INFO_HASH_HEX"));
-        assert!(error.contains("superseedr status"));
-        assert!(error.contains("info_hash_hex"));
+        .expect_err("missing target should fail");
+        assert!(error.contains("Missing target"));
+        assert!(error.contains("INFO_HASH_HEX"));
+        assert!(error.contains("file path"));
     }
 
     #[test]
@@ -575,7 +576,7 @@ mod tests {
     #[test]
     fn remove_command_supports_multiple_hashes() {
         let requests = command_to_control_requests(&Commands::Remove {
-            info_hashes: vec![
+            targets: vec![
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ],
@@ -616,18 +617,41 @@ mod tests {
 
         match parsed.command.expect("subcommand") {
             Commands::Priority {
-                info_hash,
+                target,
                 file_index,
                 file_path,
                 priority,
             } => {
-                assert_eq!(info_hash, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                assert_eq!(target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
                 assert_eq!(file_index, Some(0));
                 assert_eq!(file_path, None);
                 assert_eq!(priority, CliPriority::Skip);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolved_pause_command_supports_file_lookup() {
+        let requests = command_to_control_requests_with_resolver(
+            &Commands::Pause {
+                targets: vec!["C:/seedbox/downloads/sample.bin".to_string()],
+            },
+            |target, command_name| {
+                assert_eq!(target, "C:/seedbox/downloads/sample.bin");
+                assert_eq!(command_name, "pause");
+                Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string())
+            },
+        )
+        .expect("map pause commands")
+        .expect("requests");
+
+        assert_eq!(
+            requests,
+            vec![ControlRequest::Pause {
+                info_hash_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()
+            }]
+        );
     }
 
     #[test]
