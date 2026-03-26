@@ -1556,6 +1556,18 @@ pub fn get_app_paths() -> Option<(PathBuf, PathBuf)> {
     }
 }
 
+pub fn app_config_dir() -> Option<PathBuf> {
+    get_app_paths().map(|(config_dir, _)| config_dir)
+}
+
+pub fn local_runtime_data_dir() -> Option<PathBuf> {
+    get_app_paths().map(|(_, data_dir)| data_dir)
+}
+
+pub fn local_settings_path() -> Option<PathBuf> {
+    app_config_dir().map(|config_dir| config_dir.join("settings.toml"))
+}
+
 pub fn effective_shared_config_selection() -> io::Result<Option<SharedConfigSelection>> {
     resolve_shared_config_selection()
 }
@@ -1657,7 +1669,7 @@ pub fn runtime_data_dir() -> Option<PathBuf> {
         return Some(host_dir);
     }
 
-    get_app_paths().map(|(_, data_dir)| data_dir)
+    local_runtime_data_dir()
 }
 
 pub fn runtime_log_dir() -> Option<PathBuf> {
@@ -1666,6 +1678,10 @@ pub fn runtime_log_dir() -> Option<PathBuf> {
 
 pub fn runtime_persistence_dir() -> Option<PathBuf> {
     runtime_data_dir().map(|data_dir| data_dir.join("persistence"))
+}
+
+pub fn local_lock_path() -> Option<PathBuf> {
+    local_runtime_data_dir().map(|data_dir| data_dir.join("superseedr.lock"))
 }
 
 pub fn shared_cluster_revision_path() -> Option<PathBuf> {

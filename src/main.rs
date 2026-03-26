@@ -211,9 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("\nThis safety check prevents accidental use of forbidden features on private trackers.");
 
             let config_path_str = config::shared_settings_path()
-                .or_else(|| {
-                    config::get_app_paths().map(|(config_dir, _)| config_dir.join("settings.toml"))
-                })
+                .or_else(config::local_settings_path)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unable to determine config path.".to_string());
 
@@ -331,10 +329,13 @@ fn get_lock_path() -> Option<PathBuf> {
         return shared_lock_path();
     }
 
-    let base_data_dir = config::get_app_paths()
-        .map(|(_, data_dir)| data_dir)
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    Some(base_data_dir.join("superseedr.lock"))
+    config::local_lock_path().or_else(|| {
+        Some(
+            env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("superseedr.lock"),
+        )
+    })
 }
 
 fn try_acquire_app_lock() -> io::Result<Option<File>> {

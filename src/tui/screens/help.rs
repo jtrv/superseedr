@@ -3,9 +3,8 @@
 
 use crate::app::{AppMode, AppState};
 use crate::config::{
-    get_app_paths, is_shared_config_mode, resolve_host_watch_path, runtime_log_dir,
-    shared_inbox_path,
-    shared_settings_path, Settings,
+    is_shared_config_mode, local_settings_path, resolve_host_watch_path, runtime_log_dir,
+    shared_inbox_path, shared_settings_path, Settings,
 };
 use crate::theme::ThemeContext;
 use crate::tui::formatters::{centered_rect, truncate_with_ellipsis};
@@ -20,8 +19,7 @@ fn display_path_or_disabled(path: Option<std::path::PathBuf>) -> String {
 }
 
 fn build_help_footer_entries(settings: &Settings) -> Vec<(&'static str, String)> {
-    let log_path_str = get_app_paths()
-        .and_then(|_| runtime_log_dir())
+    let log_path_str = runtime_log_dir()
         .map(|path| path.join("app.log"))
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown location".to_string());
@@ -47,8 +45,7 @@ fn build_help_footer_entries(settings: &Settings) -> Vec<(&'static str, String)>
             ),
         ]
     } else {
-        let settings_path_str = get_app_paths()
-            .map(|(config_dir, _)| config_dir.join("settings.toml"))
+        let settings_path_str = local_settings_path()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown location".to_string());
         let watch_path_str = crate::config::get_watch_path()
