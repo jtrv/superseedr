@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -64,7 +64,7 @@ jobs:
 
       - name: Upload interop artifacts
         if: always() && steps.select_mode.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: interop-artifacts-${{ matrix.scenario }}-${{ matrix.mode }}-${{ github.run_id }}
           path: integration_tests/artifacts/
